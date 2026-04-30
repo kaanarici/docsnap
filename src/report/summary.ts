@@ -40,8 +40,10 @@ export function buildSummary(
 			kind: record.failureKind,
 		});
 	}
+	const reached = maxReached(config, discovered);
 
 	return {
+		status: runStatus(written, failed, lowQuality, reached),
 		seedUrl: config.seedUrl,
 		outDir: config.outDir,
 		dryRun: config.dryRun,
@@ -51,7 +53,8 @@ export function buildSummary(
 		renderedFiles: snapshot.files,
 		renderedBytes: snapshot.bytes,
 		max: config.max,
-		maxReached: maxReached(config, discovered),
+		maxAppliesTo: config.maxExplicit ? "all" : "non-llms",
+		maxReached: reached,
 		discovered,
 		deduped,
 		written,
@@ -75,4 +78,14 @@ function maxReached(config: Config, discovered: number) {
 	return config.maxExplicit
 		? discovered >= config.max
 		: discovered === config.max;
+}
+
+function runStatus(
+	written: number,
+	failed: number,
+	lowQuality: number,
+	maxReached: boolean,
+) {
+	if (written === 0) return "failed";
+	return failed || lowQuality || maxReached ? "partial" : "ok";
 }

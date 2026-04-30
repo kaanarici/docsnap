@@ -52,6 +52,7 @@ Prefer focused reads for large files. Use frontmatter URLs when you need to cite
 - Pages written: ${summary.written}
 - Failed: ${summary.failed}
 - Low quality: ${summary.lowQuality}
+- Page limit: ${summary.max} (${summary.maxAppliesTo})
 - Page limit reached: ${summary.maxReached ? `yes, stopped at ${summary.max}; this capture may be incomplete` : "no"}
 - Failure kinds: ${failureKinds(summary)}
 - Snapshot root: ${summary.rootHash}

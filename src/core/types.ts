@@ -24,6 +24,9 @@ export type FailureKind = (typeof failureKinds)[number];
 
 export const lowQualityConfidence = 0.6;
 
+export type RunStatus = "ok" | "partial" | "failed";
+export type MaxAppliesTo = "all" | "non-llms";
+
 export type Config = {
 	seedUrl: string;
 	outDir: string;
@@ -116,6 +119,7 @@ export type PageFailure = PageBase & {
 export type PageRecord = PageSuccess | PageFailure;
 
 export type RunSummary = {
+	status: RunStatus;
 	seedUrl: string;
 	outDir: string;
 	dryRun: boolean;
@@ -125,6 +129,7 @@ export type RunSummary = {
 	renderedFiles: number;
 	renderedBytes: number;
 	max: number;
+	maxAppliesTo: MaxAppliesTo;
 	maxReached: boolean;
 	discovered: number;
 	deduped: number;

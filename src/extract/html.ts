@@ -151,11 +151,33 @@ function renderTextAsset(title: string, body: string, url: string) {
 }
 
 async function parseWithDefuddle(document: Document, url: string) {
+	const restore = silenceDefuddleErrors();
 	try {
 		return await Defuddle(document, url, { markdown: true, debug: false });
 	} catch {
 		return undefined;
+	} finally {
+		restore();
 	}
+}
+
+let defuddleCalls = 0;
+const consoleError = console.error.bind(console);
+
+function silenceDefuddleErrors() {
+	if (defuddleCalls++ === 0) {
+		console.error = (...args) => {
+			const first = String(args[0] ?? "");
+			const second = String(args[1] ?? "");
+			if (first === "Defuddle" && second === "Error processing document:")
+				return;
+			consoleError(...args);
+		};
+	}
+	return () => {
+		defuddleCalls--;
+		if (defuddleCalls === 0) console.error = consoleError;
+	};
 }
 
 function failedRecord(

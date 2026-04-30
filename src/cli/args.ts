@@ -1,7 +1,12 @@
 import { cpus } from "node:os";
 import type { Config } from "../core/types.ts";
 
-const defaultConcurrency = Math.min(64, Math.max(16, cpus().length * 6));
+const cpuCount = cpus().length;
+const defaultConcurrency = Math.min(64, Math.max(16, cpuCount * 6));
+const defaultPerOrigin = Math.min(
+	defaultConcurrency,
+	Math.max(8, Math.ceil(cpuCount * 1.5)),
+);
 const valueFlags = new Set([
 	"-o",
 	"--out",
@@ -31,7 +36,7 @@ Flags:
   -h, --help                show help
 
 Examples:
-  docsnap https://docs.trynia.ai -o nia-docs --clean --json
+  docsnap https://docs.example.com -o vendor-docs --clean --json
   docsnap https://fly.io/docs/ -m 100 --concurrency 24
   echo https://docs.peel.sh | docsnap --stdin --json
   docsnap https://example.com --dry-run --json
@@ -69,6 +74,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
 		quiet: false,
 	};
 	let outProvided = false;
+	let concurrencyProvided = false;
 
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i]!;
@@ -82,9 +88,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
 		} else if (arg === "-m" || arg === "--max") {
 			config.max = readInt(argv, ++i, arg);
 			config.maxExplicit = true;
-		} else if (arg === "--concurrency")
+		} else if (arg === "--concurrency") {
 			config.concurrency = readInt(argv, ++i, arg);
-		else if (arg === "--clean") config.clean = true;
+			concurrencyProvided = true;
+		} else if (arg === "--clean") config.clean = true;
 		else if (arg === "--dry-run") config.dryRun = true;
 		else if (arg === "--agent-files") config.agentFiles = true;
 		else if (arg === "--json") config.json = true;
@@ -107,7 +114,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
 	if (config.max < 1) throw new Error("--max must be at least 1");
 	if (config.concurrency < 1)
 		throw new Error("--concurrency must be at least 1");
-	config.perOrigin = config.concurrency;
+	config.perOrigin = concurrencyProvided
+		? config.concurrency
+		: Math.min(config.concurrency, defaultPerOrigin);
 	return config;
 }
 

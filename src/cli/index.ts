@@ -86,15 +86,9 @@ function runOk(summary: RunSummary, config: Config) {
 }
 
 function jsonResult(summary: RunSummary, config: Config, ok: boolean) {
-	const status =
-		summary.written === 0
-			? "failed"
-			: summary.failed || summary.lowQuality || summary.maxReached
-				? "partial"
-				: "ok";
 	return {
 		ok,
-		status,
+		status: summary.status,
 		seedUrl: summary.seedUrl,
 		outDir: summary.outDir,
 		dryRun: summary.dryRun,
@@ -110,6 +104,7 @@ function jsonResult(summary: RunSummary, config: Config, ok: boolean) {
 		failed: summary.failed,
 		lowQuality: summary.lowQuality,
 		max: summary.max,
+		maxAppliesTo: summary.maxAppliesTo,
 		maxReached: summary.maxReached,
 		discovered: summary.discovered,
 		deduped: summary.deduped,

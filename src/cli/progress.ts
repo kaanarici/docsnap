@@ -10,6 +10,9 @@ export function printSummary(summary: RunSummary): void {
 	note(
 		`docsnap: ${summary.written} pages ${summary.dryRun ? "found" : `written to ${summary.outDir}`} in ${seconds}s`,
 	);
+	if (summary.maxAppliesTo === "non-llms" && summary.written > summary.max) {
+		note(`docsnap: llms.txt corpus included ${summary.written} pages`);
+	}
 	if (summary.maxReached) {
 		note(
 			`docsnap: page limit reached; rerun with -m ${summary.max * 2} for more`,

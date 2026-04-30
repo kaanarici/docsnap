@@ -3,7 +3,7 @@ import type { DiscoveredUrl, DiscoverySource } from "../core/types.ts";
 import { dropFragmentAndQuery } from "../core/url.ts";
 
 export const ignoredExtension =
-	/\.(png|jpe?g|gif|svg|webp|ico|pdf|zip|tar|gz|mp4|mp3|wav|woff2?|ttf|eot|css|js|mjs|map|rss|atom)$/i;
+	/\.(png|jpe?g|gif|svg|webp|ico|pdf|epub|zip|tar|gz|mp4|mp3|wav|woff2?|ttf|eot|css|js|mjs|map|rss|atom)$/i;
 
 export function normalizeUrl(
 	raw: string,
@@ -15,6 +15,7 @@ export function normalizeUrl(
 		dropFragmentAndQuery(url);
 		url.pathname = url.pathname.replace(/\/{2,}/g, "/");
 		if (!url.pathname) url.pathname = "/";
+		if (isNonPageUrl(url)) return;
 		return url.href;
 	} catch {
 		return;
@@ -80,4 +81,13 @@ export function sameScopeLinks(markdown: string, base: string): string[] {
 
 function cleanTextLink(value: string) {
 	return value.replace(/[.,;:!?]+$/g, "");
+}
+
+function isNonPageUrl(url: URL) {
+	return (
+		/%3c|%3e|[<>]/i.test(url.pathname) ||
+		/%7b|%7d|[{}]/i.test(url.pathname) ||
+		/(?:^|\/)(?:%3a|:)[^/]+/i.test(url.pathname) ||
+		/(?:^|\/)(?:robots\.txt|sitemap[^/]*\.xml)$/i.test(url.pathname)
+	);
 }

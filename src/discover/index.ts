@@ -28,6 +28,15 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 		inputScope,
 		config,
 	);
+	if (
+		inputScope !== "/" &&
+		llmsOut.length <= Math.min(config.max, 3) &&
+		substantivePages(llmsOut) < 2
+	) {
+		const root = `${inputUrl.origin}/`;
+		const rootLlmsOut = await discoverLlmsCorpus(root, root, "/", config);
+		if (rootLlmsOut.length > llmsOut.length) return rootLlmsOut;
+	}
 	if (inputScope === "/" ? llmsOut.length > 0 : hasCorpus(llmsOut, config))
 		return llmsOut;
 	const seedResponse = await fetchText(inputSeed, config);
@@ -140,6 +149,13 @@ function hasCorpus(out: DiscoveredUrl[], config: Config) {
 	return out.length >= Math.min(config.max, config.maxExplicit ? 3 : 2);
 }
 
+function substantivePages(out: DiscoveredUrl[]) {
+	return out.filter((item) => {
+		const path = new URL(item.url).pathname;
+		return !/(^|\/)llms(?:-[^/]+)?\.(?:md|txt)$/i.test(path);
+	}).length;
+}
+
 function usesRootFallback(seed: string, inputSeed: string) {
 	const url = new URL(seed);
 	const input = new URL(inputSeed);
@@ -184,7 +200,6 @@ function parentScopes(scope: string) {
 	for (let i = parts.length - 1; i >= 1; i--) {
 		scopes.push(`/${parts.slice(0, i).join("/")}/`);
 	}
-	if (parts.length > 0) scopes.push("/");
 	return scopes;
 }
 
@@ -277,11 +292,11 @@ function inCorpus(
 }
 
 function corpusTarget(seed: string, urls: string[]) {
-	const seedOrigin = new URL(seed).origin;
+	const seedUrl = new URL(seed);
 	const byOrigin = new Map<string, URL[]>();
 	for (const raw of urls) {
 		const url = new URL(raw);
-		if (url.origin === seedOrigin) continue;
+		if (url.origin === seedUrl.origin) continue;
 		const group = byOrigin.get(url.origin) ?? [];
 		group.push(url);
 		byOrigin.set(url.origin, group);
@@ -289,10 +304,21 @@ function corpusTarget(seed: string, urls: string[]) {
 	const best = [...byOrigin.entries()].sort(
 		(a, b) => b[1].length - a[1].length,
 	)[0];
-	if (!best || best[1].length < 5) return undefined;
+	if (
+		!best ||
+		best[1].length < 5 ||
+		(!mostlyCorpusFiles(best[1]) &&
+			!relatedHost(seedUrl.hostname, new URL(best[0]).hostname))
+	)
+		return undefined;
 	const scope = commonScope(best[1]);
-	if (scope === "/" && !mostlyCorpusFiles(best[1])) return undefined;
 	return { origin: best[0], scope };
+}
+
+function relatedHost(left: string, right: string) {
+	return (
+		left === right || left.endsWith(`.${right}`) || right.endsWith(`.${left}`)
+	);
 }
 
 function commonScope(urls: URL[]) {

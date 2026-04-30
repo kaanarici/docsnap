@@ -20,7 +20,6 @@ export function cleanMarkdown(markdown: string): string {
 			if (closesFence(line, fence)) fence = undefined;
 			continue;
 		}
-
 		const component = componentLine(line);
 		if (component) {
 			if (component.kind === "close")
