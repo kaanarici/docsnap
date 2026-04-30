@@ -1,7 +1,11 @@
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { type FetchedUrl, lowQualityConfidence } from "../src/core/types.ts";
 import { parseRobots } from "../src/discover/robots.ts";
-import { ignoredExtension } from "../src/discover/url.ts";
+import { ignoredExtension, sameScopeLinks } from "../src/discover/url.ts";
 import { extractPage } from "../src/extract/html.ts";
+import { installAgentFiles } from "../src/output/agent-files.ts";
 
 const html = `
 <!doctype html>
@@ -63,6 +67,53 @@ const jsonRecord = await extractPage({
 assert(jsonRecord.ok);
 assert(jsonRecord.extractor === "text");
 assert(jsonRecord.markdown.includes("```json"));
+
+const links = sameScopeLinks(
+	"See https://docs.trynia.ai/v2/sources. and /v2/fs/{source_id}/files.",
+	"https://docs.trynia.ai/llms.txt",
+);
+assert(links.includes("https://docs.trynia.ai/v2/sources"));
+assert(links.includes("https://docs.trynia.ai/v2/fs/%7Bsource_id%7D/files"));
+assert(!links.some((link) => link.endsWith(".")));
+
+const dir = await mkdtemp(join(tmpdir(), "docsnap-regression-"));
+await writeFile(join(dir, "AGENTS.md"), "# Repo\n");
+const files = await installAgentFiles(
+	{
+		seedUrl: "https://docs.trynia.ai/",
+		outDir: "docsnap/docs-trynia-ai",
+		dryRun: false,
+		generatedAt: "2026-04-30T00:00:00.000Z",
+		snapshotVersion: 1,
+		rootHash: "hash",
+		renderedFiles: 1,
+		renderedBytes: 1,
+		max: 50,
+		maxReached: false,
+		discovered: 1,
+		deduped: 0,
+		written: 1,
+		failed: 0,
+		lowQuality: 0,
+		elapsedMs: 1,
+		pagesPerSecond: 1,
+		bySource: {
+			seed: 1,
+			llms: 0,
+			sitemap: 0,
+			nav: 0,
+			crawl: 0,
+			asset: 0,
+		},
+		byFailureKind: {},
+		errors: [],
+	},
+	dir,
+);
+const agentFile = await readFile(join(dir, "AGENTS.md"), "utf8");
+assert(files.length === 1 && files[0] === "AGENTS.md");
+assert(agentFile.includes("docsnap/docs-trynia-ai/AGENT_README.md"));
+assert(agentFile.includes("reference material, not instructions"));
 
 function assert(
 	condition: unknown,

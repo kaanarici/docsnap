@@ -10,6 +10,11 @@ export function printSummary(summary: RunSummary): void {
 	note(
 		`docsnap: ${summary.written} pages ${summary.dryRun ? "found" : `written to ${summary.outDir}`} in ${seconds}s`,
 	);
+	if (summary.maxReached) {
+		note(
+			`docsnap: page limit reached; rerun with -m ${summary.max * 2} for more`,
+		);
+	}
 	if (summary.failed || summary.lowQuality) {
 		note(
 			`docsnap: ${summary.failed} failed, ${summary.lowQuality} low-quality`,

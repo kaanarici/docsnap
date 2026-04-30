@@ -21,10 +21,10 @@ bun add -g docsnap
 ```bash
 docsnap <url>
 docsnap <url> -o <dir> -m <count>
-echo https://example.com/docs | docsnap --stdin --json --quiet
+echo https://example.com/docs | docsnap --stdin --json
 ```
 
-Output defaults to `docsnap/<site>`. Point your agent at `AGENT_README.md` inside that directory.
+Output defaults to `docsnap/<site>`. Point your agent at `AGENT_README.md` inside that directory, or pass `--agent-files` to link it from existing `AGENTS.md` and `CLAUDE.md` files.
 
 ```bash
 -o, --out <dir>         output directory, default docsnap/<site>
@@ -32,7 +32,8 @@ Output defaults to `docsnap/<site>`. Point your agent at `AGENT_README.md` insid
 --concurrency <n>      fetch concurrency, CPU-scaled default
 --clean                remove the output directory before writing
 --dry-run              discover and extract without writing files
---json                 print one machine-readable result to stdout
+--agent-files          update existing AGENTS.md/CLAUDE.md files
+--json                 print one machine-readable result
 --quiet                suppress progress logs
 --stdin                read the URL from stdin
 --ignore-robots        bypass robots.txt rules

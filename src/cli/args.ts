@@ -20,7 +20,8 @@ Flags:
   --concurrency <n>         fetch concurrency, default ${defaultConcurrency}
   --clean                   remove output dir before writing
   --dry-run                 run without writing files
-  --json                    print one machine-readable result to stdout
+  --agent-files             update existing AGENTS.md/CLAUDE.md files
+  --json                    print one machine-readable result
   --quiet                   suppress progress logs
   --stdin                   read the URL from stdin
   --ignore-robots           bypass robots.txt rules
@@ -32,7 +33,7 @@ Flags:
 Examples:
   docsnap https://docs.trynia.ai -o nia-docs --clean --json
   docsnap https://fly.io/docs/ -m 100 --concurrency 24
-  echo https://docs.peel.sh | docsnap --stdin --json --quiet
+  echo https://docs.peel.sh | docsnap --stdin --json
   docsnap https://example.com --dry-run --json
   docsnap https://example.com --fail-on-low-quality`;
 
@@ -57,9 +58,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
 		perOrigin: defaultConcurrency,
 		clean: false,
 		dryRun: false,
+		agentFiles: false,
 		ignoreRobots: false,
 		userAgent:
-			"Mozilla/5.0 (compatible; docsnap/0.1; +https://npmjs.com/package/docsnap)",
+			"Mozilla/5.0 (compatible; docsnap/0.1.1; +https://npmjs.com/package/docsnap)",
 		timeoutMs: 10_000,
 		maxBytes: 8 * 1024 * 1024,
 		failOnLowQuality: false,
@@ -84,6 +86,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
 			config.concurrency = readInt(argv, ++i, arg);
 		else if (arg === "--clean") config.clean = true;
 		else if (arg === "--dry-run") config.dryRun = true;
+		else if (arg === "--agent-files") config.agentFiles = true;
 		else if (arg === "--json") config.json = true;
 		else if (arg === "--quiet") config.quiet = true;
 		else if (arg === "--ignore-robots") config.ignoreRobots = true;

@@ -10,6 +10,7 @@ import type {
 	RunSummary,
 } from "../core/types.ts";
 import { agentReadme, treeText } from "./agent.ts";
+import { installAgentFiles } from "./agent-files.ts";
 import { runFiles } from "./files.ts";
 import { manifestLines, summaryJson } from "./manifest.ts";
 import { renderPage } from "./page.ts";
@@ -63,6 +64,7 @@ export async function writeRunFiles(
 			atomicWrite(join(config.outDir, file), body, config.outDir),
 		),
 	);
+	if (config.agentFiles) await installAgentFiles(summary);
 }
 
 async function writePage(record: PageOutput, config: Config) {

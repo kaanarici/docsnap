@@ -15,7 +15,7 @@ export async function runCli(argv: string[]): Promise<void> {
 			process.stdout.write(`${await version()}\n`);
 			return;
 		}
-		const progress = parsed.quiet ? undefined : note;
+		const progress = parsed.quiet || parsed.json ? undefined : note;
 		const result = await runPipeline(parsed, progress);
 		const ok = runOk(result.summary, parsed);
 		if (parsed.json) {
@@ -23,7 +23,7 @@ export async function runCli(argv: string[]): Promise<void> {
 				`${JSON.stringify(jsonResult(result.summary, parsed, ok))}\n`,
 			);
 		}
-		if (!parsed.quiet) printSummary(result.summary);
+		if (!parsed.quiet && !parsed.json) printSummary(result.summary);
 		if (!ok) {
 			process.exitCode = 1;
 		}
@@ -89,7 +89,7 @@ function jsonResult(summary: RunSummary, config: Config, ok: boolean) {
 	const status =
 		summary.written === 0
 			? "failed"
-			: summary.failed || summary.lowQuality
+			: summary.failed || summary.lowQuality || summary.maxReached
 				? "partial"
 				: "ok";
 	return {
@@ -109,6 +109,8 @@ function jsonResult(summary: RunSummary, config: Config, ok: boolean) {
 		written: summary.written,
 		failed: summary.failed,
 		lowQuality: summary.lowQuality,
+		max: summary.max,
+		maxReached: summary.maxReached,
 		discovered: summary.discovered,
 		deduped: summary.deduped,
 		elapsedMs: summary.elapsedMs,

@@ -33,6 +33,7 @@ export type Config = {
 	perOrigin: number;
 	clean: boolean;
 	dryRun: boolean;
+	agentFiles: boolean;
 	ignoreRobots: boolean;
 	userAgent: string;
 	timeoutMs: number;
@@ -123,6 +124,8 @@ export type RunSummary = {
 	rootHash: string;
 	renderedFiles: number;
 	renderedBytes: number;
+	max: number;
+	maxReached: boolean;
 	discovered: number;
 	deduped: number;
 	written: number;

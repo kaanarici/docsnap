@@ -1,6 +1,6 @@
 {
 	"name": "docsnap",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Pull public docs and text-heavy pages into a local Markdown folder for coding agents.",
 	"license": "MIT",
 	"author": "Kaan Aricioglu",

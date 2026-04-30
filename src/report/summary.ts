@@ -50,6 +50,8 @@ export function buildSummary(
 		rootHash: snapshot.rootHash,
 		renderedFiles: snapshot.files,
 		renderedBytes: snapshot.bytes,
+		max: config.max,
+		maxReached: maxReached(config, discovered),
 		discovered,
 		deduped,
 		written,
@@ -67,4 +69,10 @@ export function buildSummary(
 
 function emptyCounts<T extends string>(keys: readonly T[]) {
 	return Object.fromEntries(keys.map((key) => [key, 0])) as Record<T, number>;
+}
+
+function maxReached(config: Config, discovered: number) {
+	return config.maxExplicit
+		? discovered >= config.max
+		: discovered === config.max;
 }

@@ -68,12 +68,16 @@ export function sameScopeLinks(markdown: string, base: string): string[] {
 		if (url) links.add(url);
 	}
 	for (const match of markdown.matchAll(/https?:\/\/[^\s<>"'`)]+/g)) {
-		const url = normalizeUrl(match[0], base);
+		const url = normalizeUrl(cleanTextLink(match[0]), base);
 		if (url) links.add(url);
 	}
 	for (const match of markdown.matchAll(/(^|\s)(\/[a-z0-9][^\s<>"'`)]+)/gi)) {
-		const url = normalizeUrl(match[2]!, base);
+		const url = normalizeUrl(cleanTextLink(match[2]!), base);
 		if (url) links.add(url);
 	}
 	return [...links];
+}
+
+function cleanTextLink(value: string) {
+	return value.replace(/[.,;:!?]+$/g, "");
 }
