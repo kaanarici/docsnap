@@ -53,7 +53,7 @@ function isUsefulShortPage(
 	hasTitle: boolean,
 ) {
 	return (
-		(codeBlocks >= 1 && words >= 12 && markdown.length >= 250) ||
+		(codeBlocks >= 1 && words >= 12 && markdown.length >= 160) ||
 		(links >= 5 && words >= 8 && markdown.length >= 400) ||
 		(links >= 1 &&
 			words >= 14 &&

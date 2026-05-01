@@ -14,6 +14,12 @@ assert(
 		"SolidJS",
 	).confidence >= lowQualityConfidence,
 );
+assert(
+	scoreMarkdown(
+		`Sinatra is a DSL for quickly creating web applications in Ruby with minimal effort:\n\n\`\`\`ruby\nrequire 'sinatra'\nget '/frank-says' do\n  'Put this in your pipe & smoke it!'\nend\n\`\`\``,
+		"Sinatra",
+	).confidence >= lowQualityConfidence,
+);
 
 for (const body of [
 	`<div id="__docusaurus"></div><script src="/assets/main.js"></script>`,
