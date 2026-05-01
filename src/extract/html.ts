@@ -55,6 +55,14 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 				"blocked",
 			);
 		}
+		if (isLanguageSelector(result.finalUrl, result.body)) {
+			return failedRecord(
+				result,
+				source,
+				"language selector without article content",
+				"empty",
+			);
+		}
 		const quality = scoreMarkdown(markdown, extracted.title);
 		if (extracted.extractor === "fallback" && wordCount(markdown) < 20) {
 			quality.confidence = Math.min(quality.confidence, 0.55);
@@ -97,6 +105,15 @@ function isBlockedChallenge(markdown: string, title: string | undefined) {
 	return (
 		/client challenge/i.test(title ?? "") ||
 		/required part of this site couldn.t load/i.test(markdown)
+	);
+}
+
+function isLanguageSelector(finalUrl: string, html: string) {
+	return (
+		/\/select-language(?:[/?#]|$)/i.test(finalUrl) &&
+		/path-select-language|ecl-splash-page__language|currentPath":"select-language/i.test(
+			html,
+		)
 	);
 }
 

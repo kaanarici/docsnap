@@ -43,6 +43,23 @@ assert(linkOnlyRecovery.extractor === "fallback");
 assert(linkOnlyRecovery.markdown.includes("Docs you got questions"));
 assert(linkOnlyRecovery.markdown.includes("grommet docs components"));
 
+const languageSelector = await extractPage({
+	source: "seed",
+	result: {
+		ok: true,
+		url: "https://ec.example.com/",
+		finalUrl:
+			"https://commission.example.com/select-language?destination=/node/1",
+		status: 200,
+		contentType: "text/html",
+		body: `<html><head><title>Language selection</title></head><body class="path-select-language"><ul class="ecl-splash-page__language-list"><li><a href="/index_en"><span>en</span><span>English</span></a></li><li><a href="/index_fr"><span>fr</span><span>français</span></a></li></ul><script type="application/json">{"currentPath":"select-language"}</script></body></html>`,
+		fetchMs: 1,
+	},
+} satisfies FetchedUrl);
+assert(!languageSelector.ok);
+assert(languageSelector.failureKind === "empty");
+assert(languageSelector.error === "language selector without article content");
+
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");
 }
