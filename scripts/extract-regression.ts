@@ -8,6 +8,12 @@ assert(
 		"Standards Positions",
 	).confidence >= lowQualityConfidence,
 );
+assert(
+	scoreMarkdown(
+		`A declarative, efficient and flexible JavaScript library for building user interfaces.\n\nSolid is a purely reactive library. It was designed from the ground up with a reactive core. It's influenced by reactive principles developed by previous libraries.`,
+		"SolidJS",
+	).confidence >= lowQualityConfidence,
+);
 
 for (const body of [
 	`<div id="__docusaurus"></div><script src="/assets/main.js"></script>`,
@@ -34,6 +40,22 @@ for (const body of [
 	assert(appShell.failureKind === "empty");
 	assert(appShell.error === "app shell without static text");
 }
+
+const metaTitlePage = await extractPage({
+	source: "seed",
+	result: {
+		ok: true,
+		url: "https://solid.example.com/",
+		finalUrl: "https://solid.example.com/",
+		status: 200,
+		contentType: "text/html",
+		body: `<html><head><meta name="og:title" content="SolidJS"></head><body><main><p>A declarative, efficient and flexible JavaScript library for building user interfaces.</p><p>Solid is a purely reactive library. It was designed from the ground up with a reactive core. It's influenced by reactive principles developed by previous libraries.</p></main></body></html>`,
+		fetchMs: 1,
+	},
+} satisfies FetchedUrl);
+assert(metaTitlePage.ok);
+assert(metaTitlePage.title === "SolidJS");
+assert(metaTitlePage.confidence >= lowQualityConfidence);
 
 const linkOnlyRecovery = await extractPage({
 	source: "seed",

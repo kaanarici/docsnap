@@ -182,8 +182,7 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 
 	const parsed = await parseWithDefuddle(document, result.finalUrl);
 	if (parsed?.content?.trim()) {
-		const title =
-			parsed.title || document.querySelector("title")?.textContent?.trim();
+		const title = parsed.title || documentTitle(document);
 		const markdown = parsed.content.trim();
 		if (isShellPlaceholder(markdown, title, result.body)) {
 			return {
@@ -227,9 +226,7 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 		};
 	}
 
-	const title =
-		document.querySelector("h1")?.textContent?.trim() ||
-		document.querySelector("title")?.textContent?.trim();
+	const title = documentTitle(document);
 	const fallback = pageText(document);
 	const serialized =
 		wordCount(fallback) < 40
@@ -387,6 +384,15 @@ function metadataMarkdown(document: Document, title: string | undefined) {
 		].filter((value): value is string => Boolean(value?.trim())),
 	);
 	return wordCount(values.join(" ")) >= 8 ? values.join("\n\n") : undefined;
+}
+
+function documentTitle(document: Document) {
+	return (
+		document.querySelector("h1")?.textContent?.trim() ||
+		document.querySelector("title")?.textContent?.trim() ||
+		meta(document, "og:title") ||
+		meta(document, "twitter:title")
+	);
 }
 
 function meta(document: Document, name: string) {
