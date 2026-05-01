@@ -118,7 +118,7 @@ function isLanguageSelector(finalUrl: string, html: string) {
 }
 
 function emptyContentError(html: string) {
-	return /(__docusaurus|v-app-loading|enable javascript in your browser|zdWebClientConfig|catalog-app|react-target|app-root|ohcglobal|__meteor_runtime_config__|raw\.githubusercontent\.com)/i.test(
+	return /(__docusaurus|v-app-loading|enable javascript in your browser|zdWebClientConfig|catalog-app|react-target|app-root|id=["']app["']|ohcglobal|__meteor_runtime_config__|raw\.githubusercontent\.com)/i.test(
 		html,
 	)
 		? "app shell without static text"
@@ -142,7 +142,11 @@ function isShellPlaceholder(
 			/<input[^>]+type=["']search["']|placeholder=["']search["']|class=["'][^"']*search/i.test(
 				html,
 			) &&
-			/__docusaurus/i.test(html))
+			/__docusaurus/i.test(html)) ||
+		(title !== undefined &&
+			wordCount(markdown) <= 8 &&
+			markdown.includes(title) &&
+			/<div[^>]+id=["']app["'][^>]*>\s*<\/div>/i.test(html))
 	);
 }
 

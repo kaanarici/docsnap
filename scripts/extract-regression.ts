@@ -6,6 +6,7 @@ for (const body of [
 	`<main></main><script>var zdWebClientConfig={"siteURL":"docs.example.com"}</script>`,
 	`<title>Client Docs</title><body><catalog-app unresolved></catalog-app></body>`,
 	`<title>Unreal Engine 5.7 Documentation</title><body><app-root class="app-root"></app-root><script src="main.js" type="module"></script></body>`,
+	`<title>Apply to Xavier</title><main><h1>Apply to Xavier</h1><nav>Xavier Home Apply to Xavier</nav><div id="app"></div></main>`,
 	`<title>CSS Status</title><main>properties</main><script>var loadCSSProperties = xhrPromise("https://raw.githubusercontent.com/example/project/main/data.json");</script>`,
 	`<title>Plugins</title><div id="__docusaurus"><main><form><input type="search" placeholder="Search"><button>Search</button></form><h1></h1></main></div>`,
 ]) {
