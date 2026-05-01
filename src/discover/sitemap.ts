@@ -21,7 +21,8 @@ export async function discoverSitemaps(
 	if (limit <= 0) return [];
 
 	const base = new URL(seed);
-	const candidates = new Set<string>(sitemapUrls);
+	const candidates = new Set<string>(scopedSitemapCandidates(base));
+	for (const sitemap of sitemapUrls) candidates.add(sitemap);
 	for (const path of [
 		"/sitemap.xml",
 		"/sitemap_index.xml",
@@ -42,6 +43,12 @@ export async function discoverSitemaps(
 		});
 	}
 	return [...found];
+}
+
+function scopedSitemapCandidates(base: URL) {
+	const path = base.pathname.replace(/\/$/, "");
+	if (!path || path.includes(".")) return [];
+	return [`${base.origin}${path}.sitemap.xml`];
 }
 
 async function readSitemap(
@@ -71,12 +78,12 @@ async function readSitemap(
 		.map((loc) => normalizeUrl(loc))
 		.filter((value): value is string => Boolean(value));
 	const sitemapLocs = rawLocs.filter(isSitemapUrl);
-	const indexLocs =
-		document.documentElement?.localName === "sitemapindex"
-			? rawLocs
-			: sitemapLocs;
+	const xmlLocs = rawLocs.filter(isXmlUrl);
+	const pageLocs = locs.filter((loc) => !isXmlUrl(loc));
+	const rootName = document.documentElement?.localName;
+	const indexLocs = rootName === "sitemapindex" ? xmlLocs : sitemapLocs;
 	const isIndex =
-		document.documentElement?.localName === "sitemapindex" ||
+		rootName === "sitemapindex" ||
 		(sitemapLocs.length > 0 && sitemapLocs.length === rawLocs.length);
 	if (!isIndex) {
 		for (const loc of locs) {
@@ -84,6 +91,13 @@ async function readSitemap(
 			if (!options.accept || options.accept(loc)) found.add(loc);
 		}
 		return found.size > before ? "found" : "empty";
+	}
+	if (rootName === "sitemapindex") {
+		for (const loc of pageLocs) {
+			if (found.size >= options.limit) return "found";
+			if (!options.accept || options.accept(loc)) found.add(loc);
+		}
+		if (xmlLocs.length === 0) return found.size > before ? "found" : "empty";
 	}
 
 	const childSitemaps = prioritizedSitemaps(indexLocs, options.scope).slice(
@@ -149,15 +163,21 @@ function sitemapHintScore(raw: string, scope: string) {
 	const pathname = new URL(raw).pathname.toLowerCase();
 	return scope
 		.split("/")
-		.filter(
-			(part) => part.length > 2 && !/^[a-z]{2}(?:-[a-z]{2})?$/i.test(part),
-		)
+		.filter((part) => part.length > 2)
 		.reduce((score, part) => {
-			const loose = part.toLowerCase().replaceAll("-", "[_-]");
-			return (
-				score + Number(new RegExp(`(?:^|/)${loose}(?:/|$)`).test(pathname))
-			);
+			const variants = scopePartVariants(part);
+			return score + Number(variants.some((variant) => variant.test(pathname)));
 		}, 0);
+}
+
+function scopePartVariants(part: string) {
+	const escaped = part.toLowerCase().replaceAll("-", "[_-]");
+	const variants = [escaped];
+	const locale = part.toLowerCase().match(/^([a-z]{2})-([a-z]{2})$/);
+	if (locale) variants.push(`${locale[2]}[_-]${locale[1]}`);
+	return variants.map(
+		(variant) => new RegExp(`(?:^|[/_.-])${variant}(?:[/_.-]|$)`),
+	);
 }
 
 function sitemapPartNumber(raw: string) {
@@ -168,6 +188,10 @@ function sitemapPartNumber(raw: string) {
 
 function isSitemapUrl(raw: string) {
 	return /(?:^|\/)sitemap[^/]*\.xml$/i.test(new URL(raw).pathname);
+}
+
+function isXmlUrl(raw: string) {
+	return /\.xml$/i.test(new URL(raw).pathname);
 }
 
 function absoluteHttpUrl(raw: string, base: string) {
