@@ -268,7 +268,7 @@ function attributeValue(
 }
 
 function scriptRedirectTarget(html: string): string | undefined {
-	if (!/you are being redirected|redirecting/i.test(html)) return undefined;
+	if (!/redirect(?:ing|ed(?: automatically)?)/i.test(html)) return undefined;
 	const variables = new Map<string, string>();
 	for (const match of html.matchAll(
 		/(?:\b(?:const|let|var)\b|[,;])\s*([A-Za-z_$][\w$]*)\s*=\s*["']([^"']+)["']/g,

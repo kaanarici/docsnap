@@ -65,6 +65,22 @@ await withMockFetch(
 					{ headers: { "content-type": "text/html" } },
 				),
 );
+await withMockFetch(
+	async () => {
+		const result = await fetchText("https://93.184.216.34/learn", config);
+		assert(result.ok);
+		assert(result.finalUrl === "https://93.184.216.34/learn/intro/");
+	},
+	async (input) =>
+		input.endsWith("/intro/")
+			? new Response("# Intro", {
+					headers: { "content-type": "text/markdown" },
+				})
+			: new Response(
+					`<p>If you are not redirected automatically please click here.</p><script>window.location = "/learn/intro/";</script>`,
+					{ headers: { "content-type": "text/html" } },
+				),
+);
 
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");
