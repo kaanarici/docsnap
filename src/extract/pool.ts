@@ -8,7 +8,7 @@ type Message =
 	| { id: number; error: string };
 
 export async function extractMany(inputs: FetchedUrl[]): Promise<PageRecord[]> {
-	if (inputs.length < 8 || typeof Worker === "undefined")
+	if (typeof Worker === "undefined")
 		return Promise.all(inputs.map(extractPage));
 
 	const results: PageRecord[] = new Array(inputs.length);
@@ -19,7 +19,7 @@ export async function extractMany(inputs: FetchedUrl[]): Promise<PageRecord[]> {
 			else results[id] = await extractPage(input);
 		}),
 	);
-	if (heavy.length < 8) {
+	if (heavy.length < 2) {
 		await Promise.all(
 			heavy.map(async ({ id, input }) => {
 				results[id] = await extractPage(input);
