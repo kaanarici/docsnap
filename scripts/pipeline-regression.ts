@@ -97,6 +97,8 @@ try {
 	assert(result.summary.written === 1);
 	assert(result.summary.failed === 1);
 	assert(result.summary.discovered === 2);
+	const handoff = await readFile(join(staleOutDir, "AGENT_README.md"), "utf8");
+	assert(handoff.includes("Stale/not-found links: 1"));
 } finally {
 	setFetchTransportForTest(undefined);
 }

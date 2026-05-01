@@ -19,9 +19,9 @@ export function printSummary(summary: RunSummary): void {
 		);
 	}
 	if (summary.failed || summary.lowQuality) {
-		note(
-			`docsnap: ${summary.failed} failed, ${summary.lowQuality} low-quality`,
-		);
+		const notFound = summary.byFailureKind.not_found ?? 0;
+		const failed = summary.failed - notFound;
+		note(issueSummary(failed, notFound, summary.lowQuality));
 		const failures = failureSummary(summary);
 		if (failures) note(`docsnap: failure kinds ${failures}`);
 	}
@@ -30,6 +30,14 @@ export function printSummary(summary: RunSummary): void {
 		note(`docsnap: manifest ${summary.outDir}/${runFiles.manifest}`);
 		note(`docsnap: agent handoff ${summary.outDir}/${runFiles.agentReadme}`);
 	}
+}
+
+function issueSummary(failed: number, notFound: number, lowQuality: number) {
+	const parts: string[] = [];
+	if (failed) parts.push(`${failed} failed`);
+	if (notFound) parts.push(`${notFound} stale/not-found`);
+	if (lowQuality) parts.push(`${lowQuality} low-quality`);
+	return `docsnap: ${parts.join(", ")}`;
 }
 
 function failureSummary(summary: RunSummary) {
