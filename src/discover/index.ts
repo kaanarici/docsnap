@@ -388,14 +388,19 @@ function corpusTarget(seed: string, urls: string[]) {
 		(a, b) => b[1].length - a[1].length,
 	)[0];
 	const fileHeavy = best ? mostlyCorpusFiles(best[1]) : false;
+	const redirectedRootLlms = best?.[1].some(
+		(url) => url.pathname === "/llms.txt",
+	);
 	if (
 		!best ||
-		best[1].length < 5 ||
-		(!fileHeavy && !relatedHost(seedUrl.hostname, new URL(best[0]).hostname))
+		(!redirectedRootLlms && best[1].length < 5) ||
+		(!redirectedRootLlms &&
+			!fileHeavy &&
+			!relatedHost(seedUrl.hostname, new URL(best[0]).hostname))
 	)
 		return undefined;
 	const scope = commonScope(best[1]);
-	if (!fileHeavy && scope === "/") return undefined;
+	if (!fileHeavy && scope === "/" && !redirectedRootLlms) return undefined;
 	return { origin: best[0], scope };
 }
 

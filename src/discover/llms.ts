@@ -40,14 +40,15 @@ export async function discoverLlms(
 		const response = await fetchLlmsText(llmsUrl, config, options);
 		if (!response.ok || !isLlmsCorpus(response.contentType, response.body))
 			continue;
-		if (roots.has(llmsUrl)) urls.add(llmsUrl);
+		const corpusBase = response.finalUrl;
+		if (roots.has(llmsUrl)) urls.add(corpusBase);
 		for (const link of corpusLinks(
 			response.body,
-			llmsUrl,
+			corpusBase,
 			config.maxExplicit,
 		)) {
 			if (new URL(link).pathname === "/") continue;
-			if (shouldExpandIndex(link, llmsUrl, seen, urls, config)) {
+			if (shouldExpandIndex(link, corpusBase, seen, urls, config)) {
 				urls.add(link);
 				queue.push(link);
 				if (config.maxExplicit && urls.size >= config.max) break;

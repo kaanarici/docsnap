@@ -4,7 +4,7 @@ import { discover } from "../src/discover/index.ts";
 import { discoverLlms } from "../src/discover/llms.ts";
 import { discoverNav } from "../src/discover/nav.ts";
 import { discoverSitemaps } from "../src/discover/sitemap.ts";
-import { normalizeUrl } from "../src/discover/url.ts";
+import { normalizeUrl, sameScopeLinks } from "../src/discover/url.ts";
 import { setFetchTransportForTest } from "../src/fetch/fetcher.ts";
 
 const links = discoverNav(
@@ -22,6 +22,12 @@ assert(!links.includes("https://hive.apache.org/Document"));
 assert(normalizeUrl("/mydocs", "https://docs.example.com/") === undefined);
 assert(
 	normalizeUrl("/managewatches", "https://docs.example.com/") === undefined,
+);
+assert(
+	sameScopeLinks(
+		`1. PagerDuty Operations Cloud [https://www.pagerduty.example/platform/operations-cloud/]: Platform overview.`,
+		"https://www.pagerduty.example/llms.txt",
+	).includes("https://www.pagerduty.example/platform/operations-cloud/"),
 );
 assert(
 	looksLikeAppShell(`<main></main><script>var zdWebClientConfig={}</script>`),
@@ -92,6 +98,51 @@ try {
 	assert(first.length === 0);
 	assert(second.length === 0);
 	assert(failedLlmsProbes === 2);
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
+const redirectedLlmsConfig = parseArgs([
+	"https://gofiber.example/docs/",
+	"-m",
+	"2",
+]);
+assert(
+	!("help" in redirectedLlmsConfig) && !("version" in redirectedLlmsConfig),
+);
+setFetchTransportForTest(async (input) => {
+	const url = String(input);
+	if (url === "https://gofiber.example/llms.txt") {
+		return response(
+			url,
+			301,
+			"",
+			"text/plain",
+			"https://docs.gofiber.example/llms.txt",
+		);
+	}
+	if (url === "https://docs.gofiber.example/llms.txt") {
+		return response(
+			url,
+			200,
+			`# Fiber\n\n- [Casbin](casbin/casbin): Release`,
+			"text/markdown",
+		);
+	}
+	return response(url, 404, "not found", "text/plain");
+});
+try {
+	const urls = await discoverLlms(
+		"https://gofiber.example/docs/",
+		redirectedLlmsConfig,
+	);
+	assert(urls.includes("https://docs.gofiber.example/llms.txt"));
+	assert(urls.includes("https://docs.gofiber.example/casbin/casbin"));
+	assert(!urls.includes("https://gofiber.example/casbin/casbin"));
+	const discovered = await discover(redirectedLlmsConfig);
+	assert(discovered.length === 2);
+	assert(discovered[0]?.url === "https://docs.gofiber.example/llms.txt");
+	assert(discovered[1]?.url === "https://docs.gofiber.example/casbin/casbin");
 } finally {
 	setFetchTransportForTest(undefined);
 }

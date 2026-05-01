@@ -81,7 +81,7 @@ export function sameScopeLinks(markdown: string, base: string): string[] {
 }
 
 function cleanTextLink(value: string) {
-	return value.replace(/[.,;:!?]+$/g, "");
+	return value.replace(/[.,;:!?\]]+$/g, "");
 }
 
 function collapseRepeatedBasePath(url: URL, base?: string | URL) {
