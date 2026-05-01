@@ -9,6 +9,7 @@ bunx docsnap https://example.com/docs
 docsnap checks `llms.txt`, sitemaps, navigation links, and a bounded crawl fallback. It writes Markdown plus `AGENT_README.md`, `tree.txt`, `manifest.jsonl`, and `summary.json`.
 
 It works best on public docs and server-rendered text pages. If a page is thin, blocked, or client-rendered with no readable HTML, docsnap reports that instead of pretending the capture is complete.
+docsnap only fetches public HTTP(S) URLs and rejects localhost, single-label hosts, credentials, and private/internal IP addresses.
 
 ## Install
 
@@ -20,6 +21,7 @@ bun add -g docsnap
 
 ```bash
 docsnap <url>
+docsnap <url> --page
 docsnap <url> -o <dir> -m <count>
 echo https://example.com/docs | docsnap --stdin --json
 ```
@@ -32,6 +34,7 @@ Output defaults to `docsnap/<site>`. Point your agent at `AGENT_README.md` insid
 --concurrency <n>      fetch concurrency, CPU-scaled default
 --clean                remove the output directory before writing
 --dry-run              discover and extract without writing files
+--page                 capture only the given page, no discovery
 --agent-files          update existing AGENTS.md/CLAUDE.md files
 --json                 print one machine-readable result
 --quiet                suppress progress logs

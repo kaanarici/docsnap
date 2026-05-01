@@ -34,5 +34,22 @@ export function scoreMarkdown(
 		score -= 0.1;
 		reasons.push("unbalanced code fences");
 	}
+	if (score < 0.6 && isUsefulShortPage(markdown, words, links, codeBlocks)) {
+		score = 0.65;
+		const thin = reasons.indexOf("thin content");
+		if (thin >= 0) reasons.splice(thin, 1);
+	}
 	return { confidence: Math.max(0, Number(score.toFixed(2))), reasons };
+}
+
+function isUsefulShortPage(
+	markdown: string,
+	words: number,
+	links: number,
+	codeBlocks: number,
+) {
+	return (
+		(codeBlocks >= 1 && words >= 12 && markdown.length >= 250) ||
+		(links >= 5 && words >= 8 && markdown.length >= 400)
+	);
 }

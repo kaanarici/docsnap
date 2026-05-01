@@ -1,4 +1,5 @@
 import { discover } from "../discover/index.ts";
+import { normalizeUrl } from "../discover/url.ts";
 import { extractMany } from "../extract/pool.ts";
 import { fetchMany } from "../fetch/fetcher.ts";
 import { rewriteLocalLinks } from "../output/links.ts";
@@ -9,7 +10,7 @@ import { buildSummary } from "../report/summary.ts";
 import { dedupeRecords } from "./dedupe.ts";
 import { hasOutputPath } from "./records.ts";
 import { hashContent, snapshotStats } from "./snapshot.ts";
-import type { Config, PipelineResult } from "./types.ts";
+import type { Config, FetchedUrl, PipelineResult } from "./types.ts";
 
 type Progress = (message: string) => void;
 
@@ -22,7 +23,7 @@ export async function runPipeline(
 	progress?.("docsnap: discovering");
 	const discovered = await discover(config);
 	progress?.(`docsnap: fetching ${discovered.length} pages`);
-	const fetched = await fetchMany(discovered, config);
+	const fetched = (await fetchMany(discovered, config)).map(rejectNonPageFinal);
 	progress?.(`docsnap: extracting ${fetched.length} pages`);
 	const dedupe = dedupeRecords(await extractMany(fetched));
 	const records = dedupe.records;
@@ -54,4 +55,23 @@ export async function runPipeline(
 	await writeRunFiles(records, summary, config);
 
 	return { records, summary };
+}
+
+function rejectNonPageFinal(input: FetchedUrl): FetchedUrl {
+	const { result } = input;
+	if (!result.ok || normalizeUrl(result.finalUrl)) return input;
+	return {
+		...input,
+		result: {
+			url: result.url,
+			finalUrl: result.finalUrl,
+			status: result.status,
+			contentType: result.contentType,
+			body: result.body,
+			fetchMs: result.fetchMs,
+			ok: false,
+			error: "redirected to a filtered non-page URL",
+			failureKind: "blocked",
+		},
+	};
 }

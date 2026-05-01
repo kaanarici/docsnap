@@ -109,6 +109,8 @@ function readable(value: string): boolean {
 		return false;
 	if (/(className|data-|aria-|xmlns|viewBox|strokeWidth)/.test(text))
 		return false;
+	if (/^(?:use strict|token(?:\s+\S+){0,3}|const\s+\S+)$/i.test(text))
+		return false;
 	if (/page (could |was )?not be found|return home|report an issue/i.test(text))
 		return false;
 	return true;

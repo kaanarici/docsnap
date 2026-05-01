@@ -98,9 +98,11 @@ function looksLikeCorpus(body: string) {
 	);
 }
 
-function discoverCorpusHints(body: string, base: string) {
+function discoverCorpusHints(body: string, base: string, explicit: string[]) {
 	const hints: string[] = [];
 	for (const name of ["llms-full.txt", "llms-ctx.txt", "llms-ctx-full.txt"]) {
+		if (explicit.some((raw) => new URL(raw).pathname.endsWith(`/${name}`)))
+			continue;
 		const url = normalizeUrl(name, base);
 		if (url && body.includes(name)) hints.push(url);
 	}
@@ -108,11 +110,9 @@ function discoverCorpusHints(body: string, base: string) {
 }
 
 function corpusLinks(body: string, base: string, maxExplicit: boolean) {
+	const explicit = sameScopeLinks(body, base);
 	const links = [
-		...new Set([
-			...sameScopeLinks(body, base),
-			...discoverCorpusHints(body, base),
-		]),
+		...new Set([...explicit, ...discoverCorpusHints(body, base, explicit)]),
 	];
 	if (!maxExplicit) return links;
 	return links.sort((a, b) => linkRank(a, base) - linkRank(b, base));
@@ -127,8 +127,13 @@ function linkRank(raw: string, base: string) {
 	const url = new URL(raw);
 	return (
 		Number(!pathInScope(url.pathname, new URL(scope).pathname)) +
-		Number(isFullCorpus(raw)) * 2
+		Number(isFullCorpus(raw)) * 2 +
+		lowValueCorpusPathRank(url.pathname)
 	);
+}
+
+function lowValueCorpusPathRank(pathname: string) {
+	return /(?:^|\/)(?:widgets?|playground|chat)\//i.test(pathname) ? 10 : 0;
 }
 
 function shouldExpandIndex(

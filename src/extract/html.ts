@@ -42,6 +42,14 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 		const markdown = cleanMarkdown(extracted.markdown);
 		if (!markdown)
 			return failedRecord(result, source, "empty content", "empty");
+		if (isBlockedChallenge(markdown, extracted.title)) {
+			return failedRecord(
+				result,
+				source,
+				"blocked by client challenge",
+				"blocked",
+			);
+		}
 		const quality = scoreMarkdown(markdown, extracted.title);
 		if (extracted.extractor === "fallback" && wordCount(markdown) < 20) {
 			quality.confidence = Math.min(quality.confidence, 0.55);
@@ -80,6 +88,13 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 	}
 }
 
+function isBlockedChallenge(markdown: string, title: string | undefined) {
+	return (
+		/client challenge/i.test(title ?? "") ||
+		/required part of this site couldn.t load/i.test(markdown)
+	);
+}
+
 async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 	if (isStructuredTextAsset(result)) {
 		const title = titleFromMarkdown("", new URL(result.finalUrl).pathname);
@@ -114,10 +129,23 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 	if (parsed?.content?.trim()) {
 		const title =
 			parsed.title || document.querySelector("title")?.textContent?.trim();
+		const markdown = parsed.content.trim();
+		const serialized =
+			scoreMarkdown(markdown, title).confidence < 0.6
+				? extractSerializedText(result.body, title)
+				: undefined;
+		if (serialized) {
+			return {
+				...(title ? { title } : {}),
+				...(canonical ? { canonicalUrl: canonical } : {}),
+				markdown: serialized,
+				extractor: "fallback" as const,
+			};
+		}
 		return {
 			...(title ? { title } : {}),
 			...(canonical ? { canonicalUrl: canonical } : {}),
-			markdown: parsed.content.trim(),
+			markdown,
 			extractor: "html" as const,
 		};
 	}
@@ -125,7 +153,8 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 	const element =
 		document.querySelector("main") ??
 		document.querySelector("article") ??
-		document.body;
+		textElement(document.body) ??
+		textElement(document.documentElement);
 	const title =
 		document.querySelector("h1")?.textContent?.trim() ||
 		document.querySelector("title")?.textContent?.trim();
@@ -142,6 +171,11 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 		markdown: serialized ?? (fallback || metadata || ""),
 		extractor: "fallback" as const,
 	};
+}
+
+function textElement(element: Element | null): Element | undefined {
+	const text = element?.textContent?.trim() ?? "";
+	return wordCount(text) >= 8 ? (element ?? undefined) : undefined;
 }
 
 function renderTextAsset(title: string, body: string, url: string) {
@@ -163,20 +197,19 @@ async function parseWithDefuddle(document: Document, url: string) {
 
 let defuddleCalls = 0;
 const consoleError = console.error.bind(console);
+const consoleWarn = console.warn.bind(console);
 
 function silenceDefuddleErrors() {
 	if (defuddleCalls++ === 0) {
-		console.error = (...args) => {
-			const first = String(args[0] ?? "");
-			const second = String(args[1] ?? "");
-			if (first === "Defuddle" && second === "Error processing document:")
-				return;
-			consoleError(...args);
-		};
+		console.error = () => {};
+		console.warn = () => {};
 	}
 	return () => {
 		defuddleCalls--;
-		if (defuddleCalls === 0) console.error = consoleError;
+		if (defuddleCalls === 0) {
+			console.error = consoleError;
+			console.warn = consoleWarn;
+		}
 	};
 }
 
@@ -226,8 +259,12 @@ function metadataMarkdown(document: Document, title: string | undefined) {
 }
 
 function meta(document: Document, name: string) {
-	return document
-		.querySelector(`meta[name="${name}"], meta[property="${name}"]`)
-		?.getAttribute("content")
-		?.trim();
+	for (const element of document.querySelectorAll("meta")) {
+		const key =
+			element.getAttribute("name") ?? element.getAttribute("property");
+		if (key?.toLowerCase() !== name.toLowerCase()) continue;
+		const content = element.getAttribute("content")?.trim();
+		if (content) return content;
+	}
+	return undefined;
 }

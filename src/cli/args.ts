@@ -1,12 +1,10 @@
 import { cpus } from "node:os";
 import type { Config } from "../core/types.ts";
+import { validatePublicHttpUrl } from "../security/url.ts";
 
 const cpuCount = cpus().length;
 const defaultConcurrency = Math.min(64, Math.max(16, cpuCount * 6));
-const defaultPerOrigin = Math.min(
-	defaultConcurrency,
-	Math.max(8, Math.ceil(cpuCount * 1.5)),
-);
+const defaultPerOrigin = Math.min(defaultConcurrency, 8);
 const valueFlags = new Set([
 	"-o",
 	"--out",
@@ -25,6 +23,7 @@ Flags:
   --concurrency <n>         fetch concurrency, default ${defaultConcurrency}
   --clean                   remove output dir before writing
   --dry-run                 run without writing files
+  --page                    capture only the given page, no discovery
   --agent-files             update existing AGENTS.md/CLAUDE.md files
   --json                    print one machine-readable result
   --quiet                   suppress progress logs
@@ -38,6 +37,7 @@ Flags:
 Examples:
   docsnap https://docs.example.com -o vendor-docs --clean --json
   docsnap https://fly.io/docs/ -m 100 --concurrency 24
+  docsnap https://docs.example.com/api/auth --page
   echo https://docs.peel.sh | docsnap --stdin --json
   docsnap https://example.com --dry-run --json
   docsnap https://example.com --fail-on-low-quality`;
@@ -60,13 +60,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
 		max: 50,
 		maxExplicit: false,
 		concurrency: defaultConcurrency,
-		perOrigin: defaultConcurrency,
+		perOrigin: defaultPerOrigin,
 		clean: false,
 		dryRun: false,
 		agentFiles: false,
+		pageOnly: false,
 		ignoreRobots: false,
 		userAgent:
-			"Mozilla/5.0 (compatible; docsnap/0.1.1; +https://npmjs.com/package/docsnap)",
+			"Mozilla/5.0 (compatible; docsnap/0.1.2; +https://npmjs.com/package/docsnap)",
 		timeoutMs: 10_000,
 		maxBytes: 8 * 1024 * 1024,
 		failOnLowQuality: false,
@@ -74,7 +75,6 @@ export function parseArgs(argv: string[]): ParsedArgs {
 		quiet: false,
 	};
 	let outProvided = false;
-	let concurrencyProvided = false;
 
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i]!;
@@ -90,9 +90,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
 			config.maxExplicit = true;
 		} else if (arg === "--concurrency") {
 			config.concurrency = readInt(argv, ++i, arg);
-			concurrencyProvided = true;
 		} else if (arg === "--clean") config.clean = true;
 		else if (arg === "--dry-run") config.dryRun = true;
+		else if (arg === "--page") config.pageOnly = true;
 		else if (arg === "--agent-files") config.agentFiles = true;
 		else if (arg === "--json") config.json = true;
 		else if (arg === "--quiet") config.quiet = true;
@@ -110,13 +110,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
 	} catch {
 		throw new Error(`Invalid URL: ${config.seedUrl}`);
 	}
+	const unsafe = validatePublicHttpUrl(config.seedUrl);
+	if (unsafe) throw new Error(`Unsafe URL: ${unsafe}`);
 	if (!outProvided) config.outDir = defaultOutDir(config.seedUrl);
 	if (config.max < 1) throw new Error("--max must be at least 1");
 	if (config.concurrency < 1)
 		throw new Error("--concurrency must be at least 1");
-	config.perOrigin = concurrencyProvided
-		? config.concurrency
-		: Math.min(config.concurrency, defaultPerOrigin);
+	config.perOrigin = Math.min(config.concurrency, defaultPerOrigin);
 	return config;
 }
 

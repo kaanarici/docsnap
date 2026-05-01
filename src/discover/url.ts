@@ -14,6 +14,7 @@ export function normalizeUrl(
 		if (!["http:", "https:"].includes(url.protocol)) return;
 		dropFragmentAndQuery(url);
 		url.pathname = url.pathname.replace(/\/{2,}/g, "/");
+		collapseRepeatedBasePath(url, base);
 		if (!url.pathname) url.pathname = "/";
 		if (isNonPageUrl(url)) return;
 		return url.href;
@@ -83,11 +84,44 @@ function cleanTextLink(value: string) {
 	return value.replace(/[.,;:!?]+$/g, "");
 }
 
+function collapseRepeatedBasePath(url: URL, base?: string | URL) {
+	if (!base || !url.pathname.endsWith(".md")) return;
+	const baseUrl = new URL(base);
+	if (url.origin !== baseUrl.origin) return;
+	const dir = baseUrl.pathname
+		.replace(/\/[^/]*$/, "/")
+		.split("/")
+		.filter(Boolean);
+	if (dir.length === 0) return;
+	const parts = url.pathname.split("/").filter(Boolean);
+	if (!dir.every((part, index) => parts[index] === part)) return;
+	if (!dir.every((part, index) => parts[index + dir.length] === part)) return;
+	url.pathname = `/${parts.slice(dir.length).join("/")}`;
+}
+
 function isNonPageUrl(url: URL) {
 	return (
+		/(?:%e2%80%a6|…)/i.test(url.href) ||
 		/%3c|%3e|[<>]/i.test(url.pathname) ||
 		/%7b|%7d|[{}]/i.test(url.pathname) ||
 		/(?:^|\/)(?:%3a|:)[^/]+/i.test(url.pathname) ||
+		/(?:^|\/)search\/?$/i.test(url.pathname) ||
+		/(?:^|\/)(?:genindex|search|py-modindex)\.html$/i.test(url.pathname) ||
+		/\/(?:_sources|\+\+theme\+\+[^/]+)\//i.test(url.pathname) ||
+		/(?:^|\/)(?:create-account|try)\/?$/i.test(url.pathname) ||
+		/(?:^|\/)cgi-bin\//i.test(url.pathname) ||
+		/\/cdn-cgi\//i.test(url.pathname) ||
+		/(?:^|\/)(?:login|sign-?in|sign-?up|signup|register)(?:\/|$)/i.test(
+			url.pathname,
+		) ||
+		/(?:^|\/)(?:copyright|copying(?:_[a-z]+)?)\.html$/i.test(url.pathname) ||
+		/(?:^|\/)page\/index\.md$/i.test(url.pathname) ||
+		/\.x?html?\.md$/i.test(url.pathname) ||
+		/(?:^|\/)api\/(?:article|search)(?:\/|$)/i.test(url.pathname) ||
+		/youtube\.com\/watch/i.test(url.pathname) ||
+		/(?:^|\/)(?:rss|feed|atom)\.xml$/i.test(url.pathname) ||
+		/(?:^|\/)(?:chat|demo|playground|repl|test)\/?$/i.test(url.pathname) ||
+		/\/chunked\/.*\.json$/i.test(url.pathname) ||
 		/(?:^|\/)(?:robots\.txt|sitemap[^/]*\.xml)$/i.test(url.pathname)
 	);
 }

@@ -11,10 +11,10 @@ export function isMarkdownLike(result: FetchResult): boolean {
 }
 
 export function isStructuredTextAsset(result: FetchResult): boolean {
+	if (structuredTextContent.test(result.contentType)) return true;
 	return (
-		!hasHtmlMarkup(result.body) &&
-		(structuredTextContent.test(result.contentType) ||
-			structuredTextPath.test(new URL(result.finalUrl).pathname))
+		structuredTextPath.test(new URL(result.finalUrl).pathname) &&
+		!hasHtmlMarkup(result.body)
 	);
 }
 

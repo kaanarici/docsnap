@@ -18,6 +18,7 @@ export const failureKinds = [
 	"not_found",
 	"timeout",
 	"too_large",
+	"unsafe_url",
 ] as const;
 
 export type FailureKind = (typeof failureKinds)[number];
@@ -37,6 +38,7 @@ export type Config = {
 	clean: boolean;
 	dryRun: boolean;
 	agentFiles: boolean;
+	pageOnly: boolean;
 	ignoreRobots: boolean;
 	userAgent: string;
 	timeoutMs: number;

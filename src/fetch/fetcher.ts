@@ -7,6 +7,20 @@ import type {
 } from "../core/types.ts";
 import { runBounded } from "./rate-limit.ts";
 import { retryDelayMs, shouldRetry } from "./retry.ts";
+import {
+	type FetchTransport,
+	type HttpResponse,
+	requestPublicHttp,
+} from "./transport.ts";
+import { withWritersideTopic } from "./writerside.ts";
+
+let fetchTransport: FetchTransport = requestPublicHttp;
+
+export function setFetchTransportForTest(
+	transport: FetchTransport | undefined,
+): void {
+	fetchTransport = transport ?? requestPublicHttp;
+}
 
 export async function fetchText(
 	url: string,
@@ -15,9 +29,16 @@ export async function fetchText(
 ): Promise<FetchResult> {
 	const started = performance.now();
 	let currentUrl = url;
+	const triedMarkdownFallbacks = new Set<string>();
 	const seenRefreshes = new Set<string>();
-	for (let refresh = 0; refresh < 3; refresh++) {
+	for (let refresh = 0; refresh < 8; refresh++) {
 		const result = await fetchOnce(url, currentUrl, config, accept, started);
+		const fallback = markdownRouteFallback(result, currentUrl);
+		if (fallback && !triedMarkdownFallbacks.has(fallback)) {
+			triedMarkdownFallbacks.add(fallback);
+			currentUrl = fallback;
+			continue;
+		}
 		const next = refreshUrl(result);
 		if (!next || seenRefreshes.has(next)) return result;
 		seenRefreshes.add(next);
@@ -33,16 +54,36 @@ async function fetchOnce(
 	accept: string,
 	started: number,
 ): Promise<FetchResult> {
+	let requestUrl = currentUrl;
+	const seenRedirects = new Set<string>();
+	const cookies: Cookie[] = [];
 	for (let attempt = 0; attempt < 3; attempt++) {
 		try {
-			const response = await fetch(currentUrl, {
-				redirect: "follow",
-				signal: AbortSignal.timeout(config.timeoutMs),
-				headers: {
+			const headers: { accept: string; "user-agent": string; cookie?: string } =
+				{
 					accept,
 					"user-agent": config.userAgent,
-				},
-			});
+				};
+			const cookie = cookieHeader(cookies, requestUrl);
+			if (cookie) headers.cookie = cookie;
+			const response = await fetchTransport(requestUrl, headers, config);
+			storeCookies(cookies, requestUrl, response);
+			const redirect = redirectUrl(response, requestUrl);
+			if (redirect) {
+				if (seenRedirects.has(redirect) || seenRedirects.size >= 8) {
+					return failed(
+						url,
+						requestUrl,
+						response.status,
+						started,
+						"too many redirects",
+					);
+				}
+				seenRedirects.add(redirect);
+				requestUrl = redirect;
+				attempt = -1;
+				continue;
+			}
 			const contentLength = Number(response.headers.get("content-length") ?? 0);
 			if (contentLength > config.maxBytes) {
 				return tooLarge(url, response, started, config);
@@ -55,15 +96,24 @@ async function fetchOnce(
 			}
 			const body = await readBody(response, url, started, config);
 			if (!body.ok) return body.result;
+			const text = await withWritersideTopic(
+				body.text,
+				requestUrl,
+				headers,
+				config,
+				fetchTransport,
+			);
 			const base = {
 				url,
-				finalUrl: response.url,
+				finalUrl: requestUrl,
 				status: response.status,
 				contentType: response.headers.get("content-type") ?? "",
-				body: body.text,
+				body: text,
 				fetchMs: performance.now() - started,
 			};
-			if (response.ok) return { ...base, ok: true } satisfies FetchResult;
+			if (response.status >= 200 && response.status <= 299) {
+				return { ...base, ok: true } satisfies FetchResult;
+			}
 			const error = `HTTP ${response.status}`;
 			return {
 				...base,
@@ -78,7 +128,7 @@ async function fetchOnce(
 			}
 			return failed(
 				url,
-				currentUrl,
+				requestUrl,
 				0,
 				started,
 				error instanceof Error ? error.message : String(error),
@@ -86,6 +136,81 @@ async function fetchOnce(
 		}
 	}
 	return failed(url, currentUrl, 0, started, "fetch failed");
+}
+
+function redirectUrl(response: HttpResponse, base: string): string | undefined {
+	if (response.status < 300 || response.status > 399) return undefined;
+	const location = response.headers.get("location");
+	if (!location) return undefined;
+	try {
+		const next = new URL(location, base);
+		next.hash = "";
+		return next.href;
+	} catch {
+		return undefined;
+	}
+}
+
+type Cookie = {
+	name: string;
+	value: string;
+	domain: string;
+	hostOnly: boolean;
+	secure: boolean;
+};
+
+function cookieHeader(cookies: Cookie[], raw: string) {
+	const url = new URL(raw);
+	const host = url.hostname.toLowerCase();
+	return cookies
+		.filter(
+			(cookie) =>
+				(!cookie.secure || url.protocol === "https:") &&
+				(cookie.hostOnly
+					? cookie.domain === host
+					: host === cookie.domain || host.endsWith(`.${cookie.domain}`)),
+		)
+		.map((cookie) => `${cookie.name}=${cookie.value}`)
+		.join("; ");
+}
+
+function storeCookies(cookies: Cookie[], raw: string, response: HttpResponse) {
+	const host = new URL(raw).hostname.toLowerCase();
+	const values = response.headers.getSetCookie?.() ?? [
+		response.headers.get("set-cookie") ?? "",
+	];
+	for (const value of values) {
+		const parts = value.split(";").map((part) => part.trim());
+		const pair = parts[0];
+		if (!pair) continue;
+		const split = pair.indexOf("=");
+		if (split <= 0) continue;
+		const rawDomain = parts
+			.find((part) => /^domain=/i.test(part))
+			?.slice("domain=".length)
+			.replace(/^\./, "")
+			.toLowerCase();
+		const domain =
+			rawDomain && domainMatches(host, rawDomain) ? rawDomain : host;
+		const cookie = {
+			name: pair.slice(0, split),
+			value: pair.slice(split + 1),
+			domain,
+			hostOnly: domain === host && rawDomain !== host,
+			secure: parts.some((part) => /^secure$/i.test(part)),
+		};
+		const index = cookies.findIndex(
+			(item) => item.name === cookie.name && item.domain === cookie.domain,
+		);
+		if (index >= 0) cookies[index] = cookie;
+		else cookies.push(cookie);
+	}
+}
+
+function domainMatches(host: string, domain: string) {
+	return (
+		domain.includes(".") && (host === domain || host.endsWith(`.${domain}`))
+	);
 }
 
 function isTimeoutError(error: unknown) {
@@ -98,11 +223,11 @@ function isTimeoutError(error: unknown) {
 function refreshUrl(result: FetchResult): string | undefined {
 	if (!result.ok || !/html/i.test(result.contentType)) return undefined;
 	const match = result.body.match(
-		/<meta\b[^>]*http-equiv=["']?\s*refresh\s*["']?[^>]*>/i,
+		/<meta\b[^>]*http-equiv\s*=\s*["']?\s*refresh\s*["']?[^>]*>/i,
 	);
-	if (!match) return undefined;
-	const content = match[0].match(/\bcontent=["']([^"']+)["']/i)?.[1];
-	const target = content?.match(/(?:^|;)\s*url\s*=\s*(.+)\s*$/i)?.[1]?.trim();
+	const target =
+		refreshTarget(attributeValue(match?.[0], "content")) ??
+		scriptRedirectTarget(result.body);
 	if (!target) return undefined;
 	try {
 		const url = new URL(target.replace(/^['"]|['"]$/g, ""), result.finalUrl);
@@ -113,51 +238,133 @@ function refreshUrl(result: FetchResult): string | undefined {
 	}
 }
 
+function refreshTarget(content: string | undefined): string | undefined {
+	const explicit = content?.match(/(?:^|;)\s*url\s*=\s*(.+)\s*$/i)?.[1];
+	if (explicit?.trim()) return explicit.trim();
+	const implicit = content?.split(";").slice(1).join(";").trim();
+	return implicit || undefined;
+}
+
+function attributeValue(
+	tag: string | undefined,
+	name: string,
+): string | undefined {
+	if (!tag) return undefined;
+	const pattern = new RegExp(
+		`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`,
+		"i",
+	);
+	const match = tag.match(pattern);
+	return match?.[1] ?? match?.[2] ?? match?.[3];
+}
+
+function scriptRedirectTarget(html: string): string | undefined {
+	if (!/you are being redirected|redirecting/i.test(html)) return undefined;
+	const variables = new Map<string, string>();
+	for (const match of html.matchAll(
+		/(?:\b(?:const|let|var)\b|[,;])\s*([A-Za-z_$][\w$]*)\s*=\s*["']([^"']+)["']/g,
+	)) {
+		variables.set(match[1]!, match[2]!);
+	}
+	for (const match of html.matchAll(/location\.replace\(([^)]{1,240})\)/g)) {
+		const target = evaluateStringExpression(match[1]!, variables);
+		if (target) return target;
+	}
+	let assignment: string | undefined;
+	for (const match of html.matchAll(
+		/(?:window\.)?location(?:\.href)?\s*=\s*([^;\n]{1,240})/g,
+	)) {
+		assignment = evaluateStringExpression(match[1]!, variables) ?? assignment;
+	}
+	return assignment;
+}
+
+function evaluateStringExpression(
+	expression: string,
+	variables: Map<string, string>,
+): string | undefined {
+	let out = "";
+	for (const part of expression.split("+")) {
+		const token = part.trim();
+		const literal = token.match(/^["']([^"']*)["']$/)?.[1];
+		if (literal !== undefined) {
+			out += literal;
+			continue;
+		}
+		const template = token.match(/^`([^`$]*)`$/)?.[1];
+		if (template !== undefined) {
+			out += template;
+			continue;
+		}
+		const variable = token.match(/^[A-Za-z_$][\w$]*$/)?.[0];
+		if (variable && variables.has(variable)) {
+			out += variables.get(variable);
+			continue;
+		}
+		return undefined;
+	}
+	return out;
+}
+
+function markdownRouteFallback(
+	result: FetchResult,
+	currentUrl: string,
+): string | undefined {
+	let url: URL;
+	try {
+		url = new URL(currentUrl);
+	} catch {
+		return undefined;
+	}
+	if (!url.pathname.endsWith(".md")) return undefined;
+	if (
+		result.status !== 404 &&
+		result.status !== 410 &&
+		(!result.ok || !isFrontmatterOnly(result.body))
+	) {
+		return undefined;
+	}
+	const docsPath = docsMarkdownFallback(url);
+	if (docsPath) return docsPath;
+	url.pathname = url.pathname.slice(0, -".md".length);
+	url.hash = "";
+	return url.href;
+}
+
+function docsMarkdownFallback(url: URL): string | undefined {
+	const parts = url.pathname.split("/").filter(Boolean);
+	if (parts.length !== 1 || parts[0]?.toLowerCase() === "docs.md")
+		return undefined;
+	const next = new URL(url);
+	next.pathname = `/docs/${parts[0]}`;
+	next.hash = "";
+	return next.href;
+}
+
+function isFrontmatterOnly(markdown: string): boolean {
+	const trimmed = markdown.trim();
+	if (!trimmed.startsWith("---")) return false;
+	const end = trimmed.indexOf("\n---", 3);
+	if (end < 0) return false;
+	return trimmed.slice(end + 4).trim().length === 0;
+}
+
 async function readBody(
-	response: Response,
+	response: HttpResponse,
 	url: string,
 	started: number,
 	config: Config,
 ): Promise<ReadBodyResult> {
-	if (!response.body) {
-		const body = new Uint8Array(await response.arrayBuffer());
-		if (body.byteLength > config.maxBytes) {
-			return {
-				ok: false as const,
-				result: tooLarge(url, response, started, config),
-			};
-		}
-		return { ok: true as const, text: decodeBody(response, body) };
+	if (response.body.byteLength > config.maxBytes) {
+		return {
+			ok: false as const,
+			result: tooLarge(url, response, started, config),
+		};
 	}
-
-	const reader = response.body.getReader();
-	const chunks: Uint8Array[] = [];
-	let bytes = 0;
-
-	while (true) {
-		const { done, value } = await reader.read();
-		if (done) break;
-		bytes += value.byteLength;
-		if (bytes > config.maxBytes) {
-			await reader.cancel();
-			return {
-				ok: false as const,
-				result: tooLarge(url, response, started, config),
-			};
-		}
-		chunks.push(value);
-	}
-
-	const body = new Uint8Array(bytes);
-	let offset = 0;
-	for (const chunk of chunks) {
-		body.set(chunk, offset);
-		offset += chunk.byteLength;
-	}
-	return { ok: true as const, text: decodeBody(response, body) };
+	return { ok: true as const, text: decodeBody(response, response.body) };
 }
 
-function decodeBody(response: Response, body: Uint8Array): string {
+function decodeBody(response: HttpResponse, body: Uint8Array): string {
 	for (const encoding of charsetCandidates(response, body)) {
 		try {
 			return new TextDecoder(encoding, { fatal: true }).decode(body);
@@ -166,7 +373,7 @@ function decodeBody(response: Response, body: Uint8Array): string {
 	return new TextDecoder().decode(body);
 }
 
-function charsetCandidates(response: Response, body: Uint8Array): string[] {
+function charsetCandidates(response: HttpResponse, body: Uint8Array): string[] {
 	const seen = new Set<string>();
 	const candidates = [
 		bomEncoding(body),
@@ -219,7 +426,7 @@ function cleanCharset(value: string | undefined): string | undefined {
 
 function tooLarge(
 	url: string,
-	response: Response,
+	response: HttpResponse,
 	started: number,
 	config: Config,
 ) {
@@ -278,6 +485,12 @@ function failureKind(status: number, error: string): FailureKind {
 	if (status === 404 || status === 410) return "not_found";
 	if (status === 401 || status === 403 || status === 429) return "blocked";
 	if (/exceeds/i.test(error)) return "too_large";
+	if (
+		/private|internal|localhost|single-label|credentials|unsafe|scheme|resolve/i.test(
+			error,
+		)
+	)
+		return "unsafe_url";
 	if (/timeout|timed out|abort/i.test(error)) return "timeout";
 	if (status > 0) return "http";
 	return "fetch";

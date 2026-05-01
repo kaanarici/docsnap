@@ -1,6 +1,6 @@
-import type { Config, DiscoveredUrl } from "../core/types.ts";
+import type { Config, DiscoveredUrl, FetchResult } from "../core/types.ts";
 import { fetchText } from "../fetch/fetcher.ts";
-import { discoverAssetPages } from "./assets.ts";
+import { discoverAssetPages, looksLikeAppShell } from "./assets.ts";
 import { crawlScoped } from "./crawl.ts";
 import { discoverLlms } from "./llms.ts";
 import { discoverNav, discoverPageLinks } from "./nav.ts";
@@ -15,7 +15,8 @@ import {
 } from "./url.ts";
 
 export async function discover(config: Config): Promise<DiscoveredUrl[]> {
-	const inputSeed = normalizeUrl(config.seedUrl)!;
+	const inputSeed = normalizeUrl(config.seedUrl) ?? config.seedUrl;
+	if (config.pageOnly) return [{ url: inputSeed, source: "seed" }];
 	const inputUrl = new URL(inputSeed);
 	if (inputUrl.pathname.endsWith("/llms.txt")) {
 		return discoverLlmsCorpus(inputSeed, inputSeed, "/", config);
@@ -40,12 +41,12 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 	if (inputScope === "/" ? llmsOut.length > 0 : hasCorpus(llmsOut, config))
 		return llmsOut;
 	const seedResponse = await fetchText(inputSeed, config);
-	const seed = normalizeUrl(
-		seedResponse.ok ? seedResponse.finalUrl : inputSeed,
-	)!;
-	const seedLinks = seedResponse.ok
-		? discoverPageLinks(seedResponse.body, seedResponse.finalUrl)
-		: [];
+	if (!seedResponse.ok) {
+		return [{ url: inputSeed, source: "seed", fetched: seedResponse }];
+	}
+	const finalSeed = normalizeUrl(seedResponse.finalUrl);
+	const seed = finalSeed ?? inputSeed;
+	const seedLinks = discoverPageLinks(seedResponse.body, seedResponse.finalUrl);
 	const scope = chooseScope(inputScope, seed, seedLinks);
 	if (seed !== inputSeed || scope !== inputScope) {
 		const redirectedLlmsOut = await discoverLlmsCorpus(
@@ -62,10 +63,15 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 	}
 	const robots = await loadRobots(new URL(seed).origin, config);
 	const out: DiscoveredUrl[] = [];
-	const seen = new Set<string>();
+	const seen = new Set<string>(finalSeed ? [] : [inputSeed]);
 	let limitToMax = config.maxExplicit;
 
 	const allowed = (url: string) => config.ignoreRobots || robots.allowed(url);
+	if (!allowed(seed)) {
+		return [
+			{ url: seed, source: "seed", fetched: robotsBlocked(seedResponse) },
+		];
+	}
 	const add = (
 		raw: string | undefined,
 		source: DiscoveredUrl["source"],
@@ -79,7 +85,8 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 		return out.length > before;
 	};
 
-	add(seed, "seed", seedResponse);
+	const seedIsShell = looksLikeAppShell(seedResponse.body);
+	if (!seedIsShell && finalSeed) add(seed, "seed", seedResponse);
 	if (!config.maxExplicit) {
 		const beforeLlms = out.length;
 		await addLlms(seed, config, add);
@@ -141,8 +148,30 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 		);
 		if (assetPages.length > 0) return assetPages;
 	}
+	if (out.length === 0) {
+		if (!finalSeed) {
+			return [
+				{ url: inputSeed, source: "seed", fetched: nonPage(seedResponse) },
+			];
+		}
+		add(seed, "seed", seedResponse);
+	}
 
 	return out;
+}
+
+function nonPage(result: FetchResult): FetchResult {
+	return {
+		url: result.url,
+		finalUrl: result.finalUrl,
+		status: result.status,
+		contentType: result.contentType,
+		body: result.body,
+		fetchMs: result.fetchMs,
+		ok: false,
+		error: "redirected to a filtered non-page URL",
+		failureKind: "blocked",
+	};
 }
 
 function hasCorpus(out: DiscoveredUrl[], config: Config) {
@@ -181,6 +210,7 @@ function chooseScope(inputScope: string, seed: string, links: string[]) {
 	let best = inputScope;
 	let bestCount = countInScope(links, seed, best);
 	for (const scope of parentScopes(inputScope)) {
+		if (scope === "/" && bestCount >= 3) continue;
 		const count = countInScope(links, seed, scope);
 		if (count > bestCount + 2) {
 			best = scope;
@@ -200,7 +230,22 @@ function parentScopes(scope: string) {
 	for (let i = parts.length - 1; i >= 1; i--) {
 		scopes.push(`/${parts.slice(0, i).join("/")}/`);
 	}
+	scopes.push("/");
 	return scopes;
+}
+
+function robotsBlocked(response: FetchResult): FetchResult {
+	return {
+		url: response.url,
+		finalUrl: response.finalUrl,
+		status: response.status,
+		contentType: response.contentType,
+		body: "",
+		fetchMs: response.fetchMs,
+		ok: false,
+		error: "blocked by robots.txt",
+		failureKind: "blocked",
+	};
 }
 
 async function discoverLlmsCorpus(
@@ -304,14 +349,15 @@ function corpusTarget(seed: string, urls: string[]) {
 	const best = [...byOrigin.entries()].sort(
 		(a, b) => b[1].length - a[1].length,
 	)[0];
+	const fileHeavy = best ? mostlyCorpusFiles(best[1]) : false;
 	if (
 		!best ||
 		best[1].length < 5 ||
-		(!mostlyCorpusFiles(best[1]) &&
-			!relatedHost(seedUrl.hostname, new URL(best[0]).hostname))
+		(!fileHeavy && !relatedHost(seedUrl.hostname, new URL(best[0]).hostname))
 	)
 		return undefined;
 	const scope = commonScope(best[1]);
+	if (!fileHeavy && scope === "/") return undefined;
 	return { origin: best[0], scope };
 }
 
