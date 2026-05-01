@@ -310,11 +310,11 @@ function evaluateStringExpression(
 			out += variables.get(variable);
 			continue;
 		}
+		if (/^(?:window\.)?location\.(?:search|hash)$/.test(token)) continue;
 		return undefined;
 	}
 	return out;
 }
-
 function routeFallback(
 	result: FetchResult,
 	currentUrl: string,

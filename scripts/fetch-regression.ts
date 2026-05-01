@@ -48,6 +48,23 @@ await withMockFetch(
 			{ headers: { "content-type": "text/html" } },
 		),
 );
+await withMockFetch(
+	async () => {
+		const result = await fetchText("https://93.184.216.34/", config);
+		assert(result.ok);
+		assert(result.finalUrl === "https://93.184.216.34/latest/");
+		assert(result.body === "<main>Current docs</main>");
+	},
+	async (input) =>
+		input.endsWith("/latest/")
+			? new Response("<main>Current docs</main>", {
+					headers: { "content-type": "text/html" },
+				})
+			: new Response(
+					`<title>Redirecting</title><script>window.location.replace("latest/" + window.location.search + window.location.hash);</script>`,
+					{ headers: { "content-type": "text/html" } },
+				),
+);
 
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");
