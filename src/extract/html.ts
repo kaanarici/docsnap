@@ -101,11 +101,23 @@ function isBlockedChallenge(markdown: string, title: string | undefined) {
 }
 
 function emptyContentError(html: string) {
-	return /(__docusaurus|v-app-loading|enable javascript in your browser|zdWebClientConfig)/i.test(
+	return /(__docusaurus|v-app-loading|enable javascript in your browser|zdWebClientConfig|catalog-app|react-target|ohcglobal|__meteor_runtime_config__)/i.test(
 		html,
 	)
 		? "app shell without static text"
 		: "empty content";
+}
+
+function isShellTitleOnly(
+	markdown: string,
+	title: string | undefined,
+	html: string,
+) {
+	return (
+		Boolean(title) &&
+		markdown.replace(/^#+\s*/, "").trim() === title?.trim() &&
+		/catalog-app|react-target|ohcglobal|__meteor_runtime_config__/i.test(html)
+	);
 }
 
 async function extractBody(result: FetchResult): Promise<ExtractedBody> {
@@ -143,6 +155,14 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 		const title =
 			parsed.title || document.querySelector("title")?.textContent?.trim();
 		const markdown = parsed.content.trim();
+		if (isShellTitleOnly(markdown, title, result.body)) {
+			return {
+				...(title ? { title } : {}),
+				...(canonical ? { canonicalUrl: canonical } : {}),
+				markdown: "",
+				extractor: "fallback" as const,
+			};
+		}
 		const serialized =
 			scoreMarkdown(markdown, title).confidence < 0.6
 				? extractSerializedText(result.body, title)
@@ -178,10 +198,11 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 			? extractSerializedText(result.body, title)
 			: undefined;
 	const metadata = serialized ? undefined : metadataMarkdown(document, title);
+	const markdown = serialized ?? (fallback || metadata || "");
 	return {
 		...(title ? { title } : {}),
 		...(canonical ? { canonicalUrl: canonical } : {}),
-		markdown: serialized ?? (fallback || metadata || ""),
+		markdown: isShellTitleOnly(markdown, title, result.body) ? "" : markdown,
 		extractor: "fallback" as const,
 	};
 }

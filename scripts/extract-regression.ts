@@ -4,6 +4,7 @@ import { extractPage } from "../src/extract/html.ts";
 for (const body of [
 	`<div id="__docusaurus"></div><script src="/assets/main.js"></script>`,
 	`<main></main><script>var zdWebClientConfig={"siteURL":"docs.example.com"}</script>`,
+	`<title>Client Docs</title><body><catalog-app unresolved></catalog-app></body>`,
 ]) {
 	const appShell = await extractPage({
 		source: "seed",
