@@ -25,6 +25,23 @@ for (const body of [
 	assert(appShell.error === "app shell without static text");
 }
 
+const linkOnlyRecovery = await extractPage({
+	source: "seed",
+	result: {
+		ok: true,
+		url: "https://docs.example.com/docs/",
+		finalUrl: "https://docs.example.com/docs/",
+		status: 200,
+		contentType: "text/html",
+		body: `<html><head><title>Grommet</title></head><body><div><a href="/">grommet</a><a href="/docs">docs</a><a href="/components">components</a></div><div><h1>Docs</h1><h2>you got questions, we got some answers. something missing? hit us up on <a href="https://slack.example.com">slack</a>, or open an <a href="https://github.com/example/issues">issue</a>.</h2><h3><a href="/starter">getting started with grommet</a></h3><h3><a href="/functions">functions</a></h3><h3><a href="/resources">resources</a></h3><h3><a href="/browsers">browser support</a></h3></div></body></html>`,
+		fetchMs: 1,
+	},
+} satisfies FetchedUrl);
+assert(linkOnlyRecovery.ok);
+assert(linkOnlyRecovery.extractor === "fallback");
+assert(linkOnlyRecovery.markdown.includes("Docs you got questions"));
+assert(linkOnlyRecovery.markdown.includes("grommet docs components"));
+
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");
 }

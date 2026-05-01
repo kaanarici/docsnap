@@ -184,6 +184,15 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 				extractor: "fallback" as const,
 			};
 		}
+		const fallback = linkOnlyMarkdown(markdown) ? pageText(document) : "";
+		if (wordCount(fallback) > 20) {
+			return {
+				...(title ? { title } : {}),
+				...(canonical ? { canonicalUrl: canonical } : {}),
+				markdown: fallback,
+				extractor: "fallback" as const,
+			};
+		}
 		return {
 			...(title ? { title } : {}),
 			...(canonical ? { canonicalUrl: canonical } : {}),
@@ -192,16 +201,10 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 		};
 	}
 
-	const element =
-		document.querySelector("main") ??
-		document.querySelector("article") ??
-		textElement(document.body) ??
-		textElement(document.documentElement);
 	const title =
 		document.querySelector("h1")?.textContent?.trim() ||
 		document.querySelector("title")?.textContent?.trim();
-	const fallback =
-		element?.textContent?.replace(/\n{3,}/g, "\n\n").trim() ?? "";
+	const fallback = pageText(document);
 	const serialized =
 		wordCount(fallback) < 40
 			? extractSerializedText(result.body, title)
@@ -214,6 +217,38 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 		markdown: isShellPlaceholder(markdown, title, result.body) ? "" : markdown,
 		extractor: "fallback" as const,
 	};
+}
+
+function pageText(document: Document) {
+	const element =
+		document.querySelector("main") ??
+		document.querySelector("article") ??
+		textElement(document.body) ??
+		textElement(document.documentElement);
+	return element ? readableText(element) : "";
+}
+
+function linkOnlyMarkdown(markdown: string) {
+	const withoutLinks = markdown
+		.replace(/\[[^\]]+]\([^)]+\)/g, "")
+		.replace(/\s+/g, "");
+	return (
+		linksFromMarkdown(markdown).length >= 2 &&
+		wordCount(markdown) <= 8 &&
+		!withoutLinks
+	);
+}
+
+function readableText(node: Node): string {
+	if (node.nodeType === 3) return node.textContent ?? "";
+	const text = Array.from(node.childNodes)
+		.map(readableText)
+		.filter(Boolean)
+		.join(" ");
+	return text
+		.replace(/\s+/g, " ")
+		.replace(/\s+([,.;:!?])/g, "$1")
+		.trim();
 }
 
 function textElement(element: Element | null): Element | undefined {
