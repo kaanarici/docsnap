@@ -110,6 +110,7 @@ function isNonPageUrl(url: URL) {
 		/\/(?:_sources|\+\+theme\+\+[^/]+)\//i.test(url.pathname) ||
 		/(?:^|\/)(?:create-account|try)\/?$/i.test(url.pathname) ||
 		/(?:^|\/)cgi-bin\//i.test(url.pathname) ||
+		/\/\.well-known\/captcha\//i.test(url.pathname) ||
 		/\/cdn-cgi\//i.test(url.pathname) ||
 		/(?:^|\/)(?:login|sign-?in|sign-?up|signup|register)(?:\/|$)/i.test(
 			url.pathname,

@@ -280,6 +280,7 @@ for (const badUrl of [
 	"https://example.com/++theme++2025/index.html",
 	"https://example.com/create-account",
 	"https://example.com/cgi-bin/browse-edgar",
+	"https://example.com/.well-known/captcha/565/botdetect/",
 	"https://example.com/auth/sign-in",
 	"https://example.com/cdn-cgi/l/email-protection",
 	"https://example.com/page/index.md",
