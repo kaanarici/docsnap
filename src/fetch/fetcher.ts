@@ -15,11 +15,8 @@ import {
 import { withWritersideTopic } from "./writerside.ts";
 
 let fetchTransport: FetchTransport = requestPublicHttp;
-const blockedStatuses = new Set([401, 403, 429]);
-const challengeError = "blocked by client challenge";
 const unsafeErrorPattern =
 	/private|internal|localhost|single-label|credentials|unsafe|scheme|resolve/i;
-
 export function setFetchTransportForTest(
 	transport: FetchTransport | undefined,
 ): void {
@@ -33,13 +30,13 @@ export async function fetchText(
 ): Promise<FetchResult> {
 	const started = performance.now();
 	let currentUrl = url;
-	const triedMarkdownFallbacks = new Set<string>();
+	const triedRouteFallbacks = new Set<string>();
 	const seenRefreshes = new Set<string>();
 	for (let refresh = 0; refresh < 8; refresh++) {
 		const result = await fetchOnce(url, currentUrl, config, accept, started);
-		const fallback = markdownRouteFallback(result, currentUrl);
-		if (fallback && !triedMarkdownFallbacks.has(fallback)) {
-			triedMarkdownFallbacks.add(fallback);
+		const fallback = routeFallback(result, currentUrl);
+		if (fallback && !triedRouteFallbacks.has(fallback)) {
+			triedRouteFallbacks.add(fallback);
 			currentUrl = fallback;
 			continue;
 		}
@@ -104,7 +101,7 @@ async function fetchOnce(
 					requestUrl,
 					response.status,
 					started,
-					challengeError,
+					"blocked by client challenge",
 				);
 			const body = await readBody(response, url, started, config);
 			if (!body.ok) return body.result;
@@ -318,7 +315,7 @@ function evaluateStringExpression(
 	return out;
 }
 
-function markdownRouteFallback(
+function routeFallback(
 	result: FetchResult,
 	currentUrl: string,
 ): string | undefined {
@@ -328,6 +325,8 @@ function markdownRouteFallback(
 	} catch {
 		return undefined;
 	}
+	if (url.pathname.endsWith(".html") && [404, 410].includes(result.status))
+		return withoutExtension(url, ".html");
 	if (!url.pathname.endsWith(".md")) return undefined;
 	if (
 		result.status !== 404 &&
@@ -339,11 +338,13 @@ function markdownRouteFallback(
 	}
 	const docsPath = docsMarkdownFallback(url);
 	if (docsPath) return docsPath;
-	url.pathname = url.pathname.slice(0, -".md".length);
+	return withoutExtension(url, ".md");
+}
+function withoutExtension(url: URL, extension: string) {
+	url.pathname = url.pathname.slice(0, -extension.length);
 	url.hash = "";
 	return url.href;
 }
-
 function docsMarkdownFallback(url: URL): string | undefined {
 	const parts = url.pathname.split("/").filter(Boolean);
 	if (parts.length !== 1 || parts[0]?.toLowerCase() === "docs.md")
@@ -488,7 +489,7 @@ function failed(
 
 function failureKind(status: number, error: string): FailureKind {
 	if (status === 404 || status === 410) return "not_found";
-	if (blockedStatuses.has(status) || /blocked|challenge/i.test(error))
+	if ([401, 403, 429].includes(status) || /blocked|challenge/i.test(error))
 		return "blocked";
 	if (/exceeds/i.test(error)) return "too_large";
 	if (unsafeErrorPattern.test(error)) return "unsafe_url";

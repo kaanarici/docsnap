@@ -18,6 +18,23 @@ await withMockFetch(
 			headers: { "x-amzn-waf-action": "challenge" },
 		}),
 );
+await withMockFetch(
+	async () => {
+		const result = await fetchText(
+			"https://93.184.216.34/quickstart.html",
+			config,
+		);
+		assert(result.ok);
+		assert(result.finalUrl === "https://93.184.216.34/quickstart");
+		assert(result.body === "<main>Recovered HTML route</main>");
+	},
+	async (input) =>
+		input.endsWith(".html")
+			? new Response("missing", { status: 404 })
+			: new Response("<main>Recovered HTML route</main>", {
+					headers: { "content-type": "text/html" },
+				}),
+);
 
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");
