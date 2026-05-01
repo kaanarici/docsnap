@@ -115,6 +115,7 @@ function isNonPageUrl(url: URL) {
 		/(?:^|\/)(?:login|sign-?in|sign-?up|signup|register)(?:\/|$)/i.test(
 			url.pathname,
 		) ||
+		/(?:^|\/)(?:managewatches|mydocs)(?:\/|$)/i.test(url.pathname) ||
 		/(?:^|\/)(?:copyright|copying(?:_[a-z]+)?)\.html$/i.test(url.pathname) ||
 		/(?:^|\/)page\/index\.md$/i.test(url.pathname) ||
 		/\.x?html?\.md$/i.test(url.pathname) ||

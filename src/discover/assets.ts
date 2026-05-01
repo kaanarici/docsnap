@@ -35,6 +35,12 @@ const maxAssets = 32;
 const jsAccept = "application/javascript,text/javascript,*/*;q=0.8";
 
 export function looksLikeAppShell(html: string): boolean {
+	if (
+		/zdWebClientConfig|catalog-app|react-target|app-root|ohcglobal|__meteor_runtime_config__/i.test(
+			html,
+		)
+	)
+		return true;
 	const { document } = parseHTML(html);
 	const scriptCount = document.querySelectorAll(
 		"script[src],link[href]",

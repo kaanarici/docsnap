@@ -83,6 +83,7 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 	const out: DiscoveredUrl[] = [];
 	const seen = new Set<string>(finalSeed ? [] : [inputSeed]);
 	let limitToMax = config.maxExplicit;
+	let seedIsShell = false;
 
 	const allowed = (url: string) => config.ignoreRobots || robots.allowed(url);
 	if (!allowed(seed)) {
@@ -103,7 +104,7 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 		return out.length > before;
 	};
 
-	const seedIsShell = looksLikeAppShell(seedResponse.body);
+	seedIsShell = looksLikeAppShell(seedResponse.body);
 	if (!seedIsShell && finalSeed) add(seed, "seed", seedResponse);
 	if (!config.maxExplicit) {
 		const beforeLlms = out.length;
@@ -114,11 +115,13 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 	limitToMax = true;
 	if (seedResponse.ok) {
 		for (const url of discoverNav(seedResponse.body, seedResponse.finalUrl)) {
+			if (seedIsShell && normalizeUrl(url) === seed) continue;
 			add(url, "nav");
 			if (out.length >= config.max) break;
 		}
 		if (out.length < Math.min(config.max, 3)) {
 			for (const url of seedLinks) {
+				if (seedIsShell && normalizeUrl(url) === seed) continue;
 				add(url, "crawl");
 				if (out.length >= config.max) break;
 			}

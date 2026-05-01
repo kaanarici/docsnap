@@ -72,9 +72,11 @@ async function readSitemap(
 	}
 
 	const childSitemaps = prioritizedSitemaps(locs, options.scope).slice(0, 50);
+	const childConcurrency =
+		options.limit <= 10 ? 1 : SITEMAP_INDEX_CHILD_CONCURRENCY;
 	let nextChild = 0;
 	const workers = Array.from(
-		{ length: Math.min(SITEMAP_INDEX_CHILD_CONCURRENCY, childSitemaps.length) },
+		{ length: Math.min(childConcurrency, childSitemaps.length) },
 		async () => {
 			while (found.size < options.limit) {
 				const child = childSitemaps[nextChild++];
@@ -87,15 +89,27 @@ async function readSitemap(
 }
 
 function prioritizedSitemaps(locs: string[], scope: string) {
-	if (scope === "/") return locs;
+	const ordered = [...locs].sort(
+		(a, b) => sitemapPartNumber(b) - sitemapPartNumber(a),
+	);
+	if (scope === "/") return ordered;
 	const scoped = locs.filter((loc) =>
 		pathInScope(new URL(loc).pathname, scope),
 	);
 	if (scoped.length > 0) {
 		const scopedSet = new Set(scoped);
-		return [...scoped, ...locs.filter((loc) => !scopedSet.has(loc))];
+		return [
+			...scoped.sort((a, b) => sitemapPartNumber(b) - sitemapPartNumber(a)),
+			...ordered.filter((loc) => !scopedSet.has(loc)),
+		];
 	}
-	return locs;
+	return ordered;
+}
+
+function sitemapPartNumber(raw: string) {
+	return Number(
+		new URL(raw).pathname.match(/(?:^|\/|[_-])(\d+)\.xml$/i)?.[1] ?? 0,
+	);
 }
 
 function seedScope(raw: string) {

@@ -1,6 +1,9 @@
 import { parseArgs } from "../src/cli/args.ts";
+import { looksLikeAppShell } from "../src/discover/assets.ts";
 import { discoverLlms } from "../src/discover/llms.ts";
 import { discoverNav } from "../src/discover/nav.ts";
+import { discoverSitemaps } from "../src/discover/sitemap.ts";
+import { normalizeUrl } from "../src/discover/url.ts";
 import { setFetchTransportForTest } from "../src/fetch/fetcher.ts";
 
 const links = discoverNav(
@@ -15,6 +18,13 @@ const links = discoverNav(
 assert(links.includes("https://hive.apache.org/general/downloads"));
 assert(links.includes("https://hive.apache.org/docs/latest/"));
 assert(!links.includes("https://hive.apache.org/Document"));
+assert(normalizeUrl("/mydocs", "https://docs.example.com/") === undefined);
+assert(
+	normalizeUrl("/managewatches", "https://docs.example.com/") === undefined,
+);
+assert(
+	looksLikeAppShell(`<main></main><script>var zdWebClientConfig={}</script>`),
+);
 
 const parsed = parseArgs(["https://docs.example.com/", "-m", "4"]);
 assert(!("help" in parsed) && !("version" in parsed));
@@ -81,6 +91,43 @@ try {
 	assert(first.length === 0);
 	assert(second.length === 0);
 	assert(failedLlmsProbes === 2);
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
+const sitemapFetches: string[] = [];
+setFetchTransportForTest(async (input) => {
+	const url = String(input);
+	sitemapFetches.push(url);
+	const body = url.endsWith("/sitemap.xml")
+		? `<sitemapindex><sitemap><loc>https://docs.example.com/sitemappart/1.xml</loc></sitemap><sitemap><loc>https://docs.example.com/sitemappart/2.xml</loc></sitemap></sitemapindex>`
+		: `<urlset><url><loc>https://docs.example.com/docs/intro</loc></url></urlset>`;
+	return {
+		url,
+		status: 200,
+		headers: {
+			get: (name) => (name === "content-type" ? "application/xml" : null),
+			getSetCookie: () => [],
+		},
+		body: new TextEncoder().encode(body),
+	};
+});
+try {
+	const urls = await discoverSitemaps(
+		"https://docs.example.com/docs/",
+		[],
+		parsed,
+		{
+			limit: 1,
+			scope: "/docs/",
+			accept: () => true,
+		},
+	);
+	assert(urls.length === 1);
+	assert(urls[0] === "https://docs.example.com/docs/intro");
+	assert(
+		!sitemapFetches.includes("https://docs.example.com/sitemappart/1.xml"),
+	);
 } finally {
 	setFetchTransportForTest(undefined);
 }
