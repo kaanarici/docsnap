@@ -1,3 +1,7 @@
+const refusedErrorPattern = /ECONNREFUSED/i;
+const unsafeUrlErrorPattern =
+	/private|internal|localhost|single-label|credentials|unsafe|scheme|resolve/i;
+
 export function retryDelayMs(
 	attempt: number,
 	retryAfter?: string | null,
@@ -14,4 +18,24 @@ export function retryDelayMs(
 
 export function shouldRetry(status: number): boolean {
 	return status === 429 || status >= 500;
+}
+
+export function isRetryableFetchError(error: unknown): boolean {
+	return (
+		error instanceof Error &&
+		!isTimeoutError(error) &&
+		!refusedErrorPattern.test(error.message) &&
+		!isUnsafeUrlError(error.message)
+	);
+}
+
+export function isUnsafeUrlError(error: string): boolean {
+	return unsafeUrlErrorPattern.test(error);
+}
+
+function isTimeoutError(error: unknown) {
+	return (
+		error instanceof Error &&
+		/timed out|timeout/i.test(`${error.name} ${error.message}`)
+	);
 }

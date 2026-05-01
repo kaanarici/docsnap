@@ -81,6 +81,32 @@ await withMockFetch(
 					{ headers: { "content-type": "text/html" } },
 				),
 );
+let refusedAttempts = 0;
+await withMockFetch(
+	async () => {
+		const result = await fetchText("https://93.184.216.34/refused", config);
+		assert(!result.ok);
+		assert(result.failureKind === "fetch");
+		assert(refusedAttempts === 1);
+	},
+	async () => {
+		refusedAttempts++;
+		throw new Error("connect ECONNREFUSED 93.184.216.34:443");
+	},
+);
+let unsafeAttempts = 0;
+await withMockFetch(
+	async () => {
+		const result = await fetchText("http://127.0.0.1/private", config);
+		assert(!result.ok);
+		assert(result.failureKind === "unsafe_url");
+		assert(unsafeAttempts === 0);
+	},
+	async () => {
+		unsafeAttempts++;
+		return new Response("unreachable");
+	},
+);
 
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");

@@ -6,7 +6,12 @@ import type {
 	FetchResult,
 } from "../core/types.ts";
 import { runBounded } from "./rate-limit.ts";
-import { retryDelayMs, shouldRetry } from "./retry.ts";
+import {
+	isRetryableFetchError,
+	isUnsafeUrlError,
+	retryDelayMs,
+	shouldRetry,
+} from "./retry.ts";
 import {
 	type FetchTransport,
 	type HttpResponse,
@@ -15,8 +20,6 @@ import {
 import { withWritersideTopic } from "./writerside.ts";
 
 let fetchTransport: FetchTransport = requestPublicHttp;
-const unsafeErrorPattern =
-	/private|internal|localhost|single-label|credentials|unsafe|scheme|resolve/i;
 export function setFetchTransportForTest(
 	transport: FetchTransport | undefined,
 ): void {
@@ -131,7 +134,7 @@ async function fetchOnce(
 				failureKind: failureKind(response.status, error),
 			} satisfies FetchResult;
 		} catch (error) {
-			if (attempt < 2 && !isTimeoutError(error)) {
+			if (attempt < 2 && isRetryableFetchError(error)) {
 				await Bun.sleep(retryDelayMs(attempt));
 				continue;
 			}
@@ -219,13 +222,6 @@ function storeCookies(cookies: Cookie[], raw: string, response: HttpResponse) {
 function domainMatches(host: string, domain: string) {
 	return (
 		domain.includes(".") && (host === domain || host.endsWith(`.${domain}`))
-	);
-}
-
-function isTimeoutError(error: unknown) {
-	return (
-		error instanceof Error &&
-		/timed out|timeout/i.test(`${error.name} ${error.message}`)
 	);
 }
 
@@ -492,7 +488,7 @@ function failureKind(status: number, error: string): FailureKind {
 	if ([401, 403, 429].includes(status) || /blocked|challenge/i.test(error))
 		return "blocked";
 	if (/exceeds/i.test(error)) return "too_large";
-	if (unsafeErrorPattern.test(error)) return "unsafe_url";
+	if (isUnsafeUrlError(error)) return "unsafe_url";
 	if (/timeout|timed out|abort/i.test(error)) return "timeout";
 	if (status > 0) return "http";
 	return "fetch";
