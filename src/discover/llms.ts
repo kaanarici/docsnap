@@ -1,3 +1,4 @@
+import { markdownLinkHrefs } from "../core/markdown.ts";
 import type { Config } from "../core/types.ts";
 import { fetchText } from "../fetch/fetcher.ts";
 import { normalizeUrl, pathInScope, sameScopeLinks } from "./url.ts";
@@ -110,12 +111,34 @@ function discoverCorpusHints(body: string, base: string, explicit: string[]) {
 }
 
 function corpusLinks(body: string, base: string, maxExplicit: boolean) {
-	const explicit = sameScopeLinks(body, base);
+	const explicit = corpusEntryLinks(body, base);
 	const links = [
 		...new Set([...explicit, ...discoverCorpusHints(body, base, explicit)]),
 	];
 	if (!maxExplicit) return links;
 	return links.sort((a, b) => linkRank(a, base) - linkRank(b, base));
+}
+
+function corpusEntryLinks(body: string, base: string) {
+	const links = new Set<string>();
+	for (const line of body.split("\n")) {
+		const first = markdownLinkHrefs(line)[0];
+		if (first !== undefined) {
+			const url = normalizeUrl(first, base);
+			if (url) links.add(url);
+			continue;
+		}
+		if (languageListingLine(line)) continue;
+		for (const url of sameScopeLinks(line, base)) links.add(url);
+	}
+	return [...links];
+}
+
+function languageListingLine(line: string) {
+	return (
+		/\b\d+\s+pages\b/i.test(line) &&
+		/(^|\s)\/docs(?:\/[a-z]{2}(?:-[a-z]{2})?)?(?:\s|$)/i.test(line)
+	);
 }
 
 function isFullCorpus(raw: string) {
