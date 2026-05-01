@@ -15,6 +15,10 @@ import {
 import { withWritersideTopic } from "./writerside.ts";
 
 let fetchTransport: FetchTransport = requestPublicHttp;
+const blockedStatuses = new Set([401, 403, 429]);
+const challengeError = "blocked by client challenge";
+const unsafeErrorPattern =
+	/private|internal|localhost|single-label|credentials|unsafe|scheme|resolve/i;
 
 export function setFetchTransportForTest(
 	transport: FetchTransport | undefined,
@@ -94,6 +98,14 @@ async function fetchOnce(
 				);
 				continue;
 			}
+			if (response.headers.get("x-amzn-waf-action"))
+				return failed(
+					url,
+					requestUrl,
+					response.status,
+					started,
+					challengeError,
+				);
 			const body = await readBody(response, url, started, config);
 			if (!body.ok) return body.result;
 			const text = await withWritersideTopic(
@@ -355,7 +367,7 @@ async function readBody(
 	url: string,
 	started: number,
 	config: Config,
-): Promise<ReadBodyResult> {
+) {
 	if (response.body.byteLength > config.maxBytes) {
 		return {
 			ok: false as const,
@@ -419,8 +431,9 @@ function charsetFromMeta(body: Uint8Array): string | undefined {
 }
 
 function cleanCharset(value: string | undefined): string | undefined {
+	if (!value) return;
 	return value
-		?.trim()
+		.trim()
 		.replace(/^["']|["']$/g, "")
 		.toLowerCase();
 }
@@ -431,18 +444,9 @@ function tooLarge(
 	started: number,
 	config: Config,
 ) {
-	return failed(
-		url,
-		response.url,
-		response.status,
-		started,
-		`response exceeds ${config.maxBytes} bytes`,
-	);
+	const error = `response exceeds ${config.maxBytes} bytes`;
+	return failed(url, response.url, response.status, started, error);
 }
-
-type ReadBodyResult =
-	| { ok: true; text: string }
-	| { ok: false; result: FetchResult };
 
 export function fetchMany(
 	urls: DiscoveredUrl[],
@@ -484,14 +488,10 @@ function failed(
 
 function failureKind(status: number, error: string): FailureKind {
 	if (status === 404 || status === 410) return "not_found";
-	if (status === 401 || status === 403 || status === 429) return "blocked";
+	if (blockedStatuses.has(status) || /blocked|challenge/i.test(error))
+		return "blocked";
 	if (/exceeds/i.test(error)) return "too_large";
-	if (
-		/private|internal|localhost|single-label|credentials|unsafe|scheme|resolve/i.test(
-			error,
-		)
-	)
-		return "unsafe_url";
+	if (unsafeErrorPattern.test(error)) return "unsafe_url";
 	if (/timeout|timed out|abort/i.test(error)) return "timeout";
 	if (status > 0) return "http";
 	return "fetch";

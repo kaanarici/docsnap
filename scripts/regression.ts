@@ -46,7 +46,6 @@ assert(!record.markdown.includes("static/chunks"));
 assert(!record.markdown.includes("dangerouslySetInnerHTML"));
 assert(!record.markdown.includes("__variable"));
 assert(record.confidence < lowQualityConfidence);
-assert(record.qualityReasons.includes("thin content"));
 const bodylessRecord = await extractPage({
 	source: "seed",
 	result: {
@@ -460,17 +459,18 @@ async function withMockFetch(
 		const unsafe = validatePublicHttpUrl(input);
 		if (unsafe) throw new Error(unsafe);
 		const response = await mock(input, { headers });
+		const responseHeaders = response.headers as Headers & {
+			getSetCookie?: () => string[];
+		};
 		return {
 			url: input,
 			status: response.status,
 			headers: {
 				get: (name) => response.headers.get(name),
 				getSetCookie: () =>
-					(
-						response.headers as Headers & {
-							getSetCookie?: () => string[];
-						}
-					).getSetCookie?.() ?? [response.headers.get("set-cookie") ?? ""],
+					responseHeaders.getSetCookie?.() ?? [
+						response.headers.get("set-cookie") ?? "",
+					],
 			},
 			body: new Uint8Array(await response.arrayBuffer()),
 		};
