@@ -1,5 +1,13 @@
-import type { FetchedUrl } from "../src/core/types.ts";
+import { type FetchedUrl, lowQualityConfidence } from "../src/core/types.ts";
 import { extractPage } from "../src/extract/html.ts";
+import { scoreMarkdown } from "../src/extract/quality.ts";
+
+assert(
+	scoreMarkdown(
+		`Enable JavaScript for an interactive summary table of WebKit's standards positions. Failing that, browse the [standards-positions GitHub repository](https://github.com/WebKit/standards-positions) directly.`,
+		"Standards Positions",
+	).confidence >= lowQualityConfidence,
+);
 
 for (const body of [
 	`<div id="__docusaurus"></div><script src="/assets/main.js"></script>`,
