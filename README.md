@@ -6,9 +6,9 @@ Pull public docs and text-heavy pages into a local Markdown folder for coding ag
 bunx docsnap https://example.com/docs
 ```
 
-docsnap checks `llms.txt`, sitemaps, navigation links, and a bounded crawl fallback. It writes Markdown plus `AGENT_README.md`, `tree.txt`, `manifest.jsonl`, and `summary.json`.
+docsnap checks `llms.txt`, sitemaps, navigation links, and a bounded crawl fallback. When app-shell pages block a full capture, it makes a bounded attempt to backfill useful pages without exceeding the requested `--max`. It writes Markdown plus `AGENT_README.md`, `tree.txt`, `manifest.jsonl`, and `summary.json`.
 
-It works best on public docs and server-rendered text pages. If a page is thin, blocked, or client-rendered with no readable HTML, docsnap reports that instead of pretending the capture is complete.
+It works best on public docs and server-rendered text pages. If a page is thin, blocked, stale/not-found, or client-rendered with no readable HTML, docsnap reports that instead of pretending the capture is complete.
 docsnap only fetches public HTTP(S) URLs and rejects localhost, single-label hosts, credentials, and private/internal IP addresses.
 
 ## Install
