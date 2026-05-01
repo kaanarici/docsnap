@@ -112,6 +112,29 @@ assert(chromeOnlyRecovery.ok);
 assert(chromeOnlyRecovery.extractor === "fallback");
 assert(chromeOnlyRecovery.markdown.includes("Choose from undergraduate"));
 
+const largeOutline = await extractPage({
+	source: "seed",
+	result: {
+		ok: true,
+		url: "https://developer.example.com/api/reference/",
+		finalUrl: "https://developer.example.com/api/reference/",
+		status: 200,
+		contentType: "text/html",
+		body: `<html><head><title>API Reference</title><meta name="description" content="Complete API endpoint reference."></head><body>${Array.from(
+			{ length: 520 },
+			(_, index) => `<a href="#endpoint-${index}">Endpoint ${index}</a>`,
+		).join(
+			"",
+		)}<h1>API Reference</h1><h2>Payment Transactions</h2><h3>Charge a Credit Card</h3><h3>Refund a Transaction</h3><h3>Void a Transaction</h3>${"x".repeat(2_000_000)}</body></html>`,
+		fetchMs: 1,
+	},
+} satisfies FetchedUrl);
+assert(largeOutline.ok);
+assert(largeOutline.extractor === "fallback");
+assert(largeOutline.markdown.includes("## Page Outline"));
+assert(largeOutline.markdown.includes("Payment Transactions"));
+assert(!largeOutline.markdown.includes("Endpoint 519"));
+
 const languageSelector = await extractPage({
 	source: "seed",
 	result: {

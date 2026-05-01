@@ -179,10 +179,20 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 		document.querySelector('link[rel="canonical"]')?.getAttribute("href"),
 		result.finalUrl,
 	);
+	const documentTitleText = documentTitle(document);
+	const outline = largePageOutline(document, result.body, documentTitleText);
+	if (outline) {
+		return {
+			...(documentTitleText ? { title: documentTitleText } : {}),
+			...(canonical ? { canonicalUrl: canonical } : {}),
+			markdown: outline,
+			extractor: "fallback" as const,
+		};
+	}
 
 	const parsed = await parseWithDefuddle(document, result.finalUrl);
 	if (parsed?.content?.trim()) {
-		const title = parsed.title || documentTitle(document);
+		const title = parsed.title || documentTitleText;
 		const markdown = parsed.content.trim();
 		if (isShellPlaceholder(markdown, title, result.body)) {
 			return {
@@ -226,7 +236,7 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 		};
 	}
 
-	const title = documentTitle(document);
+	const title = documentTitleText;
 	const fallback = pageText(document);
 	const serialized =
 		wordCount(fallback) < 40
@@ -249,6 +259,34 @@ function pageText(document: Document) {
 		textElement(document.body) ??
 		textElement(document.documentElement);
 	return element ? readableText(element) : "";
+}
+
+function largePageOutline(
+	document: Document,
+	html: string,
+	title: string | undefined,
+) {
+	if (html.length < 2_000_000 || document.querySelectorAll("a").length < 500)
+		return undefined;
+	const headings = uniqueByWhitespace(
+		Array.from(document.querySelectorAll("h1,h2,h3"))
+			.map((element) => element.textContent?.replace(/\s+/g, " ").trim())
+			.filter((text): text is string => Boolean(text) && !chromeHeading(text)),
+	).slice(0, 120);
+	if (headings.length < 3) return undefined;
+	const parts = [
+		title ? `# ${title}` : undefined,
+		meta(document, "description"),
+		`## Page Outline\n\n${headings.map((heading) => `- ${heading}`).join("\n")}`,
+	].filter((value): value is string => Boolean(value?.trim()));
+	const markdown = uniqueByWhitespace(parts).join("\n\n");
+	return wordCount(markdown) >= 8 ? markdown : undefined;
+}
+
+function chromeHeading(text: string) {
+	return /^(our api|hello world|support|sign in|search(?: developer site)?)$/i.test(
+		text,
+	);
 }
 
 function linkOnlyMarkdown(markdown: string) {
