@@ -1,15 +1,21 @@
 # docsnap
 
-Pull public docs and text-heavy pages into a local Markdown folder for coding agents.
+Pull public docs into local Markdown files for coding agents.
 
 ```bash
 bunx docsnap https://example.com/docs
 ```
 
-docsnap checks `llms.txt`, sitemaps, navigation links, and a bounded crawl fallback. When app-shell pages block a full capture, it makes a bounded attempt to backfill useful pages without exceeding the requested `--max`. It writes Markdown plus `AGENT_README.md`, `tree.txt`, `manifest.jsonl`, and `summary.json`.
+docsnap writes Markdown plus an agent handoff:
 
-It works best on public docs and server-rendered text pages. If a page is thin, blocked, stale/not-found, or client-rendered with no readable HTML, docsnap reports that instead of pretending the capture is complete.
-docsnap only fetches public HTTP(S) URLs and rejects localhost, single-label hosts, credentials, and private/internal IP addresses.
+```text
+docsnap/example-com/
+  AGENT_README.md
+  manifest.jsonl
+  summary.json
+  tree.txt
+  ...
+```
 
 ## Install
 
@@ -17,38 +23,46 @@ docsnap only fetches public HTTP(S) URLs and rejects localhost, single-label hos
 bun add -g docsnap
 ```
 
-## Use
+## Usage
 
-```bash
-docsnap <url>
-docsnap <url> --page
-docsnap <url> -o <dir> -m <count>
-echo https://example.com/docs | docsnap --stdin --json
+```text
+docsnap <url> [options]
+
+Options:
+  -o, --out <dir>         output directory, default docsnap/<site>
+  -m, --max <count>      max pages
+  --page                 capture only the given page
+  --clean                remove the output directory before writing
+  --json                 print one machine-readable result
+  --agent-files          link the handoff from AGENTS.md and CLAUDE.md
 ```
 
-Output defaults to `docsnap/<site>`. Point your agent at `AGENT_README.md` inside that directory, or pass `--agent-files` to link it from existing `AGENTS.md` and `CLAUDE.md` files.
+## Examples
 
 ```bash
--o, --out <dir>         output directory, default docsnap/<site>
--m, --max <count>      max pages; default all llms.txt pages, otherwise 50
---concurrency <n>      fetch concurrency, CPU-scaled default
---clean                remove the output directory before writing
---dry-run              discover and extract without writing files
---page                 capture only the given page, no discovery
---agent-files          update existing AGENTS.md/CLAUDE.md files
---json                 print one machine-readable result
---quiet                suppress progress logs
---stdin                read the URL from stdin
---ignore-robots        bypass robots.txt rules
---user-agent <value>   custom User-Agent
---fail-on-low-quality  exit non-zero when low-quality pages are found
--h, --help             show help
--v, --version          show version
+# Pull docs for an agent
+docsnap https://react.dev/reference
+
+# Capture one page
+docsnap https://example.com/docs/page --page
+
+# Custom output dir, limit to 100 pages
+docsnap https://docs.python.org -o ./python-docs -m 100
 ```
 
-## Development
+## How it works
 
-```bash
-bun install
-bun run check
-```
+1. Finds pages from `llms.txt`, sitemaps, navigation links, and bounded crawling.
+2. Fetches public HTTP(S) pages with private-network protections.
+3. Converts readable pages to Markdown with source metadata.
+4. Writes an agent-friendly folder with `AGENT_README.md`, `tree.txt`, `manifest.jsonl`, and `summary.json`.
+
+If a page is blocked, stale, or client-rendered with no readable HTML, docsnap reports that instead of pretending the capture is complete.
+
+## Requirements
+
+- [Bun](https://bun.sh) runtime
+
+## License
+
+MIT
