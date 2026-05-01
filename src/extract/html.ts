@@ -41,7 +41,12 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 		const extracted = await extractBody(result);
 		const markdown = cleanMarkdown(extracted.markdown);
 		if (!markdown)
-			return failedRecord(result, source, "empty content", "empty");
+			return failedRecord(
+				result,
+				source,
+				emptyContentError(result.body),
+				"empty",
+			);
 		if (isBlockedChallenge(markdown, extracted.title)) {
 			return failedRecord(
 				result,
@@ -93,6 +98,14 @@ function isBlockedChallenge(markdown: string, title: string | undefined) {
 		/client challenge/i.test(title ?? "") ||
 		/required part of this site couldn.t load/i.test(markdown)
 	);
+}
+
+function emptyContentError(html: string) {
+	return /(__docusaurus|v-app-loading|enable javascript in your browser|zdWebClientConfig)/i.test(
+		html,
+	)
+		? "app shell without static text"
+		: "empty content";
 }
 
 async function extractBody(result: FetchResult): Promise<ExtractedBody> {
