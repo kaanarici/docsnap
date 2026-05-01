@@ -23,10 +23,22 @@ function discoverLinks(html: string, base: string, linkSelectors: string[]) {
 	const urls = new Set<string>();
 	for (const selector of linkSelectors) {
 		for (const link of document.querySelectorAll(selector)) {
+			if (isControlLink(link)) continue;
 			const href = link.getAttribute("href");
 			const url = href ? normalizeUrl(href, base) : undefined;
 			if (url) urls.add(url);
 		}
 	}
 	return [...urls];
+}
+
+function isControlLink(link: Element) {
+	const toggle =
+		link.getAttribute("data-bs-toggle") ?? link.getAttribute("data-toggle");
+	if (toggle?.toLowerCase() === "dropdown") return true;
+	return (
+		link.classList.contains("dropdown-toggle") &&
+		link.getAttribute("role") === "button" &&
+		link.hasAttribute("aria-expanded")
+	);
 }

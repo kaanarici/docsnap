@@ -37,7 +37,7 @@
 		"check": "bun run lint && bun run typecheck && bun run test && bun run size",
 		"lint": "biome check .",
 		"typecheck": "tsc --noEmit",
-		"test": "bun scripts/regression.ts && bun scripts/fetch-regression.ts && bun scripts/extract-regression.ts",
+		"test": "bun scripts/regression.ts && bun scripts/fetch-regression.ts && bun scripts/extract-regression.ts && bun scripts/discover-regression.ts",
 		"size": "bun scripts/size.ts",
 		"publish:dry": "bun pm pack --dry-run"
 	},
