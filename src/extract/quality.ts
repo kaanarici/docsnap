@@ -34,11 +34,8 @@ export function scoreMarkdown(
 		score -= 0.1;
 		reasons.push("unbalanced code fences");
 	}
-	if (
-		score < 0.6 &&
-		isUsefulShortPage(markdown, words, links, codeBlocks, Boolean(title))
-	) {
-		score = 0.65;
+	if (isUsefulShortPage(markdown, words, links, codeBlocks, Boolean(title))) {
+		score = Math.max(score, 0.65);
 		const thin = reasons.indexOf("thin content");
 		if (thin >= 0) reasons.splice(thin, 1);
 	}
@@ -59,6 +56,10 @@ function isUsefulShortPage(
 			words >= 14 &&
 			markdown.length >= 170 &&
 			/[.!?]\s/.test(markdown)) ||
+		(hasTitle &&
+			words >= 10 &&
+			markdown.length >= 80 &&
+			(links > 0 || /[.!?]/.test(markdown))) ||
 		(hasTitle &&
 			words >= 24 &&
 			markdown.length >= 180 &&

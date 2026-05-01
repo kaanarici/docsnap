@@ -64,7 +64,11 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 			);
 		}
 		const quality = scoreMarkdown(markdown, extracted.title);
-		if (extracted.extractor === "fallback" && wordCount(markdown) < 20) {
+		if (
+			extracted.extractor === "fallback" &&
+			wordCount(markdown) < 20 &&
+			quality.reasons.includes("thin content")
+		) {
 			quality.confidence = Math.min(quality.confidence, 0.55);
 			if (!quality.reasons.includes("thin content"))
 				quality.reasons.push("thin content");

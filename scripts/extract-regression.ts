@@ -20,6 +20,12 @@ assert(
 		"Sinatra",
 	).confidence >= lowQualityConfidence,
 );
+assert(
+	scoreMarkdown(
+		`Docs.rs no longer has its own badges. Consider using [shields.io](https://shields.io/) instead.`,
+		"Badges",
+	).confidence >= lowQualityConfidence,
+);
 
 for (const body of [
 	`<div id="__docusaurus"></div><script src="/assets/main.js"></script>`,
