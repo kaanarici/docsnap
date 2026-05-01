@@ -1,5 +1,6 @@
 import { parseArgs } from "../src/cli/args.ts";
 import { looksLikeAppShell } from "../src/discover/assets.ts";
+import { discover } from "../src/discover/index.ts";
 import { discoverLlms } from "../src/discover/llms.ts";
 import { discoverNav } from "../src/discover/nav.ts";
 import { discoverSitemaps } from "../src/discover/sitemap.ts";
@@ -132,6 +133,167 @@ try {
 	setFetchTransportForTest(undefined);
 }
 
+const languageConfig = parseArgs(["https://eu.example/", "-m", "2"]);
+assert(!("help" in languageConfig) && !("version" in languageConfig));
+setFetchTransportForTest(async (input) => {
+	const url = String(input);
+	if (url.endsWith("/robots.txt")) {
+		return response(
+			url,
+			200,
+			"Sitemap: https://commission.example/sitemap.xml",
+			"text/plain",
+		);
+	}
+	if (url.endsWith("/sitemap.xml")) {
+		return response(
+			url,
+			200,
+			`<urlset><url><loc>https://commission.example/index_en</loc></url></urlset>`,
+			"application/xml",
+		);
+	}
+	if (url === "https://eu.example/") {
+		return response(
+			url,
+			302,
+			"",
+			"text/html",
+			"https://commission.example/select-language?destination=/node/1",
+		);
+	}
+	if (
+		url === "https://commission.example/select-language?destination=/node/1"
+	) {
+		return response(
+			url,
+			200,
+			`<html><body class="path-select-language"><main></main></body></html>`,
+		);
+	}
+	return response(url, 404, "not found", "text/plain");
+});
+try {
+	const urls = await discover(languageConfig);
+	assert(urls.length === 1);
+	assert(urls[0]?.url === "https://commission.example/index_en");
+	assert(urls[0]?.source === "sitemap");
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
+const urlsetSitemapFetches: string[] = [];
+setFetchTransportForTest(async (input) => {
+	const url = String(input);
+	urlsetSitemapFetches.push(url);
+	if (url.endsWith("/documentation/sitemap.xml")) {
+		return response(
+			url,
+			200,
+			`<urlset>
+				<url><loc>https://dev.example/community/api/documentation/sitemaps/fortnite/sitemap_99.xml</loc></url>
+				<url><loc>https://dev.example/community/api/documentation/sitemaps/unreal_engine/sitemap_1.xml</loc></url>
+			</urlset>`,
+			"application/xml",
+		);
+	}
+	if (url.endsWith("/sitemap_1.xml")) {
+		return response(
+			url,
+			200,
+			`<urlset><url><loc>https://dev.example/documentation/en-us/unreal-engine/installing-unreal-engine</loc></url></urlset>`,
+			"application/xml",
+		);
+	}
+	return response(url, 404, "not found", "text/plain");
+});
+try {
+	const urls = await discoverSitemaps(
+		"https://dev.example/documentation/en-us/unreal-engine/",
+		["https://dev.example/documentation/sitemap.xml"],
+		parsed,
+		{
+			limit: 1,
+			scope: "/documentation/unreal-engine/",
+			accept: () => true,
+		},
+	);
+	assert(urls.length === 1);
+	assert(
+		urls[0] ===
+			"https://dev.example/documentation/en-us/unreal-engine/installing-unreal-engine",
+	);
+	assert(
+		urlsetSitemapFetches.includes(
+			"https://dev.example/community/api/documentation/sitemaps/unreal_engine/sitemap_1.xml",
+		),
+	);
+	assert(
+		!urlsetSitemapFetches.includes(
+			"https://dev.example/community/api/documentation/sitemaps/fortnite/sitemap_99.xml",
+		),
+	);
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
+let blockedSitemapChildren = 0;
+setFetchTransportForTest(async (input) => {
+	const url = String(input);
+	if (url.endsWith("/documentation/sitemap.xml")) {
+		const children = Array.from(
+			{ length: 6 },
+			(_, index) =>
+				`<sitemap><loc>https://blocked.example/documentation/sitemap_${index + 1}.xml</loc></sitemap>`,
+		).join("");
+		return response(url, 200, `<sitemapindex>${children}</sitemapindex>`);
+	}
+	if (/\/sitemap_\d+\.xml$/.test(url)) {
+		blockedSitemapChildren++;
+		return response(url, 403, "blocked", "text/html");
+	}
+	return response(url, 404, "not found", "text/plain");
+});
+try {
+	const urls = await discoverSitemaps(
+		"https://blocked.example/documentation/guide/",
+		["https://blocked.example/documentation/sitemap.xml"],
+		parsed,
+		{
+			limit: 1,
+			scope: "/documentation/",
+			accept: () => true,
+		},
+	);
+	assert(urls.length === 0);
+	assert(blockedSitemapChildren === 5);
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");
+}
+
+function response(
+	url: string,
+	status: number,
+	body: string,
+	contentType = "text/html",
+	location?: string,
+) {
+	return {
+		url,
+		status,
+		headers: {
+			get: (name: string) =>
+				name === "content-type"
+					? contentType
+					: name === "location"
+						? (location ?? null)
+						: null,
+			getSetCookie: () => [],
+		},
+		body: new TextEncoder().encode(body),
+	};
 }

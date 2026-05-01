@@ -58,7 +58,13 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 	const finalSeed = normalizeUrl(seedResponse.finalUrl);
 	const seed = finalSeed ?? inputSeed;
 	const seedLinks = discoverPageLinks(seedResponse.body, seedResponse.finalUrl);
-	const scope = chooseScope(inputScope, seed, seedLinks);
+	const seedIsLanguageSelector = isLanguageSelector(
+		seedResponse.finalUrl,
+		seedResponse.body,
+	);
+	const scope = seedIsLanguageSelector
+		? "/"
+		: chooseScope(inputScope, seed, seedLinks);
 	if (seed !== inputSeed || scope !== inputScope) {
 		const redirectedLlmsOut = await discoverLlmsCorpus(
 			seed,
@@ -104,7 +110,7 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 		return out.length > before;
 	};
 
-	seedIsShell = looksLikeAppShell(seedResponse.body);
+	seedIsShell = seedIsLanguageSelector || looksLikeAppShell(seedResponse.body);
 	if (!seedIsShell && finalSeed) add(seed, "seed", seedResponse);
 	if (!config.maxExplicit) {
 		const beforeLlms = out.length;
@@ -142,7 +148,7 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 		await addLlms(seed, config, add, llmsOptions);
 	}
 
-	if (out.length < config.max) {
+	if (!seedIsLanguageSelector && out.length < config.max) {
 		for (const page of await crawlScoped(
 			seed,
 			scope,
@@ -268,6 +274,15 @@ function robotsBlocked(response: FetchResult): FetchResult {
 		error: "blocked by robots.txt",
 		failureKind: "blocked",
 	};
+}
+
+function isLanguageSelector(finalUrl: string, html: string) {
+	return (
+		/\/select-language(?:[/?#]|$)/i.test(finalUrl) &&
+		/path-select-language|ecl-splash-page__language|currentPath":"select-language/i.test(
+			html,
+		)
+	);
 }
 
 async function discoverLlmsCorpus(
