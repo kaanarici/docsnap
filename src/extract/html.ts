@@ -108,19 +108,24 @@ function emptyContentError(html: string) {
 		: "empty content";
 }
 
-function isShellTitleOnly(
+function isShellPlaceholder(
 	markdown: string,
 	title: string | undefined,
 	html: string,
 ) {
 	return (
-		((Boolean(title) &&
+		(((Boolean(title) &&
 			markdown.replace(/^#+\s*/, "").trim() === title?.trim()) ||
 			(wordCount(markdown) <= 2 &&
 				/raw\.githubusercontent\.com|xhrPromise/i.test(html))) &&
-		/catalog-app|react-target|ohcglobal|__meteor_runtime_config__|raw\.githubusercontent\.com/i.test(
-			html,
-		)
+			/catalog-app|react-target|ohcglobal|__meteor_runtime_config__|raw\.githubusercontent\.com/i.test(
+				html,
+			)) ||
+		(/^\s*search\s*$/i.test(markdown) &&
+			/<input[^>]+type=["']search["']|placeholder=["']search["']|class=["'][^"']*search/i.test(
+				html,
+			) &&
+			/__docusaurus/i.test(html))
 	);
 }
 
@@ -159,7 +164,7 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 		const title =
 			parsed.title || document.querySelector("title")?.textContent?.trim();
 		const markdown = parsed.content.trim();
-		if (isShellTitleOnly(markdown, title, result.body)) {
+		if (isShellPlaceholder(markdown, title, result.body)) {
 			return {
 				...(title ? { title } : {}),
 				...(canonical ? { canonicalUrl: canonical } : {}),
@@ -206,7 +211,7 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 	return {
 		...(title ? { title } : {}),
 		...(canonical ? { canonicalUrl: canonical } : {}),
-		markdown: isShellTitleOnly(markdown, title, result.body) ? "" : markdown,
+		markdown: isShellPlaceholder(markdown, title, result.body) ? "" : markdown,
 		extractor: "fallback" as const,
 	};
 }
