@@ -225,18 +225,19 @@ function domainMatches(host: string, domain: string) {
 function isTimeoutError(error: unknown) {
 	return (
 		error instanceof Error &&
-		(error.name === "TimeoutError" || /timed out|timeout/i.test(error.message))
+		/timed out|timeout/i.test(`${error.name} ${error.message}`)
 	);
 }
 
 function refreshUrl(result: FetchResult): string | undefined {
 	if (!result.ok || !/html/i.test(result.contentType)) return undefined;
-	const match = result.body.match(
+	const html = result.body.replace(/<noscript[\s\S]*?<\/noscript>/gi, "");
+	const match = html.match(
 		/<meta\b[^>]*http-equiv\s*=\s*["']?\s*refresh\s*["']?[^>]*>/i,
 	);
 	const target =
 		refreshTarget(attributeValue(match?.[0], "content")) ??
-		scriptRedirectTarget(result.body);
+		scriptRedirectTarget(html);
 	if (!target) return undefined;
 	try {
 		const url = new URL(target.replace(/^['"]|['"]$/g, ""), result.finalUrl);
@@ -246,7 +247,6 @@ function refreshUrl(result: FetchResult): string | undefined {
 		return undefined;
 	}
 }
-
 function refreshTarget(content: string | undefined): string | undefined {
 	const explicit = content?.match(/(?:^|;)\s*url\s*=\s*(.+)\s*$/i)?.[1];
 	if (explicit?.trim()) return explicit.trim();

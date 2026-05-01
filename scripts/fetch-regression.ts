@@ -36,6 +36,18 @@ await withMockFetch(
 					headers: { "content-type": "text/html" },
 				}),
 );
+await withMockFetch(
+	async () => {
+		const result = await fetchText("https://93.184.216.34/meta", config);
+		assert(result.ok);
+		assert(result.finalUrl === "https://93.184.216.34/meta");
+	},
+	async () =>
+		new Response(
+			`<noscript><meta http-equiv="refresh" content="0; URL=/fallback"></noscript><main>Readable docs page</main>`,
+			{ headers: { "content-type": "text/html" } },
+		),
+);
 
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");
