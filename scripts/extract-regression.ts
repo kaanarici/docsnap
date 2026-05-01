@@ -59,6 +59,22 @@ assert(mediaOnlyRecovery.ok);
 assert(mediaOnlyRecovery.extractor === "fallback");
 assert(mediaOnlyRecovery.markdown.includes("Develop for Apple platforms"));
 
+const chromeOnlyRecovery = await extractPage({
+	source: "seed",
+	result: {
+		ok: true,
+		url: "https://example.edu/academics/programs/",
+		finalUrl: "https://example.edu/academics/programs/",
+		status: 200,
+		contentType: "text/html",
+		body: `<html><head><title>Degree Programs</title></head><body><main><article><img src="hero.jpg"><a href="/">Home</a> &gt; <a href="/academics/">Academics</a> &gt; Programs</article><section><h1>Degree Programs</h1><p>Choose from undergraduate, graduate, online, and international programs across many areas of study.</p><p>Explore academic paths, admissions options, financial aid, and campus resources.</p></section></main></body></html>`,
+		fetchMs: 1,
+	},
+} satisfies FetchedUrl);
+assert(chromeOnlyRecovery.ok);
+assert(chromeOnlyRecovery.extractor === "fallback");
+assert(chromeOnlyRecovery.markdown.includes("Choose from undergraduate"));
+
 const languageSelector = await extractPage({
 	source: "seed",
 	result: {

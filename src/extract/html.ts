@@ -202,7 +202,9 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 			};
 		}
 		const fallback =
-			linkOnlyMarkdown(markdown) || mediaOnlyMarkdown(markdown)
+			linkOnlyMarkdown(markdown) ||
+			mediaOnlyMarkdown(markdown) ||
+			chromeOnlyMarkdown(markdown)
 				? pageText(document)
 				: "";
 		if (wordCount(fallback) > 20) {
@@ -268,6 +270,21 @@ function mediaOnlyMarkdown(markdown: string) {
 		(markdown.match(/!\[[^\]]*]\([^)]+\)/g) ?? []).length > 0 &&
 		wordCount(markdown) <= 6 &&
 		!withoutMedia
+	);
+}
+
+function chromeOnlyMarkdown(markdown: string) {
+	const withoutChrome = markdown
+		.replace(/!\[[^\]]*]\([^)]+\)/g, "")
+		.replace(/\[[^\]]+]\([^)]+\)/g, "")
+		.replace(/[>#|/\\\-–—:]+/g, " ");
+	const chromeCount =
+		(markdown.match(/!\[[^\]]*]\([^)]+\)/g) ?? []).length +
+		linksFromMarkdown(markdown).length;
+	return (
+		chromeCount >= 2 &&
+		wordCount(markdown) <= 16 &&
+		wordCount(withoutChrome) <= 2
 	);
 }
 
