@@ -201,7 +201,10 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 				extractor: "fallback" as const,
 			};
 		}
-		const fallback = linkOnlyMarkdown(markdown) ? pageText(document) : "";
+		const fallback =
+			linkOnlyMarkdown(markdown) || mediaOnlyMarkdown(markdown)
+				? pageText(document)
+				: "";
 		if (wordCount(fallback) > 20) {
 			return {
 				...(title ? { title } : {}),
@@ -253,6 +256,18 @@ function linkOnlyMarkdown(markdown: string) {
 		linksFromMarkdown(markdown).length >= 2 &&
 		wordCount(markdown) <= 8 &&
 		!withoutLinks
+	);
+}
+
+function mediaOnlyMarkdown(markdown: string) {
+	const withoutMedia = markdown
+		.replace(/!\[[^\]]*]\([^)]+\)/g, "")
+		.replace(/\[[^\]]+]\([^)]+\)/g, "")
+		.replace(/\s+/g, "");
+	return (
+		(markdown.match(/!\[[^\]]*]\([^)]+\)/g) ?? []).length > 0 &&
+		wordCount(markdown) <= 6 &&
+		!withoutMedia
 	);
 }
 

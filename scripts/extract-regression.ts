@@ -43,6 +43,22 @@ assert(linkOnlyRecovery.extractor === "fallback");
 assert(linkOnlyRecovery.markdown.includes("Docs you got questions"));
 assert(linkOnlyRecovery.markdown.includes("grommet docs components"));
 
+const mediaOnlyRecovery = await extractPage({
+	source: "seed",
+	result: {
+		ok: true,
+		url: "https://developer.example.com/",
+		finalUrl: "https://developer.example.com/",
+		status: 200,
+		contentType: "text/html",
+		body: `<html><head><title>Apple Developer</title></head><body><main><article><img src="hero.png"><img src="icon.png"></article><div><h1>Develop for Apple platforms</h1><p>There has never been a better time to develop for Apple platforms.</p><p>Explore tools, documentation, sessions, and pathways for building apps.</p></div></main></body></html>`,
+		fetchMs: 1,
+	},
+} satisfies FetchedUrl);
+assert(mediaOnlyRecovery.ok);
+assert(mediaOnlyRecovery.extractor === "fallback");
+assert(mediaOnlyRecovery.markdown.includes("Develop for Apple platforms"));
+
 const languageSelector = await extractPage({
 	source: "seed",
 	result: {
