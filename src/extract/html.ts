@@ -101,7 +101,7 @@ function isBlockedChallenge(markdown: string, title: string | undefined) {
 }
 
 function emptyContentError(html: string) {
-	return /(__docusaurus|v-app-loading|enable javascript in your browser|zdWebClientConfig|catalog-app|react-target|ohcglobal|__meteor_runtime_config__)/i.test(
+	return /(__docusaurus|v-app-loading|enable javascript in your browser|zdWebClientConfig|catalog-app|react-target|ohcglobal|__meteor_runtime_config__|raw\.githubusercontent\.com)/i.test(
 		html,
 	)
 		? "app shell without static text"
@@ -114,9 +114,13 @@ function isShellTitleOnly(
 	html: string,
 ) {
 	return (
-		Boolean(title) &&
-		markdown.replace(/^#+\s*/, "").trim() === title?.trim() &&
-		/catalog-app|react-target|ohcglobal|__meteor_runtime_config__/i.test(html)
+		((Boolean(title) &&
+			markdown.replace(/^#+\s*/, "").trim() === title?.trim()) ||
+			(wordCount(markdown) <= 2 &&
+				/raw\.githubusercontent\.com|xhrPromise/i.test(html))) &&
+		/catalog-app|react-target|ohcglobal|__meteor_runtime_config__|raw\.githubusercontent\.com/i.test(
+			html,
+		)
 	);
 }
 

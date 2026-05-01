@@ -5,6 +5,7 @@ for (const body of [
 	`<div id="__docusaurus"></div><script src="/assets/main.js"></script>`,
 	`<main></main><script>var zdWebClientConfig={"siteURL":"docs.example.com"}</script>`,
 	`<title>Client Docs</title><body><catalog-app unresolved></catalog-app></body>`,
+	`<title>CSS Status</title><main>properties</main><script>var loadCSSProperties = xhrPromise("https://raw.githubusercontent.com/example/project/main/data.json");</script>`,
 ]) {
 	const appShell = await extractPage({
 		source: "seed",
