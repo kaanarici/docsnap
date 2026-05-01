@@ -1,13 +1,18 @@
 import { markdownLinkHrefs } from "../core/markdown.ts";
-import type { Config } from "../core/types.ts";
+import type { Config, FetchResult } from "../core/types.ts";
 import { fetchText } from "../fetch/fetcher.ts";
 import { normalizeUrl, pathInScope, sameScopeLinks } from "./url.ts";
 
 const CORPUS_INDEX_LIMIT = 256;
+export type LlmsDiscoveryOptions = {
+	cache?: Map<string, Promise<FetchResult>>;
+	retryHttp?: boolean;
+};
 
 export async function discoverLlms(
 	seed: string,
 	config: Config,
+	options: LlmsDiscoveryOptions = {},
 ): Promise<string[]> {
 	const base = new URL(seed);
 	const dir = base.pathname.endsWith("/")
@@ -32,11 +37,7 @@ export async function discoverLlms(
 		const llmsUrl = queue.shift()!;
 		if (seen.has(llmsUrl)) continue;
 		seen.add(llmsUrl);
-		const response = await fetchText(
-			llmsUrl,
-			config,
-			"text/markdown,text/plain,*/*;q=0.8",
-		);
+		const response = await fetchLlmsText(llmsUrl, config, options);
 		if (!response.ok || !isLlmsCorpus(response.contentType, response.body))
 			continue;
 		if (roots.has(llmsUrl)) urls.add(llmsUrl);
@@ -57,6 +58,30 @@ export async function discoverLlms(
 		}
 	}
 	return [...urls];
+}
+
+function fetchLlmsText(
+	url: string,
+	config: Config,
+	options: LlmsDiscoveryOptions,
+) {
+	const cached = options.cache?.get(url);
+	if (cached) return cached;
+	const fetched = fetchText(
+		url,
+		{
+			...config,
+			retryHttp: options.retryHttp ?? false,
+		},
+		"text/markdown,text/plain,*/*;q=0.8",
+	).then((response) => {
+		if (response.finalUrl !== url) {
+			options.cache?.set(response.finalUrl, Promise.resolve(response));
+		}
+		return response;
+	});
+	options.cache?.set(url, fetched);
+	return fetched;
 }
 
 function isLlmsCorpus(contentType: string, body: string) {

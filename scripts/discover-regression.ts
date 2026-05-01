@@ -45,6 +45,46 @@ try {
 	setFetchTransportForTest(undefined);
 }
 
+let failedLlmsProbes = 0;
+const llmsCache = new Map();
+setFetchTransportForTest(async (input) => {
+	failedLlmsProbes++;
+	if (String(input) === "https://slow.example.com/llms.txt") {
+		return {
+			url: String(input),
+			status: 301,
+			headers: {
+				get: (name) =>
+					name === "location" ? "https://www.slow.example.com/llms.txt" : null,
+				getSetCookie: () => [],
+			},
+			body: new Uint8Array(),
+		};
+	}
+	return {
+		url: String(input),
+		status: 503,
+		headers: {
+			get: (name) => (name === "content-type" ? "text/plain" : null),
+			getSetCookie: () => [],
+		},
+		body: new TextEncoder().encode("unavailable"),
+	};
+});
+try {
+	const first = await discoverLlms("https://slow.example.com/", parsed, {
+		cache: llmsCache,
+	});
+	const second = await discoverLlms("https://www.slow.example.com/", parsed, {
+		cache: llmsCache,
+	});
+	assert(first.length === 0);
+	assert(second.length === 0);
+	assert(failedLlmsProbes === 2);
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");
 }

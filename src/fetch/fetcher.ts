@@ -92,7 +92,7 @@ async function fetchOnce(
 			if (contentLength > config.maxBytes) {
 				return tooLarge(url, response, started, config);
 			}
-			if (shouldRetry(response.status) && attempt < 2) {
+			if (shouldRetry(response.status, attempt, config.retryHttp !== false)) {
 				await Bun.sleep(
 					retryDelayMs(attempt, response.headers.get("retry-after")),
 				);

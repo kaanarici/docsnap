@@ -2,7 +2,7 @@ import type { Config, DiscoveredUrl, FetchResult } from "../core/types.ts";
 import { fetchText } from "../fetch/fetcher.ts";
 import { discoverAssetPages, looksLikeAppShell } from "./assets.ts";
 import { crawlScoped } from "./crawl.ts";
-import { discoverLlms } from "./llms.ts";
+import { discoverLlms, type LlmsDiscoveryOptions } from "./llms.ts";
 import { discoverNav, discoverPageLinks } from "./nav.ts";
 import { loadRobots } from "./robots.ts";
 import { discoverSitemaps } from "./sitemap.ts";
@@ -16,10 +16,14 @@ import {
 
 export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 	const inputSeed = normalizeUrl(config.seedUrl) ?? config.seedUrl;
+	const llmsOptions: LlmsDiscoveryOptions = { cache: new Map() };
 	if (config.pageOnly) return [{ url: inputSeed, source: "seed" }];
 	const inputUrl = new URL(inputSeed);
 	if (inputUrl.pathname.endsWith("/llms.txt")) {
-		return discoverLlmsCorpus(inputSeed, inputSeed, "/", config);
+		return discoverLlmsCorpus(inputSeed, inputSeed, "/", config, {
+			...llmsOptions,
+			retryHttp: true,
+		});
 	}
 
 	const inputScope = scopeFromSeed(inputSeed);
@@ -28,6 +32,7 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 		inputSeed,
 		inputScope,
 		config,
+		llmsOptions,
 	);
 	if (
 		inputScope !== "/" &&
@@ -35,7 +40,13 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 		substantivePages(llmsOut) < 2
 	) {
 		const root = `${inputUrl.origin}/`;
-		const rootLlmsOut = await discoverLlmsCorpus(root, root, "/", config);
+		const rootLlmsOut = await discoverLlmsCorpus(
+			root,
+			root,
+			"/",
+			config,
+			llmsOptions,
+		);
 		if (rootLlmsOut.length > llmsOut.length) return rootLlmsOut;
 	}
 	if (inputScope === "/" ? llmsOut.length > 0 : hasCorpus(llmsOut, config))
@@ -54,11 +65,18 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 			seed,
 			scope,
 			config,
+			llmsOptions,
 		);
 		if (hasCorpus(redirectedLlmsOut, config)) return redirectedLlmsOut;
 	}
 	if (usesRootFallback(seed, inputSeed)) {
-		const rootLlmsOut = await discoverLlmsCorpus(seed, seed, "/", config);
+		const rootLlmsOut = await discoverLlmsCorpus(
+			seed,
+			seed,
+			"/",
+			config,
+			llmsOptions,
+		);
 		if (rootLlmsOut.length > llmsOut.length) return rootLlmsOut;
 	}
 	const robots = await loadRobots(new URL(seed).origin, config);
@@ -89,7 +107,7 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 	if (!seedIsShell && finalSeed) add(seed, "seed", seedResponse);
 	if (!config.maxExplicit) {
 		const beforeLlms = out.length;
-		await addLlms(seed, config, add);
+		await addLlms(seed, config, add, llmsOptions);
 		if (out.length > beforeLlms) return out;
 	}
 
@@ -118,7 +136,7 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 	}
 
 	if (config.maxExplicit && out.length < config.max) {
-		await addLlms(seed, config, add);
+		await addLlms(seed, config, add, llmsOptions);
 	}
 
 	if (out.length < config.max) {
@@ -198,8 +216,9 @@ async function addLlms(
 	seed: string,
 	config: Config,
 	add: (raw: string | undefined, source: "llms") => boolean,
+	options: LlmsDiscoveryOptions,
 ) {
-	for (const url of await discoverLlms(seed, config)) {
+	for (const url of await discoverLlms(seed, config, options)) {
 		add(url, "llms");
 	}
 }
@@ -253,8 +272,9 @@ async function discoverLlmsCorpus(
 	sourceSeed: string,
 	scope: string,
 	config: Config,
+	options: LlmsDiscoveryOptions,
 ) {
-	const llmsUrls = await discoverLlms(seed, config);
+	const llmsUrls = await discoverLlms(seed, config, options);
 	const corpus = corpusTarget(seed, llmsUrls);
 	const includeRootLlms =
 		!corpus && hasScopedSameOriginLinks(llmsUrls, sourceSeed, scope);

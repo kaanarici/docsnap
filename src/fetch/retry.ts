@@ -16,8 +16,12 @@ export function retryDelayMs(
 	return Math.min(250 * 2 ** attempt + Math.floor(Math.random() * 80), 2500);
 }
 
-export function shouldRetry(status: number): boolean {
-	return status === 429 || status >= 500;
+export function shouldRetry(
+	status: number,
+	attempt: number,
+	enabled: boolean,
+): boolean {
+	return enabled && attempt < 2 && (status === 429 || status >= 500);
 }
 
 export function isRetryableFetchError(error: unknown): boolean {

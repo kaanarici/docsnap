@@ -42,6 +42,7 @@ export type Config = {
 	ignoreRobots: boolean;
 	userAgent: string;
 	timeoutMs: number;
+	retryHttp?: boolean;
 	maxBytes: number;
 	failOnLowQuality: boolean;
 	json: boolean;
