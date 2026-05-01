@@ -4,6 +4,7 @@ import { validatePublicHttpUrl } from "../src/security/url.ts";
 
 const config = parseArgs(["https://docs.example.com", "--page"]);
 assert(!("help" in config) && !("version" in config));
+assert(config.maxBytes === 12 * 1024 * 1024);
 
 await withMockFetch(
 	async () => {

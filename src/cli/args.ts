@@ -69,7 +69,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
 		userAgent:
 			"Mozilla/5.0 (compatible; docsnap/0.1.2; +https://npmjs.com/package/docsnap)",
 		timeoutMs: 10_000,
-		maxBytes: 8 * 1024 * 1024,
+		maxBytes: 12 * 1024 * 1024,
 		failOnLowQuality: false,
 		json: false,
 		quiet: false,
