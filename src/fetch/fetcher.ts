@@ -320,7 +320,8 @@ function markdownRouteFallback(
 	if (
 		result.status !== 404 &&
 		result.status !== 410 &&
-		(!result.ok || !isFrontmatterOnly(result.body))
+		(!result.ok ||
+			!(result.body.trim() === "" || isFrontmatterOnly(result.body)))
 	) {
 		return undefined;
 	}

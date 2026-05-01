@@ -241,17 +241,22 @@ await withMockFetch(
 	async () => {
 		const result = await fetchText(
 			"https://93.184.216.34/docs/frontmatter.md",
-			{
-				...parsedPage,
-				maxBytes: 1024,
-			},
+			parsedPage,
 		);
 		assert(result.ok);
 		assert(result.finalUrl === "https://93.184.216.34/docs/frontmatter");
 		assert(result.body === "<main>Recovered frontmatter stub</main>");
+		const emptyResult = await fetchText(
+			"https://93.184.216.34/docs/empty.md",
+			parsedPage,
+		);
+		assert(emptyResult.ok && emptyResult.finalUrl.endsWith("/docs/empty"));
 	},
 	async (input) => {
 		const url = String(input);
+		if (url.endsWith("/docs/empty.md")) return new Response("");
+		if (url.endsWith("/docs/empty"))
+			return new Response("<main>Recovered empty markdown stub</main>");
 		if (url.endsWith("/docs/frontmatter.md")) {
 			return new Response("---\ntitle: Stub\n---", {
 				headers: { "content-type": "text/markdown" },
