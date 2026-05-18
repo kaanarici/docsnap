@@ -30,6 +30,13 @@ export function printSummary(summary: RunSummary): void {
 		note(`docsnap: manifest ${summary.outDir}/${runFiles.manifest}`);
 		note(`docsnap: agent handoff ${summary.outDir}/${runFiles.agentReadme}`);
 	}
+	if (summary.agentFilesUpdated) {
+		note(
+			summary.agentFilesUpdated.length
+				? `docsnap: linked handoff from ${summary.agentFilesUpdated.join(", ")}`
+				: "docsnap: no AGENTS.md or CLAUDE.md found for --agent-files",
+		);
+	}
 }
 
 function issueSummary(failed: number, notFound: number, lowQuality: number) {

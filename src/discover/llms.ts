@@ -1,7 +1,12 @@
 import { markdownLinkHrefs } from "../core/markdown.ts";
 import type { Config, FetchResult } from "../core/types.ts";
 import { fetchText } from "../fetch/fetcher.ts";
-import { normalizeUrl, pathInScope, sameScopeLinks } from "./url.ts";
+import {
+	normalizeUrl,
+	pathInScope,
+	sameScopeLinks,
+	scopeFromSeed,
+} from "./url.ts";
 
 const CORPUS_INDEX_LIMIT = 256;
 export type LlmsDiscoveryOptions = {
@@ -15,6 +20,7 @@ export async function discoverLlms(
 	options: LlmsDiscoveryOptions = {},
 ): Promise<string[]> {
 	const base = new URL(seed);
+	const requestedScope = scopeFromSeed(seed);
 	const dir = base.pathname.endsWith("/")
 		? base.pathname
 		: base.pathname.replace(/\/[^/]*$/, "/");
@@ -45,6 +51,7 @@ export async function discoverLlms(
 		for (const link of corpusLinks(
 			response.body,
 			corpusBase,
+			requestedScope,
 			config.maxExplicit,
 		)) {
 			if (new URL(link).pathname === "/") continue;
@@ -136,13 +143,21 @@ function discoverCorpusHints(body: string, base: string, explicit: string[]) {
 	return hints;
 }
 
-function corpusLinks(body: string, base: string, maxExplicit: boolean) {
+function corpusLinks(
+	body: string,
+	base: string,
+	requestedScope: string,
+	maxExplicit: boolean,
+) {
 	const explicit = corpusEntryLinks(body, base);
 	const links = [
 		...new Set([...explicit, ...discoverCorpusHints(body, base, explicit)]),
 	];
 	if (!maxExplicit) return links;
-	return links.sort((a, b) => linkRank(a, base) - linkRank(b, base));
+	return links.sort(
+		(a, b) =>
+			linkRank(a, base, requestedScope) - linkRank(b, base, requestedScope),
+	);
 }
 
 function corpusEntryLinks(body: string, base: string) {
@@ -171,10 +186,11 @@ function isFullCorpus(raw: string) {
 	return /(^|\/)llms-full\.txt$/i.test(new URL(raw).pathname);
 }
 
-function linkRank(raw: string, base: string) {
+function linkRank(raw: string, base: string, requestedScope: string) {
 	const scope = base.replace(/\/[^/]*$/, "/");
 	const url = new URL(raw);
 	return (
+		Number(!pathInScope(url.pathname, requestedScope)) * 4 +
 		Number(!pathInScope(url.pathname, new URL(scope).pathname)) +
 		Number(isFullCorpus(raw)) * 2 +
 		lowValueCorpusPathRank(url.pathname)

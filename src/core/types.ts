@@ -144,6 +144,7 @@ export type RunSummary = {
 	bySource: Record<DiscoverySource, number>;
 	byFailureKind: Partial<Record<FailureKind, number>>;
 	errors: Array<{ url: string; error: string; kind: FailureKind }>;
+	agentFilesUpdated?: string[];
 };
 
 export type PipelineResult = {

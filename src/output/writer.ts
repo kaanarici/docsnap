@@ -53,6 +53,8 @@ export async function writeRunFiles(
 	config: Config,
 ): Promise<void> {
 	if (config.dryRun) return;
+	if (config.agentFiles)
+		summary.agentFilesUpdated = await installAgentFiles(summary);
 	const files: Array<readonly [file: string, body: string]> = [
 		[runFiles.manifest, manifestLines(records)],
 		[runFiles.summary, summaryJson(summary)],
@@ -64,7 +66,6 @@ export async function writeRunFiles(
 			atomicWrite(join(config.outDir, file), body, config.outDir),
 		),
 	);
-	if (config.agentFiles) await installAgentFiles(summary);
 }
 
 async function writePage(record: PageOutput, config: Config) {

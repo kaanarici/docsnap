@@ -113,6 +113,9 @@ function jsonResult(summary: RunSummary, config: Config, ok: boolean) {
 		bySource: summary.bySource,
 		byFailureKind: summary.byFailureKind,
 		errors: summary.errors,
+		...(config.agentFiles
+			? { agentFilesUpdated: summary.agentFilesUpdated ?? [] }
+			: {}),
 		rootHash: summary.rootHash,
 		renderedFiles: summary.renderedFiles,
 		renderedBytes: summary.renderedBytes,

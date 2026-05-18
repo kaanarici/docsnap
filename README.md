@@ -29,12 +29,17 @@ bun add -g docsnap
 docsnap <url> [options]
 
 Options:
-  -o, --out <dir>         output directory, default docsnap/<site>
-  -m, --max <count>      max pages
-  --page                 capture only the given page
-  --clean                remove the output directory before writing
-  --json                 print one machine-readable result
-  --agent-files          link the handoff from AGENTS.md and CLAUDE.md
+  -o, --out <dir>           output directory, default docsnap/<site>
+  -m, --max <count>         max pages; default all llms.txt pages, otherwise 50
+  --concurrency <n>         fetch concurrency
+  --clean                   remove output dir before writing
+  --dry-run                 run without writing files
+  --page                    capture only the given page
+  --agent-files             update existing AGENTS.md/CLAUDE.md files
+  --json                    print one machine-readable result
+  --quiet                   suppress progress logs
+  --stdin                   read the URL from stdin
+  --fail-on-low-quality     exit non-zero when low-quality pages are found
 ```
 
 ## Examples
