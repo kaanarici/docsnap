@@ -1,12 +1,12 @@
 # docsnap
 
-Pull public docs into local Markdown files for coding agents.
+Capture public docs as local Markdown that agents can search, cite, and read without browsing.
 
 ```bash
 bunx docsnap https://example.com/docs
 ```
 
-docsnap writes Markdown plus an agent handoff:
+It writes a small folder:
 
 ```text
 docsnap/example-com/
@@ -16,6 +16,8 @@ docsnap/example-com/
   tree.txt
   ...
 ```
+
+Use it when an agent needs current docs from a site, a framework, or one exact page. It works best on docs with readable HTML, `llms.txt`, sitemaps, or normal navigation links.
 
 ## Install
 
@@ -31,7 +33,7 @@ docsnap <url> [options]
 Options:
   -o, --out <dir>           output directory, default docsnap/<site>
   -m, --max <count>         max pages; default all llms.txt pages, otherwise 50
-  --concurrency <n>         fetch concurrency
+  --concurrency <n>         fetch concurrency, default 64
   --clean                   remove output dir before writing
   --dry-run                 run without writing files
   --page                    capture only the given page
@@ -42,27 +44,27 @@ Options:
   --fail-on-low-quality     exit non-zero when low-quality pages are found
 ```
 
-## Examples
+## Common runs
 
 ```bash
-# Pull docs for an agent
 docsnap https://react.dev/reference
 
-# Capture one page
 docsnap https://example.com/docs/page --page
 
-# Custom output dir, limit to 100 pages
 docsnap https://docs.python.org -o ./python-docs -m 100
+
+docsnap https://docs.example.com --agent-files
 ```
 
-## How it works
+## Output
 
-1. Finds pages from `llms.txt`, sitemaps, navigation links, and bounded crawling.
-2. Fetches public HTTP(S) pages with private-network protections.
-3. Converts readable pages to Markdown with source metadata.
-4. Writes an agent-friendly folder with `AGENT_README.md`, `tree.txt`, `manifest.jsonl`, and `summary.json`.
+- `AGENT_README.md`: handoff for the captured docs
+- `tree.txt`: file tree for quick navigation
+- `manifest.jsonl`: one record per URL
+- `summary.json`: counts, failures, hashes, and timing
+- Markdown files: readable page captures with source metadata
 
-If a page is blocked, stale, or client-rendered with no readable HTML, docsnap reports that instead of pretending the capture is complete.
+docsnap reports blocked, stale, or client-rendered pages instead of hiding them.
 
 ## Requirements
 
