@@ -70,8 +70,6 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 			quality.reasons.includes("thin content")
 		) {
 			quality.confidence = Math.min(quality.confidence, 0.55);
-			if (!quality.reasons.includes("thin content"))
-				quality.reasons.push("thin content");
 		}
 		return {
 			ok: true,

@@ -318,22 +318,14 @@ async function discoverLlmsCorpus(
 			includeRootLlms &&
 			origin === sourceOrigin &&
 			parsed.pathname === "/llms.txt";
-		addDiscovered(
-			out,
-			seen,
-			url,
-			"llms",
-			rootLlms
-				? `${origin}/`
-				: corpus && new URL(url).origin === corpus.origin
-					? `${corpus.origin}${corpus.scope}`
-					: sourceSeed,
-			rootLlms
-				? "/"
-				: corpus && new URL(url).origin === corpus.origin
-					? corpus.scope
-					: scope,
-		);
+		const corpusMatch = corpus && origin === corpus.origin;
+		const targetSeed = rootLlms
+			? `${origin}/`
+			: corpusMatch
+				? `${corpus.origin}${corpus.scope}`
+				: sourceSeed;
+		const targetScope = rootLlms ? "/" : corpusMatch ? corpus.scope : scope;
+		addDiscovered(out, seen, url, "llms", targetSeed, targetScope);
 		if (config.maxExplicit && out.length >= config.max) break;
 	}
 	return out;

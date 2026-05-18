@@ -18,7 +18,7 @@ export async function withWritersideTopic(
 			topicUrl,
 			{
 				accept: "application/json,text/plain;q=0.9,*/*;q=0.8",
-				"user-agent": headers["user-agent"] ?? config.userAgent,
+				"user-agent": headers["user-agent"],
 				...(cookie ? { cookie } : {}),
 			},
 			config,
