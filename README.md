@@ -1,12 +1,12 @@
 # docsnap
 
-Capture public docs as local Markdown that agents can search, cite, and read without browsing.
+Pull public docs into a local Markdown folder for coding agents.
 
 ```bash
 bunx docsnap https://react.dev/reference -m 8 --clean
 ```
 
-The CLI shows each stage as it runs:
+The CLI prints progress as it runs:
 
 ```text
 docsnap: discovering
@@ -20,7 +20,7 @@ docsnap: manifest docsnap/react-dev-reference/manifest.jsonl
 docsnap: agent handoff docsnap/react-dev-reference/AGENT_README.md
 ```
 
-It writes a small folder:
+It writes:
 
 ```text
 docsnap/react-dev-reference/
@@ -31,7 +31,7 @@ docsnap/react-dev-reference/
   ...
 ```
 
-Use it when an agent needs current docs from a site, a framework, or one exact page. It works best on docs with readable HTML, `llms.txt`, sitemaps, or normal navigation links.
+docsnap works best on sites with readable HTML, `llms.txt`, sitemaps, or regular links.
 
 ## Install
 
