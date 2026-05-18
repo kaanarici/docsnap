@@ -78,7 +78,7 @@ docsnap https://docs.djangoproject.com/en/stable/ --agent-files
 - `summary.json`: counts, failures, hashes, and timing
 - Markdown files: readable page captures with source metadata
 
-docsnap reports blocked, stale, or client-rendered pages instead of hiding them.
+Blocked, stale, and client-rendered pages are listed in `summary.json` and `manifest.jsonl`.
 
 ## Requirements
 
