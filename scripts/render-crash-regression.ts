@@ -12,6 +12,7 @@ import { setBrowserLauncherForTest } from "../src/render/index.ts";
 
 const testOrigin = "http://127.0.0.1:17777";
 
+await import("./render-launch-regression.ts");
 await launchFailureFallbackRegression();
 await transientLaunchRetryRegression();
 await midRenderCrashFallbackRegression();

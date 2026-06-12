@@ -1,10 +1,18 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import {
+	type ChildProcess,
+	type SpawnOptions,
+	spawn,
+} from "node:child_process";
 import { constants } from "node:fs";
 import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { CdpConnection } from "./cdp.ts";
+import {
+	acquireRenderLaunchLock,
+	releaseRenderLaunchLock,
+} from "./launch-lock.ts";
 
 export type BrowserBinary = {
 	path: string;
@@ -25,16 +33,29 @@ export type BrowserSession = {
 	close: () => Promise<void>;
 };
 
+export type HeadlessMode = "old" | "new";
+
 export type BrowserLaunchAttempt = (
 	binary: BrowserBinary,
 	profile: string,
+	headless: HeadlessMode,
 ) => Promise<BrowserSession>;
+
+export type BrowserProcessSpawner = (
+	command: string,
+	args: string[],
+	options: SpawnOptions,
+) => ChildProcess;
 
 export type BrowserLaunchOptions = {
 	retries?: number;
 	profileRoot?: string;
 	retryDelayMs?: (attempt: number) => number;
 	launchAttempt?: BrowserLaunchAttempt;
+	spawnProcess?: BrowserProcessSpawner;
+	launchLockPath?: string;
+	launchLockStaleMs?: number;
+	launchLockTimeoutMs?: number;
 };
 
 type VersionResult = {
@@ -42,6 +63,7 @@ type VersionResult = {
 };
 
 const defaultLaunchRetries = 2;
+const headlessModeByBinary = new Map<string, HeadlessMode>();
 
 const pathCommands = [
 	["google-chrome", "chrome"],
@@ -85,12 +107,25 @@ export async function launchBrowser(
 		Math.floor(options.retries ?? defaultLaunchRetries),
 	);
 	const profileRoot = options.profileRoot ?? tmpdir();
-	const launch = options.launchAttempt ?? launchBrowserAttempt;
+	const launch =
+		options.launchAttempt ??
+		((attemptBinary, attemptProfile, headless) =>
+			launchBrowserAttempt(
+				attemptBinary,
+				attemptProfile,
+				headless,
+				options.spawnProcess ?? spawn,
+			));
 	let lastError: unknown;
 	for (let attempt = 0; attempt <= maxRetries; attempt++) {
 		const profile = await mkdtemp(join(profileRoot, "docsnap-render-"));
 		try {
-			const session = await launch(binary, profile);
+			const session = await launchWithHeadlessPreference(
+				binary,
+				profile,
+				launch,
+				options,
+			);
 			return withProfileCleanup(session, profile);
 		} catch (error) {
 			lastError = error;
@@ -106,29 +141,16 @@ export async function launchBrowser(
 async function launchBrowserAttempt(
 	binary: BrowserBinary,
 	profile: string,
+	headless: HeadlessMode,
+	spawnProcess: BrowserProcessSpawner = spawn,
 ): Promise<BrowserSession> {
 	let child: ChildProcess | undefined;
 	let cdp: CdpConnection | undefined;
 	let closed = false;
 	try {
-		child = spawn(
-			binary.path,
-			[
-				"--headless=new",
-				"--remote-debugging-pipe",
-				`--user-data-dir=${profile}`,
-				"--no-first-run",
-				"--no-default-browser-check",
-				"--disable-extensions",
-				"--disable-sync",
-				"--disable-background-networking",
-				"--dns-prefetch-disable",
-				"--disable-preconnect",
-				"--no-pings",
-				"--disable-features=NoStatePrefetch,Prerender2,SpeculationRules,SpeculationRulesPrefetchProxy",
-			],
-			{ stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"] },
-		);
+		child = spawnProcess(binary.path, browserLaunchArgs(profile, headless), {
+			stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"],
+		});
 		const toBrowser = child.stdio[3] as Writable;
 		const fromBrowser = child.stdio[4] as Readable;
 		cdp = new CdpConnection(toBrowser, fromBrowser);
@@ -159,6 +181,100 @@ async function launchBrowserAttempt(
 		await stopChild(child);
 		throw error;
 	}
+}
+
+export function browserLaunchArgs(
+	profile: string,
+	headless: HeadlessMode,
+): string[] {
+	return [
+		`--headless=${headless}`,
+		"--remote-debugging-pipe",
+		`--user-data-dir=${profile}`,
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--disable-extensions",
+		"--disable-sync",
+		"--disable-background-networking",
+		"--dns-prefetch-disable",
+		"--disable-preconnect",
+		"--no-pings",
+		"--disable-gpu",
+		"--disable-features=NoStatePrefetch,Prerender2,SpeculationRules,SpeculationRulesPrefetchProxy",
+	];
+}
+
+async function launchWithHeadlessPreference(
+	binary: BrowserBinary,
+	profile: string,
+	launch: BrowserLaunchAttempt,
+	options: BrowserLaunchOptions,
+): Promise<BrowserSession> {
+	const key = headlessCacheKey(binary);
+	const cached = headlessModeByBinary.get(key);
+	if (cached) return launchWithLock(binary, profile, cached, launch, options);
+	try {
+		const session = await launchWithLock(
+			binary,
+			profile,
+			"old",
+			launch,
+			options,
+		);
+		headlessModeByBinary.set(key, "old");
+		return session;
+	} catch (oldError) {
+		if (!shouldTryNewHeadless(oldError)) throw oldError;
+		try {
+			const session = await launchWithLock(
+				binary,
+				profile,
+				"new",
+				launch,
+				options,
+			);
+			headlessModeByBinary.set(key, "new");
+			return session;
+		} catch (newError) {
+			throw new Error(
+				`old headless failed: ${errorMessage(oldError)}; new headless failed: ${errorMessage(newError)}`,
+			);
+		}
+	}
+}
+
+async function launchWithLock(
+	binary: BrowserBinary,
+	profile: string,
+	headless: HeadlessMode,
+	launch: BrowserLaunchAttempt,
+	options: BrowserLaunchOptions,
+): Promise<BrowserSession> {
+	const lock = await acquireRenderLaunchLock({
+		...(options.launchLockPath ? { path: options.launchLockPath } : {}),
+		...(options.launchLockStaleMs !== undefined
+			? { staleMs: options.launchLockStaleMs }
+			: {}),
+		...(options.launchLockTimeoutMs !== undefined
+			? { waitTimeoutMs: options.launchLockTimeoutMs }
+			: {}),
+	});
+	try {
+		return await launch(binary, profile, headless);
+	} finally {
+		await releaseRenderLaunchLock(lock);
+	}
+}
+
+function shouldTryNewHeadless(error: unknown) {
+	const message = errorMessage(error);
+	return /headless|flag|option|invalid|unsupported|removed|CDP timeout: Browser\.getVersion|CDP connection closed|browser exited|EPIPE|ECONNRESET|pipe/i.test(
+		message,
+	);
+}
+
+function headlessCacheKey(binary: BrowserBinary) {
+	return `${binary.name}\0${binary.path}`;
 }
 
 function withProfileCleanup(
@@ -192,6 +308,10 @@ function browserExitError(code: number | null, signal: NodeJS.Signals | null) {
 
 function errorFrom(error: unknown) {
 	return error instanceof Error ? error : new Error(String(error));
+}
+
+function errorMessage(error: unknown) {
+	return error instanceof Error ? error.message : String(error);
 }
 
 function commandForPlatform(command: string, platform: NodeJS.Platform) {
