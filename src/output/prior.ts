@@ -235,6 +235,7 @@ function isExtractor(value: unknown): value is PageExtractor {
 		value === "markdown" ||
 		value === "html" ||
 		value === "text" ||
+		value === "inline-state" ||
 		value === "fallback"
 	);
 }

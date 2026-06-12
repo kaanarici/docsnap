@@ -32,6 +32,7 @@ import {
 import { buildSummary } from "../report/summary.ts";
 import { validatePublicHttpUrl } from "../security/url.ts";
 import { dedupeRecords } from "./dedupe.ts";
+import { applyInlineState } from "./inline-state.ts";
 import { hasOutputPath, isPageSuccess } from "./records.ts";
 import {
 	type RefreshCounters,
@@ -183,7 +184,11 @@ async function fetchAndExtract(
 		if (recovered) reused.push(recovered);
 		else extractable.push(rejectNonPageFinal(item));
 	}
-	const staticRecords = await extractMany(extractable);
+	const staticRecords = applyInlineState(
+		extractable,
+		await extractMany(extractable),
+		staticShellReason,
+	);
 	const rendered = await applyRendering(
 		extractable,
 		staticRecords,
@@ -285,6 +290,22 @@ function renderReason(
 	if (config.render === "never") return undefined;
 	if (input.source === "asset" || !isHtmlResult(result)) return undefined;
 	if (config.render === "always") return "always";
+	if (
+		record.ok &&
+		record.extractor === "inline-state" &&
+		record.confidence >= lowQualityConfidence
+	) {
+		return undefined;
+	}
+	return staticShellReason(input, record);
+}
+
+function staticShellReason(
+	input: FetchedUrl,
+	record: PageRecord,
+): RenderReason | undefined {
+	const result = input.result;
+	if (input.source === "asset" || !isHtmlResult(result)) return undefined;
 	const staticAppShell = looksLikeAppShell(result.body);
 	const emptyAppShell =
 		!record.ok &&

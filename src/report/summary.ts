@@ -7,10 +7,13 @@ import {
 	discoverySources,
 	type FailureKind,
 	type InjectionSignal,
+	type InlineStateSource,
 	injectionSignals,
+	inlineStateSources,
 	lowQualityConfidence,
 	type PageRecord,
 	type PageSuccess,
+	pageExtractors,
 	type RefreshSummary,
 	type RenderSummary,
 	type RunSummary,
@@ -41,6 +44,8 @@ export function buildSummary(
 		{ from: string; to: string; count: number }
 	>();
 	const bySource = emptyCounts(discoverySources);
+	const byExtractor = emptyCounts(pageExtractors);
+	const byInlineStateSource: Partial<Record<InlineStateSource, number>> = {};
 	const byFailureKind: Partial<Record<FailureKind, number>> = {};
 	const byInjectionSignal: Partial<Record<InjectionSignal, number>> = {};
 	const errors: RunSummary["errors"] = [];
@@ -54,6 +59,11 @@ export function buildSummary(
 			}
 		}
 		if (record.ok) {
+			byExtractor[record.extractor]++;
+			if (record.inlineStateSource) {
+				byInlineStateSource[record.inlineStateSource] =
+					(byInlineStateSource[record.inlineStateSource] ?? 0) + 1;
+			}
 			if (record.outputPath) written++;
 			if (record.outputPath && addRedirectedHosts(record, redirectedHosts)) {
 				hostRedirects++;
@@ -109,6 +119,11 @@ export function buildSummary(
 			(written / Math.max(elapsedMs / 1000, 0.001)).toFixed(2),
 		),
 		bySource,
+		byExtractor,
+		byInlineStateSource: orderedPartialCounts(
+			byInlineStateSource,
+			inlineStateSources,
+		),
 		byFailureKind,
 		errors,
 		render,

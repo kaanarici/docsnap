@@ -11,6 +11,28 @@ export const discoverySources = [
 
 export type DiscoverySource = (typeof discoverySources)[number];
 
+export const pageExtractors = [
+	"markdown",
+	"html",
+	"text",
+	"fallback",
+	"inline-state",
+] as const;
+
+export type PageExtractor = (typeof pageExtractors)[number];
+
+export const inlineStateSources = [
+	"next-data",
+	"rsc",
+	"nuxt",
+	"remix",
+	"redux",
+	"ld-json",
+	"json",
+] as const;
+
+export type InlineStateSource = (typeof inlineStateSources)[number];
+
 export const failureKinds = [
 	"blocked",
 	"empty",
@@ -171,8 +193,6 @@ type PageBase = {
 	updatedAt?: string;
 };
 
-export type PageExtractor = "markdown" | "html" | "text" | "fallback";
-
 export type PageSuccess = PageBase & {
 	ok: true;
 	canonicalUrl?: string;
@@ -182,6 +202,7 @@ export type PageSuccess = PageBase & {
 	links: string[];
 	contentHash: string;
 	extractor: PageExtractor;
+	inlineStateSource?: InlineStateSource;
 	confidence: number;
 	qualityReasons: string[];
 	outputPath?: string;
@@ -232,6 +253,8 @@ export type RunSummary = {
 	firstPageMs: number | null;
 	pagesPerSecond: number;
 	bySource: Record<DiscoverySource, number>;
+	byExtractor: Record<PageExtractor, number>;
+	byInlineStateSource: Partial<Record<InlineStateSource, number>>;
 	byFailureKind: Partial<Record<FailureKind, number>>;
 	errors: Array<{ url: string; error: string; kind: FailureKind }>;
 	render: RenderSummary;
