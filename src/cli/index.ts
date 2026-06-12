@@ -128,6 +128,7 @@ function jsonResult(summary: RunSummary, config: Config, ok: boolean) {
 		bySource: summary.bySource,
 		byFailureKind: summary.byFailureKind,
 		errors: summary.errors,
+		render: summary.render,
 		refresh: summary.refresh,
 		...(config.agentFiles
 			? { agentFilesUpdated: summary.agentFilesUpdated ?? [] }

@@ -196,6 +196,7 @@ function mergeDiscovered(
 const sourceRank: Record<DiscoverySource, number> = {
 	llms: 7,
 	asset: 6,
+	render: 6,
 	sitemap: 5,
 	feed: 4,
 	nav: 3,

@@ -11,6 +11,7 @@ import {
 	type PageRecord,
 	type PageSuccess,
 	type RefreshSummary,
+	type RenderSummary,
 	type RunSummary,
 } from "../core/types.ts";
 
@@ -22,6 +23,7 @@ export function buildSummary(
 	snapshot: SnapshotStats,
 	elapsedMs: number,
 	refresh: RefreshSummary = emptyRefreshSummary(),
+	render: RenderSummary = emptyRenderSummary(config),
 ): RunSummary {
 	let written = 0;
 	let failed = 0;
@@ -103,7 +105,24 @@ export function buildSummary(
 		bySource,
 		byFailureKind,
 		errors,
+		render,
 		refresh,
+	};
+}
+
+export function emptyRenderSummary(config: Config): RenderSummary {
+	return {
+		mode: config.render,
+		renderer: "chrome-cdp",
+		browser: null,
+		attempted: 0,
+		renderedPages: 0,
+		failedPages: 0,
+		elapsedMs: 0,
+		resourceRequests: 0,
+		blockedRequests: 0,
+		unavailableReason: null,
+		pages: [],
 	};
 }
 

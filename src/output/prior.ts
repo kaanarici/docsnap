@@ -1,5 +1,5 @@
 import { readFile, realpath } from "node:fs/promises";
-import { isAbsolute, join, parse, relative, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import {
 	identityKeyGroups,
 	type identityKeys,
@@ -16,6 +16,7 @@ import type {
 import { injectionSignals } from "../core/types.ts";
 import { scanMarkdownForInjectionSignals } from "../security/injection.ts";
 import { runFiles } from "./files.ts";
+import { isInsideOrSame } from "./writer.ts";
 
 export type PriorPage = Omit<PageSuccess, "markdown"> & {
 	outputPath: string;
@@ -216,11 +217,6 @@ function isWindowsAbsolute(outputPath: string) {
 	return /^[a-zA-Z]:[\\/]/.test(outputPath) || outputPath.startsWith("\\\\");
 }
 
-function isInsideOrSame(parent: string, child: string) {
-	const path = relative(parent, child);
-	return path === "" || (!path.startsWith("..") && !parse(path).root);
-}
-
 function isSource(value: unknown): value is DiscoverySource {
 	return (
 		value === "seed" ||
@@ -229,7 +225,8 @@ function isSource(value: unknown): value is DiscoverySource {
 		value === "feed" ||
 		value === "nav" ||
 		value === "crawl" ||
-		value === "asset"
+		value === "asset" ||
+		value === "render"
 	);
 }
 

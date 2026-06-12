@@ -35,6 +35,9 @@ export function printSummary(summary: RunSummary): void {
 		const page = summary.hostRedirects === 1 ? "page" : "pages";
 		note(`docsnap: ${summary.hostRedirects} ${page} changed host via redirect`);
 	}
+	if (summary.render.attempted) {
+		note(renderSummary(summary));
+	}
 	if (!summary.dryRun) {
 		note(`docsnap: summary ${summary.outDir}/${runFiles.summary}`);
 		note(`docsnap: manifest ${summary.outDir}/${runFiles.manifest}`);
@@ -61,4 +64,9 @@ function failureSummary(summary: RunSummary) {
 	return Object.entries(summary.byFailureKind)
 		.map(([kind, count]) => `${kind}=${count}`)
 		.join(" ");
+}
+
+function renderSummary(summary: RunSummary) {
+	const render = summary.render;
+	return `docsnap: rendered ${render.renderedPages}/${render.attempted} pages with ${render.renderer}`;
 }
