@@ -51,7 +51,7 @@ Options:
   --concurrency <n>         fetch concurrency, CPU-scaled default up to 64
   --clean                   remove output dir before writing
   --dry-run                 run without writing files
-  --page                    capture only the given page, no discovery
+  --page                    capture only the given page after robots.txt check
   --no-cache                disable the shared fetch cache for this run
   --agent-files             add a docsnap block to AGENTS.md/CLAUDE.md in the current directory
   --json                    print one machine-readable result

@@ -29,7 +29,7 @@ export const toolDefinitions: ToolDefinition[] = [
 				page_only: {
 					type: "boolean",
 					default: false,
-					description: "Capture only url, no discovery.",
+					description: "Capture only url after robots.txt check, no discovery.",
 				},
 				clean: {
 					type: "boolean",

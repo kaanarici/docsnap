@@ -1,5 +1,5 @@
 import type { Config } from "../core/types.ts";
-import { fetchText } from "../fetch/fetcher.ts";
+import { fetchTextUncached } from "../fetch/fetcher.ts";
 
 export type Robots = {
 	sitemaps: string[];
@@ -23,7 +23,7 @@ export async function loadRobots(
 	config: Config,
 ): Promise<Robots> {
 	if (config.ignoreRobots) return openRobots();
-	const response = await fetchText(
+	const response = await fetchTextUncached(
 		`${origin}/robots.txt`,
 		config,
 		"text/plain,*/*;q=0.8",

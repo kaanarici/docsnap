@@ -90,6 +90,8 @@ type FetchBase = {
 	lastModified?: string;
 	fetchedAt?: string;
 	cacheControl?: string;
+	vary?: string;
+	setCookie?: boolean;
 };
 
 export type RedirectHop = {

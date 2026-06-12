@@ -13,10 +13,12 @@ const cacheMaxEnv = "DOCSNAP_CACHE_MAX_MB";
 
 await withCacheEnv("cross-dir", async () => {
 	const root = await mkdtemp(join(tmpdir(), "docsnap-cache-out-"));
-	let calls = 0;
+	let pageCalls = 0;
 	setFetchTransportForTest(async (input) => {
-		calls++;
-		return response(String(input), 200, page("Shared Cache", text));
+		const url = String(input);
+		if (isRobots(url)) return robots404(url);
+		pageCalls++;
+		return response(url, 200, page("Shared Cache", text));
 	});
 	try {
 		const first = await runPipeline(
@@ -28,7 +30,7 @@ await withCacheEnv("cross-dir", async () => {
 		assert(first.summary.cache.written === 1);
 		assert(second.summary.cache.hits === 1);
 		assert(second.summary.cache.bytesRead > 0);
-		assert(calls === 1);
+		assert(pageCalls === 1);
 	} finally {
 		setFetchTransportForTest(undefined);
 	}
@@ -37,17 +39,19 @@ await withCacheEnv("cross-dir", async () => {
 await withCacheEnv("stale", async () => {
 	const root = await mkdtemp(join(tmpdir(), "docsnap-cache-stale-"));
 	const seenHeaders: Record<string, string>[] = [];
-	let calls = 0;
+	let pageCalls = 0;
 	setFetchTransportForTest(async (input, headers) => {
-		calls++;
+		const url = String(input);
+		if (isRobots(url)) return robots404(url);
+		pageCalls++;
 		seenHeaders.push(headers);
-		if (calls === 1) {
-			return response(String(input), 200, page("Stale", text), {
+		if (pageCalls === 1) {
+			return response(url, 200, page("Stale", text), {
 				"cache-control": "max-age=0",
 				etag: '"stale-v1"',
 			});
 		}
-		return response(String(input), 304, "", {
+		return response(url, 304, "", {
 			"cache-control": "max-age=60",
 			etag: '"stale-v1"',
 		});
@@ -57,7 +61,7 @@ await withCacheEnv("stale", async () => {
 		const second = await runPipeline(
 			config("https://stale.example.com/page", root, "two"),
 		);
-		assert(calls === 2);
+		assert(pageCalls === 2);
 		assert(seenHeaders[1]?.["if-none-match"] === '"stale-v1"');
 		assert(second.summary.cache.stale === 1);
 		assert(second.summary.cache.revalidated === 1);
@@ -73,15 +77,17 @@ await withCacheEnv("stale", async () => {
 
 await withCacheEnv("corrupt", async (cacheDir) => {
 	const root = await mkdtemp(join(tmpdir(), "docsnap-cache-corrupt-"));
-	let calls = 0;
+	let pageCalls = 0;
 	setFetchTransportForTest(async (input) => {
-		calls++;
+		const url = String(input);
+		if (isRobots(url)) return robots404(url);
+		pageCalls++;
 		return response(
-			String(input),
+			url,
 			200,
 			page(
 				"Corrupt",
-				`${text} version ${calls} after blob integrity validation.`,
+				`${text} version ${pageCalls} after blob integrity validation.`,
 			),
 		);
 	});
@@ -93,7 +99,7 @@ await withCacheEnv("corrupt", async (cacheDir) => {
 		const second = await runPipeline(
 			config("https://corrupt.example.com/page", root, "two"),
 		);
-		assert(calls === 2);
+		assert(pageCalls === 2);
 		assert(second.summary.cache.misses === 1);
 		assert(
 			second.records.some(
@@ -107,10 +113,12 @@ await withCacheEnv("corrupt", async (cacheDir) => {
 
 await withCacheEnv("no-cache", async (cacheDir) => {
 	const root = await mkdtemp(join(tmpdir(), "docsnap-cache-off-"));
-	let calls = 0;
+	let pageCalls = 0;
 	setFetchTransportForTest(async (input) => {
-		calls++;
-		return response(String(input), 200, page("No Cache", text));
+		const url = String(input);
+		if (isRobots(url)) return robots404(url);
+		pageCalls++;
+		return response(url, 200, page("No Cache", text));
 	});
 	try {
 		const first = await runPipeline(
@@ -121,7 +129,7 @@ await withCacheEnv("no-cache", async (cacheDir) => {
 		);
 		assert(!first.summary.cache.enabled);
 		assert(!second.summary.cache.enabled);
-		assert(calls === 2);
+		assert(pageCalls === 2);
 		assert((await countEntries(cacheDir)) === 0);
 	} finally {
 		setFetchTransportForTest(undefined);
@@ -131,9 +139,11 @@ await withCacheEnv("no-cache", async (cacheDir) => {
 await withCacheEnv("evict", async () => {
 	const root = await mkdtemp(join(tmpdir(), "docsnap-cache-evict-"));
 	process.env[cacheMaxEnv] = "0.0005";
-	setFetchTransportForTest(async (input) =>
-		response(String(input), 200, page("Evict", `${text} ${"x".repeat(1200)}`)),
-	);
+	setFetchTransportForTest(async (input) => {
+		const url = String(input);
+		if (isRobots(url)) return robots404(url);
+		return response(url, 200, page("Evict", `${text} ${"x".repeat(1200)}`));
+	});
 	try {
 		const result = await runPipeline(
 			config("https://evict.example.com/page", root, "one"),
@@ -148,10 +158,12 @@ await withCacheEnv("evict", async () => {
 
 await withCacheEnv("clean", async (cacheDir) => {
 	const root = await mkdtemp(join(tmpdir(), "docsnap-cache-clean-"));
-	let calls = 0;
+	let pageCalls = 0;
 	setFetchTransportForTest(async (input) => {
-		calls++;
-		return response(String(input), 200, page("Clean", text));
+		const url = String(input);
+		if (isRobots(url)) return robots404(url);
+		pageCalls++;
+		return response(url, 200, page("Clean", text));
 	});
 	try {
 		await runPipeline(config("https://clean.example.com/page", root, "same"));
@@ -159,7 +171,7 @@ await withCacheEnv("clean", async (cacheDir) => {
 		const second = await runPipeline(
 			config("https://clean.example.com/page", root, "same"),
 		);
-		assert(calls === 1);
+		assert(pageCalls === 1);
 		assert(second.summary.cache.hits === 1);
 		assert((await countEntries(cacheDir)) === 1);
 	} finally {
@@ -259,6 +271,14 @@ function response(
 		},
 		body: new TextEncoder().encode(body),
 	};
+}
+
+function isRobots(url: string) {
+	return url.endsWith("/robots.txt");
+}
+
+function robots404(url: string) {
+	return response(url, 404, "not found", { "content-type": "text/plain" });
 }
 
 function page(title: string, body: string) {

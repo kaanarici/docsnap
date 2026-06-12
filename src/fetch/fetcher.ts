@@ -40,7 +40,7 @@ export async function fetchText(
 	return fetchWithCache(url, config, accept, conditional, fetchTextUncached);
 }
 
-async function fetchTextUncached(
+export async function fetchTextUncached(
 	url: string,
 	config: Config,
 	accept: string,
@@ -275,8 +275,14 @@ function responseValidators(response: HttpResponse, fetchedAt: string) {
 
 function responseCache(response: HttpResponse) {
 	const cacheControl = cleanHeader(response.headers.get("cache-control"));
+	const vary = cleanHeader(response.headers.get("vary"));
+	const setCookie =
+		(response.headers.getSetCookie?.().length ?? 0) > 0 ||
+		response.headers.get("set-cookie") !== null;
 	return {
 		...(cacheControl ? { cacheControl } : {}),
+		...(vary ? { vary } : {}),
+		...(setCookie ? { setCookie: true } : {}),
 	};
 }
 

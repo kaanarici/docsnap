@@ -1,0 +1,52 @@
+import type { FetchResult } from "../core/types.ts";
+
+const defaultFreshMs = 6 * 60 * 60 * 1000;
+const maxFreshMs = 24 * 60 * 60 * 1000;
+
+export function freshUntilFor(result: FetchResult): Date | undefined {
+	if (!storeableResponse(result)) return undefined;
+	const now = Date.now();
+	const cacheControl = result.cacheControl?.toLowerCase();
+	if (cacheControl) {
+		const maxAge = cacheControl.match(
+			/(?:^|,)\s*(?:s-maxage|max-age)\s*=\s*(\d+)/,
+		)?.[1];
+		if (maxAge !== undefined) {
+			const ttl = Math.min(Number(maxAge) * 1000, maxFreshMs);
+			return new Date(now + ttl);
+		}
+		return undefined;
+	}
+	if (/text\/html|text\/plain|markdown|mdx/i.test(result.contentType)) {
+		return new Date(now + defaultFreshMs);
+	}
+	return undefined;
+}
+
+function storeableResponse(result: FetchResult): boolean {
+	if (!result.ok || isNotModifiedResult(result)) return false;
+	if (result.status < 200 || result.status > 299) return false;
+	if (result.setCookie) return false;
+	if (hasAnyDirective(result.cacheControl, ["no-store", "no-cache", "private"]))
+		return false;
+	return !hasAnyDirective(result.vary, ["*", "cookie", "authorization"]);
+}
+
+function hasAnyDirective(
+	value: string | undefined,
+	blocked: readonly string[],
+): boolean {
+	if (!value) return false;
+	const directives: string[] = [];
+	for (const part of value.split(",")) {
+		const directive = part.trim().split("=", 1)[0]?.toLowerCase();
+		if (directive) directives.push(directive);
+	}
+	return directives.some((directive) => blocked.includes(directive));
+}
+
+function isNotModifiedResult(
+	result: FetchResult,
+): result is FetchResult & { ok: true; notModified: true } {
+	return result.ok && "notModified" in result && result.notModified === true;
+}

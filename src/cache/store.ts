@@ -17,12 +17,17 @@ import type {
 	RedirectHop,
 } from "../core/types.ts";
 import { validatePublicHttpUrl } from "../security/url.ts";
+import {
+	acquireCacheLockForContext,
+	type CacheLock,
+	releaseCacheLock,
+} from "./lock.ts";
+import { blobPath, entryPath, isCacheHex, pathFor } from "./paths.ts";
+import { freshUntilFor } from "./policy.ts";
 
 const schemaVersion = "docsnap-cache-v1";
 const renderMode = "static";
 const defaultMaxBytes = 2 * 1024 * 1024 * 1024;
-const defaultFreshMs = 6 * 60 * 60 * 1000;
-const maxFreshMs = 24 * 60 * 60 * 1000;
 const cacheDirEnv = "DOCSNAP_CACHE_DIR";
 const cacheMaxEnv = "DOCSNAP_CACHE_MAX_MB";
 const allowTestHostEnv = "DOCSNAP_ALLOW_TEST_HOST";
@@ -64,7 +69,8 @@ export type CacheLookup =
 	| { state: "miss"; key: string }
 	| { state: "fresh" | "stale"; key: string; entry: CacheEntry; body: string };
 
-export type CacheLock = { key: string; path: string };
+export type { CacheLock };
+export { releaseCacheLock };
 
 export function cacheRequest(
 	url: string,
@@ -99,8 +105,8 @@ export async function readCache(
 	if (!context.enabled) return { state: "disabled", key };
 	const count = options.count !== false;
 	try {
-		const entryPath = pathFor(context, "entries", `${key}.json`);
-		const entry = parseEntry(await readFile(entryPath, "utf8"), key);
+		const path = entryPath(context, key);
+		const entry = parseEntry(await readFile(path, "utf8"), key);
 		if (!entry || !entrySafe(entry)) {
 			if (count) context.stats.misses++;
 			await removeEntry(context, key);
@@ -113,7 +119,7 @@ export async function readCache(
 			return { state: "miss", key };
 		}
 		context.stats.bytesRead += byteLength(body);
-		void touch(entryPath);
+		void touch(path);
 		if (Date.parse(entry.freshUntil) > Date.now()) {
 			if (count) context.stats.hits++;
 			return { state: "fresh", key, entry, body };
@@ -166,7 +172,7 @@ export async function writeCacheResult(
 			context.stats.bytesWritten += bytes;
 		}
 		await atomicWrite(
-			pathFor(context, "entries", `${key}.json`),
+			entryPath(context, key),
 			`${JSON.stringify(entry, null, 2)}\n`,
 		);
 		context.stats.written++;
@@ -184,6 +190,11 @@ export async function refreshCacheEntry(
 	const context = cacheContext(config);
 	const now = new Date().toISOString();
 	const cacheControl = result.cacheControl ?? entry.cacheControl;
+	const freshUntil = freshUntilFor({
+		...cacheResultFromEntry(entry, "", 0, cacheControl),
+		...(result.vary ? { vary: result.vary } : {}),
+		...(result.setCookie ? { setCookie: true } : {}),
+	});
 	const next: CacheEntry = {
 		...entry,
 		...(result.etag ? { etag: result.etag } : {}),
@@ -191,15 +202,16 @@ export async function refreshCacheEntry(
 		...(cacheControl ? { cacheControl } : {}),
 		fetchedAt: result.fetchedAt ?? now,
 		cachedAt: now,
-		freshUntil:
-			freshUntilFor(
-				cacheResultFromEntry(entry, "", 0, cacheControl),
-			)?.toISOString() ?? now,
+		freshUntil: freshUntil?.toISOString() ?? now,
 	};
 	try {
 		await ensureDirs(context);
+		if (!freshUntil) {
+			await removeEntry(context, key);
+			return next;
+		}
 		await atomicWrite(
-			pathFor(context, "entries", `${key}.json`),
+			entryPath(context, key),
 			`${JSON.stringify(next, null, 2)}\n`,
 		);
 		context.stats.revalidated++;
@@ -214,27 +226,9 @@ export async function acquireCacheLock(
 	key: string,
 ): Promise<CacheLock | undefined> {
 	const context = cacheContext(config);
-	if (!context.enabled) return undefined;
-	const path = pathFor(context, "locks", `${key}.lock`);
-	for (const delay of [0, 25, 50, 100, 150]) {
-		if (delay) await Bun.sleep(delay);
-		try {
-			await mkdir(dirname(path), { recursive: true });
-			await mkdir(path);
-			return { key, path };
-		} catch (error) {
-			if (!isAlreadyExists(error)) {
-				disableOnAccessError(context, error);
-				return undefined;
-			}
-		}
-	}
-	return undefined;
-}
-
-export async function releaseCacheLock(lock: CacheLock | undefined) {
-	if (!lock) return;
-	await rm(lock.path, { recursive: true, force: true });
+	return acquireCacheLockForContext(context, key, (error) =>
+		disableOnAccessError(context, error),
+	);
 }
 
 export function cachedFetchResult(
@@ -338,28 +332,6 @@ function cacheResultFromEntry(
 	};
 }
 
-function freshUntilFor(result: FetchResult): Date | undefined {
-	if (!result.ok || isNotModifiedResult(result)) return undefined;
-	if (result.status < 200 || result.status > 299) return undefined;
-	const now = Date.now();
-	const cacheControl = result.cacheControl?.toLowerCase();
-	if (cacheControl) {
-		if (/(?:^|,)\s*no-store\s*(?:,|$)/.test(cacheControl)) return undefined;
-		const maxAge = cacheControl.match(
-			/(?:^|,)\s*(?:s-maxage|max-age)\s*=\s*(\d+)/,
-		)?.[1];
-		if (maxAge !== undefined) {
-			const ttl = Math.min(Number(maxAge) * 1000, maxFreshMs);
-			return new Date(now + ttl);
-		}
-		return undefined;
-	}
-	if (/text\/html|text\/plain|markdown|mdx/i.test(result.contentType)) {
-		return new Date(now + defaultFreshMs);
-	}
-	return undefined;
-}
-
 function isNotModifiedResult(
 	result: FetchResult,
 ): result is FetchResult & { ok: true; notModified: true } {
@@ -370,8 +342,10 @@ export function parseEntry(text: string, key: string): CacheEntry | undefined {
 	try {
 		const value = JSON.parse(text) as Partial<CacheEntry>;
 		if (
+			!isCacheHex(key) ||
 			value.schemaVersion !== schemaVersion ||
 			value.key !== key ||
+			!isCacheHex(value.key) ||
 			typeof value.requestUrl !== "string" ||
 			typeof value.finalUrl !== "string" ||
 			typeof value.status !== "number" ||
@@ -380,7 +354,7 @@ export function parseEntry(text: string, key: string): CacheEntry | undefined {
 			typeof value.fetchedAt !== "string" ||
 			typeof value.cachedAt !== "string" ||
 			typeof value.freshUntil !== "string" ||
-			typeof value.bodyHash !== "string" ||
+			!isCacheHex(value.bodyHash) ||
 			typeof value.bytes !== "number"
 		) {
 			return undefined;
@@ -395,7 +369,8 @@ function entrySafe(entry: CacheEntry) {
 	return (
 		validatePublicHttpUrl(entry.requestUrl) === undefined &&
 		validatePublicHttpUrl(entry.finalUrl) === undefined &&
-		/^[a-f0-9]{64}$/.test(entry.bodyHash)
+		isCacheHex(entry.key) &&
+		isCacheHex(entry.bodyHash)
 	);
 }
 
@@ -407,15 +382,6 @@ async function ensureDirs(context: CacheContext) {
 	]);
 }
 
-export function pathFor(context: CacheContext, ...parts: string[]) {
-	if (!context.dir) throw new Error("cache disabled");
-	return join(context.dir, ...parts);
-}
-
-export function blobPath(context: CacheContext, hash: string) {
-	return pathFor(context, "blobs", "sha256", hash);
-}
-
 async function atomicWrite(path: string, body: string) {
 	await mkdir(dirname(path), { recursive: true });
 	const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
@@ -424,7 +390,7 @@ async function atomicWrite(path: string, body: string) {
 }
 
 async function removeEntry(context: CacheContext, key: string, hash?: string) {
-	await rm(pathFor(context, "entries", `${key}.json`), { force: true });
+	await rm(entryPath(context, key), { force: true });
 	if (hash) await rm(blobPath(context, hash), { force: true });
 }
 

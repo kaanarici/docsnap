@@ -1,15 +1,14 @@
 import { readdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { Config } from "../core/types.ts";
+import { blobPath, entryKeyFromFileName, pathFor } from "./paths.ts";
 import {
-	blobPath,
 	type CacheContext,
 	type CacheEntry,
 	cacheContext,
 	disableOnAccessError,
 	isNotFound,
 	parseEntry,
-	pathFor,
 } from "./store.ts";
 
 const pruneTargetRatio = 0.8;
@@ -50,13 +49,14 @@ async function cacheEntries(context: CacheContext) {
 	const names = await readdir(dir);
 	const out: Array<{ path: string; entry: CacheEntry; mtimeMs: number }> = [];
 	for (const name of names) {
-		if (!name.endsWith(".json")) continue;
+		const key = entryKeyFromFileName(name);
+		if (!key) continue;
 		const path = join(dir, name);
 		const [text, info] = await Promise.all([
 			readFile(path, "utf8"),
 			stat(path),
 		]);
-		const entry = parseEntry(text, name.slice(0, -5));
+		const entry = parseEntry(text, key);
 		if (entry) out.push({ path, entry, mtimeMs: info.mtimeMs });
 	}
 	return out;

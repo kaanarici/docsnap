@@ -30,9 +30,20 @@ import {
 
 export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 	const inputSeed = seedInputUrl(config.seedUrl);
-	if (config.pageOnly) return [{ url: inputSeed, source: "seed" }];
 	const inputUrl = new URL(inputSeed);
 	const seedRobots = await loadRobots(inputUrl.origin, config);
+	if (config.pageOnly) {
+		if (!seedRobots.allowed(inputSeed)) {
+			return [
+				{
+					url: inputSeed,
+					source: "seed",
+					fetched: robotsBlockedUrl(inputSeed),
+				},
+			];
+		}
+		return [{ url: inputSeed, source: "seed" }];
+	}
 	const robotsByOrigin: LlmsCorpusOptions["robotsByOrigin"] = new Map([
 		[inputUrl.origin, seedRobots],
 	]);
