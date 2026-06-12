@@ -15,28 +15,39 @@ export function applyInlineState(
 	const output = [...staticRecords];
 	for (const [index, input] of inputs.entries()) {
 		const staticRecord = output[index]!;
-		if (!shellReason(input, staticRecord)) continue;
+		const reason = shellReason(input, staticRecord);
+		if (!shouldAttemptInlineState(staticRecord, reason)) continue;
 		const inlineRecord = extractInlineStatePage(input);
-		if (shouldUseInlineStateRecord(staticRecord, inlineRecord)) {
+		if (shouldUseInlineStateRecord(staticRecord, inlineRecord, reason)) {
 			output[index] = inlineRecord;
 		}
 	}
 	return output;
 }
 
+function shouldAttemptInlineState(
+	staticRecord: PageRecord,
+	reason: RenderReason | undefined,
+) {
+	if (!staticRecord.ok) return true;
+	return (
+		reason === "empty-app-shell" ||
+		reason === "low-confidence-shell" ||
+		(reason === "app-shell" && staticRecord.extractor === "fallback")
+	);
+}
+
 function shouldUseInlineStateRecord(
 	staticRecord: PageRecord,
 	inlineRecord: PageRecord | undefined,
+	reason: RenderReason | undefined,
 ): inlineRecord is PageRecord {
 	if (!inlineRecord?.ok || inlineRecord.confidence < lowQualityConfidence) {
 		return false;
 	}
-	if (!staticRecord.ok || staticRecord.confidence < lowQualityConfidence) {
-		return true;
-	}
-	if (staticRecord.extractor === "fallback") return true;
+	if (!staticRecord.ok) return true;
 	return (
-		inlineRecord.confidence > staticRecord.confidence ||
-		inlineRecord.markdown.length > staticRecord.markdown.length
+		reason === "low-confidence-shell" ||
+		(reason === "app-shell" && staticRecord.extractor === "fallback")
 	);
 }

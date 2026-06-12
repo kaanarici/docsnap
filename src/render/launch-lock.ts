@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 
 export const renderLaunchLockOwnerFile = "owner.json";
 
-const defaultStaleMs = 30_000;
+const defaultStaleMs = 60_000;
 const defaultWaitTimeoutMs = 65_000;
 const waitDelaysMs = [0, 25, 50, 100, 150, 250] as const;
 
@@ -94,6 +94,7 @@ async function reapStaleLock(path: string, staleMs: number): Promise<void> {
 	const createdAt = Date.parse(owner?.createdAt ?? "");
 	const started = Number.isFinite(createdAt) ? createdAt : info.mtime.getTime();
 	if (Date.now() - started < staleMs) return;
+	if (owner && isProcessAlive(owner.pid)) return;
 	const stalePath = `${path}.reap-${process.pid}-${randomUUID()}`;
 	try {
 		await rename(path, stalePath);
@@ -127,4 +128,21 @@ function isNotFound(error: unknown) {
 
 function isAlreadyExists(error: unknown) {
 	return error instanceof Error && "code" in error && error.code === "EEXIST";
+}
+
+function isProcessAlive(pid: number) {
+	if (!Number.isInteger(pid) || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		if (hasErrorCode(error, "ESRCH") || hasErrorCode(error, "EINVAL"))
+			return false;
+		if (hasErrorCode(error, "EPERM")) return true;
+		return false;
+	}
+}
+
+function hasErrorCode(error: unknown, code: string) {
+	return error instanceof Error && "code" in error && error.code === code;
 }

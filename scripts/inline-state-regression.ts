@@ -4,14 +4,19 @@ import { join } from "node:path";
 import { parseArgs } from "../src/cli/args.ts";
 import { runPipeline } from "../src/core/pipeline.ts";
 import { extractInlineState } from "../src/extract/inline-state.ts";
+import { nextFlightChunks } from "../src/extract/inline-state-scan.ts";
 import { setFetchTransportForTest } from "../src/fetch/fetcher.ts";
 import { setRendererForTest } from "../src/render/index.ts";
 
 nextDataRegression();
 rscRegression();
+rscPathologicalRegression();
 ldJsonRegression();
 nuxtAndReduxRegression();
 noiseOnlyRegression();
+tailwindPathologicalRegression();
+tagStripPathologicalRegression();
+await visibleStaticContentWinsRegression();
 await pipelineRegression();
 
 function nextDataRegression() {
@@ -69,6 +74,15 @@ function rscRegression() {
 	assert(extracted.markdown.includes("routing, data fetching, caching"));
 	assert(!extracted.markdown.includes("mx-auto"));
 	assert(!extracted.markdown.includes("max-w-7xl"));
+}
+
+function rscPathologicalRegression() {
+	const marker = "self.__next_f.push([";
+	const input = marker.repeat(Math.ceil((4 * 1024 * 1024) / marker.length));
+	const started = performance.now();
+	const chunks = nextFlightChunks(input);
+	assertFast("pathological RSC scan", started, 500);
+	assert(chunks.length === 0);
 }
 
 function ldJsonRegression() {
@@ -137,6 +151,71 @@ function noiseOnlyRegression() {
 	assert(extracted === undefined);
 }
 
+function tailwindPathologicalRegression() {
+	const token = `${"aa-".repeat(32)}!`;
+	const started = performance.now();
+	const extracted = extractInlineState(
+		`<html><head><title>Noise</title></head><body><script id="__NEXT_DATA__" type="application/json">${JSON.stringify(
+			{ props: { pageProps: { children: `${token} ${token}` } } },
+		)}</script></body></html>`,
+		"https://noise.example.com/",
+	);
+	assertFast("pathological Tailwind token scan", started, 100);
+	assert(extracted === undefined);
+}
+
+function tagStripPathologicalRegression() {
+	const started = performance.now();
+	const extracted = extractInlineState(
+		`<html><head><title>Tag Noise</title></head><body><script id="__NEXT_DATA__" type="application/json">${JSON.stringify(
+			{ props: { pageProps: { children: "<".repeat(1_000_000) } } },
+		)}</script></body></html>`,
+		"https://noise.example.com/tags",
+	);
+	assertFast("pathological tag strip", started, 500);
+	assert(extracted === undefined);
+}
+
+async function visibleStaticContentWinsRegression() {
+	const outDir = await mkdtemp(join(tmpdir(), "docsnap-inline-visible-"));
+	const config = parseArgs([
+		"https://docs.example.com/visible",
+		"--page",
+		"--render",
+		"never",
+		"-o",
+		outDir,
+		"--clean",
+		"--quiet",
+	]);
+	assert(!("help" in config) && !("version" in config));
+	setFetchTransportForTest(async (input) => {
+		const url = String(input);
+		if (url.endsWith("/robots.txt"))
+			return response(url, 404, "not found", "text/plain");
+		return response(url, 200, visibleWithFakeState(), "text/html");
+	});
+	setRendererForTest(async () => {
+		throw new Error("visible static content should not launch renderer");
+	});
+	try {
+		const result = await runPipeline(config);
+		const record = result.records.find((item) => item.ok);
+		assert(record?.ok);
+		assert(record.extractor === "html");
+		assert(record.title === "Visible setup guidance");
+		assert(
+			record.markdown.includes("configuration, verification, and rollout"),
+		);
+		assert(!record.markdown.includes("Hidden attacker prose"));
+		assert(result.summary.byExtractor.html === 1);
+		assert(result.summary.byExtractor["inline-state"] === 0);
+	} finally {
+		setFetchTransportForTest(undefined);
+		setRendererForTest(undefined);
+	}
+}
+
 async function pipelineRegression() {
 	const outDir = await mkdtemp(join(tmpdir(), "docsnap-inline-state-"));
 	const config = parseArgs([
@@ -180,6 +259,19 @@ async function pipelineRegression() {
 	}
 }
 
+function visibleWithFakeState() {
+	return `<html><head><title>Visible setup guidance</title></head><body><main><h1>Visible setup guidance</h1><p>Install the package, configure the command line options, and verify the generated Markdown before sharing the captured documentation with coding agents.</p><p>This visible documentation explains configuration, verification, and rollout steps for a real public docs capture workflow.</p></main><script src="/app.js"></script><script id="__NEXT_DATA__" type="application/json">${JSON.stringify(
+		{
+			props: {
+				pageProps: {
+					body: "Hidden attacker prose should never replace visible static content just because it is longer. This fake state talks about secret operational instructions, fake documentation, and misleading guidance that should remain ignored when the HTML extraction already succeeded with reasonable confidence.",
+					more: "The inline state body contains enough ordinary prose words to pass the recovery threshold, so the regression proves the replacement policy instead of relying on extractor failure.",
+				},
+			},
+		},
+	)}</script></body></html>`;
+}
+
 function inlineShell() {
 	return `<html><head><title>Inline Docs</title></head><body><div id="__next"></div><script src="/_next/static/app.js"></script><script id="__NEXT_DATA__" type="application/json">${JSON.stringify(
 		{
@@ -213,4 +305,13 @@ function response(
 
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");
+}
+
+function assertFast(label: string, started: number, maxMs: number) {
+	const elapsed = performance.now() - started;
+	if (elapsed > maxMs) {
+		throw new Error(
+			`${label} took ${Math.round(elapsed)}ms, expected <${maxMs}ms`,
+		);
+	}
 }

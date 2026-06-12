@@ -2,7 +2,6 @@ import { uniqueByWhitespace, whitespaceKey, wordCount } from "../core/text.ts";
 import type { InlineStateSource } from "../core/types.ts";
 import {
 	assignedExpression,
-	decodeEntities,
 	decodeLooseEscapes,
 	htmlTitle,
 	nextFlightChunks,
@@ -12,6 +11,7 @@ import {
 	scriptBlocks,
 	stringLiterals,
 } from "./inline-state-scan.ts";
+import { cleanInlineText, looksLikeTailwind } from "./inline-state-text.ts";
 
 type TextKind = "heading" | "paragraph";
 
@@ -269,7 +269,7 @@ function addReadable(
 	key: string,
 	source: InlineStateSource,
 ) {
-	const text = cleanText(value);
+	const text = cleanInlineText(value);
 	if (!readableText(text, key, source)) return;
 	out.push({
 		text,
@@ -335,15 +335,11 @@ function readableText(
 	return /[.!?](?:\s|$)/.test(text) || (words >= 9 && commonProseWords(text));
 }
 
-function cleanText(value: string) {
-	return decodeEntities(value)
-		.replace(/<[^>]+>/g, " ")
-		.replace(/\s+/g, " ")
-		.trim();
-}
-
 function headingText(value: string) {
-	return cleanText(value).replace(/\s*[|·-]\s*(?:Docs?|Documentation).*$/i, "");
+	return cleanInlineText(value).replace(
+		/\s*[|·-]\s*(?:Docs?|Documentation).*$/i,
+		"",
+	);
 }
 
 function titleFromUrl(url: string) {
@@ -384,18 +380,6 @@ function looksLikeCodeOrStyle(text: string) {
 	if (/(?:className|data-|aria-|xmlns|viewBox|strokeWidth)/.test(text))
 		return true;
 	return false;
-}
-
-function looksLikeTailwind(text: string) {
-	const tokens = text.split(/\s+/).filter(Boolean);
-	if (tokens.length < 2) return false;
-	const utility = tokens.filter((token) =>
-		/^-?!?(?:[a-z0-9-]+:)*[a-z][a-z0-9]*(?:-\[?[#\w./%(),:-]+\]?)+$/i.test(
-			token,
-		),
-	).length;
-	const variants = tokens.filter((token) => /^[a-z0-9-]+:/.test(token)).length;
-	return (utility >= 3 && utility / tokens.length > 0.35) || variants >= 3;
 }
 
 function commonProseWords(text: string) {

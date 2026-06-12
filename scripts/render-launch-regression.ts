@@ -1,6 +1,13 @@
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	mkdtemp,
+	readdir,
+	readFile,
+	rm,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -11,12 +18,18 @@ import {
 	launchBrowser,
 } from "../src/render/browser.ts";
 import { CdpConnection } from "../src/render/cdp.ts";
-import { renderLaunchLockOwnerFile } from "../src/render/launch-lock.ts";
+import {
+	acquireRenderLaunchLock,
+	releaseRenderLaunchLock,
+	renderLaunchLockOwnerFile,
+} from "../src/render/launch-lock.ts";
 
 await oldHeadlessPreferenceRegression();
 await newHeadlessFallbackRegression();
 await launchLockSerializationRegression();
 await staleLaunchLockRegression();
+await livePidStaleLaunchLockRegression();
+await deadPidStaleLaunchLockRegression();
 await launchLockReleaseOnFailureRegression();
 
 async function oldHeadlessPreferenceRegression() {
@@ -122,7 +135,7 @@ async function staleLaunchLockRegression() {
 		`${JSON.stringify({
 			pid: 999_999,
 			token: "stale",
-			createdAt: new Date(Date.now() - 31_000).toISOString(),
+			createdAt: new Date(Date.now() - 61_000).toISOString(),
 		})}\n`,
 	);
 	let launched = false;
@@ -141,6 +154,57 @@ async function staleLaunchLockRegression() {
 	);
 	assert(launched);
 	await session.close();
+	await assertNoEntries(root);
+}
+
+async function livePidStaleLaunchLockRegression() {
+	const root = await mkdtemp(join(tmpdir(), "docsnap-live-stale-lock-"));
+	const lockPath = join(root, "launch.lock");
+	await mkdir(lockPath);
+	await writeFile(
+		join(lockPath, renderLaunchLockOwnerFile),
+		`${JSON.stringify({
+			pid: process.pid,
+			token: "live",
+			createdAt: new Date(Date.now() - 120_000).toISOString(),
+		})}\n`,
+	);
+	try {
+		await assertRejects(
+			acquireRenderLaunchLock({
+				path: lockPath,
+				staleMs: 1,
+				waitTimeoutMs: 80,
+			}),
+			/timed out waiting for render launch lock/,
+		);
+		const owner = JSON.parse(
+			await readFile(join(lockPath, renderLaunchLockOwnerFile), "utf8"),
+		) as { token?: string };
+		assert(owner.token === "live");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+}
+
+async function deadPidStaleLaunchLockRegression() {
+	const root = await mkdtemp(join(tmpdir(), "docsnap-dead-stale-lock-"));
+	const lockPath = join(root, "launch.lock");
+	await mkdir(lockPath);
+	await writeFile(
+		join(lockPath, renderLaunchLockOwnerFile),
+		`${JSON.stringify({
+			pid: 999_999,
+			token: "dead",
+			createdAt: new Date(Date.now() - 120_000).toISOString(),
+		})}\n`,
+	);
+	const lock = await acquireRenderLaunchLock({
+		path: lockPath,
+		staleMs: 1,
+		waitTimeoutMs: 500,
+	});
+	await releaseRenderLaunchLock(lock);
 	await assertNoEntries(root);
 }
 

@@ -37,7 +37,7 @@
 		"check": "bun run lint && bun run typecheck && bun run test && bun run size",
 		"lint": "biome check .",
 		"typecheck": "tsc --noEmit",
-		"test": "bun scripts/regression.ts && bun scripts/output-regression.ts && bun scripts/fetch-regression.ts && bun scripts/cache-regression.ts && bun scripts/cache-security-regression.ts && bun scripts/extract-regression.ts && bun scripts/inline-state-regression.ts && bun scripts/discover-regression.ts && bun scripts/feed-regression.ts && bun scripts/sitemap-regression.ts && bun scripts/security-regression.ts && bun scripts/injection-regression.ts && bun scripts/render-regression.ts && bun scripts/render-crash-regression.ts && bun scripts/pipeline-regression.ts && bun scripts/refresh-regression.ts && bun scripts/cli-regression.ts && bun scripts/mcp-regression.ts",
+		"test": "bun scripts/regression.ts && bun scripts/output-regression.ts && bun scripts/fetch-regression.ts && bun scripts/cache-regression.ts && bun scripts/cache-security-regression.ts && bun scripts/extract-regression.ts && bun scripts/inline-state-regression.ts && bun scripts/discover-regression.ts && bun scripts/feed-regression.ts && bun scripts/sitemap-regression.ts && bun scripts/security-regression.ts && bun scripts/injection-regression.ts && bun scripts/render-regression.ts && bun scripts/render-launch-regression.ts && bun scripts/render-crash-regression.ts && bun scripts/pipeline-regression.ts && bun scripts/refresh-regression.ts && bun scripts/cli-regression.ts && bun scripts/mcp-regression.ts",
 		"size": "bun scripts/size.ts",
 		"publish:dry": "bun pm pack --dry-run"
 	},

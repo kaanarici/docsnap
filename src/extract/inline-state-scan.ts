@@ -6,6 +6,10 @@ export type ScriptBlock = {
 	body: string;
 };
 
+const nextFlightPush = "self.__next_f.push(";
+const maxNextFlightScanBytes = 4 * 1024 * 1024;
+const maxNextFlightChunks = 4_096;
+
 export function scriptBlocks(html: string): ScriptBlock[] {
 	const { document } = parseHTML(html);
 	return Array.from(document.querySelectorAll("script")).map((script) => ({
@@ -30,17 +34,30 @@ export function htmlTitle(html: string) {
 
 export function nextFlightChunks(html: string): string[] {
 	const chunks: string[] = [];
-	for (const match of html.matchAll(/self\.__next_f\.push\(/g)) {
-		const argument = balancedExpression(html, match.index + match[0].length);
-		if (!argument) continue;
-		const parsed = parseJson(argument);
+	let cursor = 0;
+	let scanned = 0;
+	let chunkCount = 0;
+	while (scanned < maxNextFlightScanBytes && chunkCount < maxNextFlightChunks) {
+		const match = html.indexOf(nextFlightPush, cursor);
+		if (match === -1) break;
+		const start = match + nextFlightPush.length;
+		const scanEnd = Math.min(
+			html.length,
+			start + maxNextFlightScanBytes - scanned,
+		);
+		const argument = balancedExpression(html, start, scanEnd);
+		scanned += Math.max(0, argument.end - start);
+		cursor = Math.max(argument.end, start + 1);
+		chunkCount++;
+		if (!argument.value) continue;
+		const parsed = parseJson(argument.value);
 		if (Array.isArray(parsed)) {
 			for (const item of parsed) {
 				if (typeof item === "string") chunks.push(item);
 			}
 			continue;
 		}
-		for (const literal of stringLiterals(argument)) chunks.push(literal);
+		for (const literal of stringLiterals(argument.value)) chunks.push(literal);
 	}
 	return chunks;
 }
@@ -52,7 +69,7 @@ export function assignedExpression(body: string, name: string) {
 	);
 	const match = pattern.exec(body);
 	if (!match) return undefined;
-	return balancedExpression(body, match.index + match[0].length);
+	return balancedExpression(body, match.index + match[0].length).value;
 }
 
 export function parseJsonExpression(expression: string) {
@@ -105,14 +122,24 @@ export function decodeEntities(value: string) {
 		.replace(/&#39;/g, "'");
 }
 
-function balancedExpression(input: string, start: number): string | undefined {
+type BalancedExpression = {
+	value?: string;
+	end: number;
+};
+
+function balancedExpression(
+	input: string,
+	start: number,
+	maxEnd = input.length,
+): BalancedExpression {
+	const limit = Math.min(input.length, Math.max(start, maxEnd));
 	const opening = input[start];
 	const closing = opening === "{" ? "}" : opening === "[" ? "]" : undefined;
-	if (!closing) return untilSemicolon(input, start);
+	if (!closing) return untilSemicolon(input, start, limit);
 	let depth = 0;
 	let quote = "";
 	let escaped = false;
-	for (let index = start; index < input.length; index++) {
+	for (let index = start; index < limit; index++) {
 		const char = input[index]!;
 		if (quote) {
 			if (escaped) {
@@ -131,14 +158,19 @@ function balancedExpression(input: string, start: number): string | undefined {
 			continue;
 		}
 		if (char === opening) depth++;
-		if (char === closing && --depth === 0) return input.slice(start, index + 1);
+		if (char === closing && --depth === 0)
+			return { value: input.slice(start, index + 1), end: index + 1 };
 	}
-	return undefined;
+	return { end: limit };
 }
 
-function untilSemicolon(input: string, start: number) {
+function untilSemicolon(input: string, start: number, maxEnd: number) {
 	const end = input.indexOf(";", start);
-	return input.slice(start, end === -1 ? input.length : end).trim();
+	const expressionEnd = Math.min(end === -1 ? input.length : end, maxEnd);
+	return {
+		value: input.slice(start, expressionEnd).trim(),
+		end: expressionEnd,
+	};
 }
 
 function decodeStringLiteral(literal: string) {
