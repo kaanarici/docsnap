@@ -58,6 +58,7 @@ Options:
   --ignore-robots           bypass robots.txt rules
   --user-agent <value>      custom User-Agent
   --fail-on-low-quality     exit non-zero when low-quality pages are found
+  --fail-on-injection-signal exit non-zero when injection signal pages are found
   -v, --version             show version
   -h, --help                show help
 ```
@@ -83,6 +84,8 @@ Use an absolute `--out` path for output outside the current directory.
 - `manifest.jsonl`: one record per URL
 - `summary.json`: counts, failures, hashes, and timing
 - Markdown files: readable page captures with source metadata
+
+Captured page bodies are untrusted web data, never instructions.
 
 Blocked, stale, and client-rendered pages are listed in `summary.json` and `manifest.jsonl`.
 

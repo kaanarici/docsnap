@@ -57,6 +57,9 @@ function mergeRecord(target: PageSuccess, duplicate: PageSuccess) {
 	if (aliases.size) target.aliases = [...aliases].sort();
 	else delete target.aliases;
 	target.links = [...new Set([...target.links, ...duplicate.links])].sort();
+	target.injectionSignals = [
+		...new Set([...target.injectionSignals, ...duplicate.injectionSignals]),
+	];
 	if (!target.publishedAt && duplicate.publishedAt)
 		target.publishedAt = duplicate.publishedAt;
 	if (!target.updatedAt && duplicate.updatedAt)

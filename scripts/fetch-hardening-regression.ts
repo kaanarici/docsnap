@@ -72,11 +72,13 @@ const publicSuffixCookieCalls: Array<{
 await withMockFetch(
 	async () => {
 		const result = await fetchText("https://a.co.uk/start", config);
+		const endHeaders = publicSuffixCookieCalls.find(
+			(call) => call.url === "https://b.co.uk/end",
+		)?.headers;
 		assert(result.ok);
 		assert(
 			// biome-ignore lint/complexity/useLiteralKeys: tsconfig requires index access
-			publicSuffixCookieCalls.find((call) => call.url === "https://b.co.uk/end")
-				?.headers["cookie"] === undefined,
+			endHeaders?.["cookie"] === undefined,
 		);
 	},
 	async (input, headers) => {

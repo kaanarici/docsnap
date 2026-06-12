@@ -9,6 +9,7 @@ import {
 	conditionalForPrior,
 	loadPrior,
 	type PriorState,
+	readPriorOutput,
 	recoverPriorPage,
 } from "../output/prior.ts";
 import {
@@ -74,6 +75,7 @@ export async function runPipeline(
 		record.markdown = rewriteLocalLinks(record, links).trim();
 		record.contentHash = hashContent(record.markdown);
 	}
+	await preserveFetchedAtForUnchangedOutput(finalRecords, prior, config);
 	const snapshot = snapshotStats(
 		finalRecords.filter(hasOutputPath).map((record) => ({
 			path: record.outputPath,
@@ -197,6 +199,34 @@ async function backfillCandidates(config: Config, seen: Set<string>) {
 function outputCandidates(records: PageRecord[], config: Config) {
 	const ok = records.filter(isPageSuccess);
 	return config.maxExplicit ? ok.slice(0, config.max) : ok;
+}
+
+async function preserveFetchedAtForUnchangedOutput(
+	records: PageRecord[],
+	prior: PriorState,
+	config: Config,
+) {
+	if (!prior.enabled) return;
+	await Promise.all(
+		records.filter(hasOutputPath).map(async (record) => {
+			const previous = prior.find(record);
+			if (
+				!previous?.fetchedAt ||
+				previous.outputPath !== record.outputPath ||
+				previous.contentHash !== record.contentHash
+			) {
+				return;
+			}
+			const fetchedAt = record.fetchedAt;
+			record.fetchedAt = previous.fetchedAt;
+			if (
+				(await readPriorOutput(config, previous.outputPath)) ===
+				renderPage(record)
+			)
+				return;
+			record.fetchedAt = fetchedAt;
+		}),
+	);
 }
 
 function candidateKey(raw: string) {

@@ -31,6 +31,7 @@ Flags:
   --ignore-robots           bypass robots.txt rules
   --user-agent <value>      custom User-Agent
   --fail-on-low-quality     exit non-zero when low-quality pages are found
+  --fail-on-injection-signal exit non-zero when injection signal pages are found
   -v, --version             show version
   -h, --help                show help
 
@@ -71,6 +72,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
 		timeoutMs: 10_000,
 		maxBytes: 12 * 1024 * 1024,
 		failOnLowQuality: false,
+		failOnInjectionSignal: false,
 		json: false,
 		quiet: false,
 	};
@@ -100,6 +102,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
 		else if (arg === "--user-agent")
 			config.userAgent = readValue(argv, ++i, arg);
 		else if (arg === "--fail-on-low-quality") config.failOnLowQuality = true;
+		else if (arg === "--fail-on-injection-signal")
+			config.failOnInjectionSignal = true;
 		else throw new Error(`Unknown argument: ${arg}\n\n${usage}`);
 	}
 

@@ -12,6 +12,10 @@ import type {
 } from "../core/types.ts";
 import { urlWithoutFragmentAndQuery } from "../core/url.ts";
 import {
+	scanMarkdownForInjectionSignals,
+	scanRawHtmlForInjectionSignals,
+} from "../security/injection.ts";
+import {
 	isMarkdownLike,
 	isStructuredTextAsset,
 	languageFromUrl,
@@ -42,6 +46,7 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 			result.error,
 			result.failureKind,
 		);
+	const rawInjectionSignals = scanRawHtmlForInjectionSignals(result.body);
 
 	try {
 		const extracted = await extractBody(result);
@@ -53,6 +58,7 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 				metadata,
 				emptyContentError(result.body),
 				"empty",
+				rawInjectionSignals,
 			);
 		if (isBlockedChallenge(markdown, extracted.title)) {
 			return failedRecord(
@@ -61,6 +67,7 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 				metadata,
 				"blocked by client challenge",
 				"blocked",
+				rawInjectionSignals,
 			);
 		}
 		if (isLanguageSelector(result.finalUrl, result.body)) {
@@ -70,8 +77,13 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 				metadata,
 				"language selector without article content",
 				"empty",
+				rawInjectionSignals,
 			);
 		}
+		const injectionSignals = uniqueSignals([
+			...rawInjectionSignals,
+			...scanMarkdownForInjectionSignals(markdown),
+		]);
 		const quality = scoreMarkdown(markdown, extracted.title);
 		if (
 			extracted.extractor === "fallback" &&
@@ -88,6 +100,7 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 			...(result.etag ? { etag: result.etag } : {}),
 			...(result.lastModified ? { lastModified: result.lastModified } : {}),
 			fetchedAt: result.fetchedAt ?? new Date().toISOString(),
+			injectionSignals,
 			...(metadata ?? {}),
 			...(extracted.canonicalUrl
 				? { canonicalUrl: extracted.canonicalUrl }
@@ -114,6 +127,7 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 			metadata,
 			error instanceof Error ? error.message : String(error),
 			"extract",
+			rawInjectionSignals,
 		);
 	}
 }
@@ -406,6 +420,7 @@ function failedRecord(
 	metadata: FetchedUrl["metadata"],
 	error: string,
 	failureKind: FailureKind = "extract",
+	injectionSignals: PageRecord["injectionSignals"] = [],
 ): PageRecord {
 	return {
 		ok: false,
@@ -415,6 +430,7 @@ function failedRecord(
 		...(result.etag ? { etag: result.etag } : {}),
 		...(result.lastModified ? { lastModified: result.lastModified } : {}),
 		fetchedAt: result.fetchedAt ?? new Date().toISOString(),
+		injectionSignals,
 		...(metadata ?? {}),
 		markdown: "",
 		links: [],
@@ -428,6 +444,10 @@ function failedRecord(
 		failureKind,
 		timings: { fetchMs: result.fetchMs, extractMs: 0, writeMs: 0 },
 	};
+}
+
+function uniqueSignals(signals: PageRecord["injectionSignals"]) {
+	return [...new Set(signals)];
 }
 
 function resolveCanonical(href: string | null | undefined, base: string) {

@@ -5,6 +5,8 @@ import {
 	type Config,
 	discoverySources,
 	type FailureKind,
+	type InjectionSignal,
+	injectionSignals,
 	lowQualityConfidence,
 	type PageRecord,
 	type PageSuccess,
@@ -25,6 +27,7 @@ export function buildSummary(
 	let failed = 0;
 	let lowQuality = 0;
 	let qualityWarnings = 0;
+	let injectionSignalPages = 0;
 	let hostRedirects = 0;
 	const redirectedHosts = new Map<
 		string,
@@ -32,10 +35,17 @@ export function buildSummary(
 	>();
 	const bySource = emptyCounts(discoverySources);
 	const byFailureKind: Partial<Record<FailureKind, number>> = {};
+	const byInjectionSignal: Partial<Record<InjectionSignal, number>> = {};
 	const errors: RunSummary["errors"] = [];
 
 	for (const record of records) {
 		bySource[record.source]++;
+		if (record.injectionSignals.length) {
+			injectionSignalPages++;
+			for (const signal of record.injectionSignals) {
+				byInjectionSignal[signal] = (byInjectionSignal[signal] ?? 0) + 1;
+			}
+		}
 		if (record.ok) {
 			if (record.outputPath) written++;
 			if (record.outputPath && addRedirectedHosts(record, redirectedHosts)) {
@@ -77,6 +87,11 @@ export function buildSummary(
 		failed,
 		lowQuality,
 		qualityWarnings,
+		injectionSignalPages,
+		byInjectionSignal: orderedPartialCounts(
+			byInjectionSignal,
+			injectionSignals,
+		),
 		hostRedirects,
 		redirectedHosts: [...redirectedHosts.values()]
 			.sort((a, b) => b.count - a.count || a.from.localeCompare(b.from))
@@ -132,6 +147,18 @@ export function isQualityWarning(record: PageSuccess): boolean {
 
 function emptyCounts<T extends string>(keys: readonly T[]) {
 	return Object.fromEntries(keys.map((key) => [key, 0])) as Record<T, number>;
+}
+
+function orderedPartialCounts<T extends string>(
+	counts: Partial<Record<T, number>>,
+	keys: readonly T[],
+) {
+	const out: Partial<Record<T, number>> = {};
+	for (const key of keys) {
+		const count = counts[key];
+		if (count) out[key] = count;
+	}
+	return out;
 }
 
 function maxReached(config: Config, discovered: number) {

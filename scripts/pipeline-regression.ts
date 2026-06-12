@@ -240,6 +240,7 @@ await rejects(() =>
 				finalUrl: "https://docs.example.com/leak/nested/page",
 				redirects: [],
 				fetchedAt: "2026-01-01T00:00:00.000Z",
+				injectionSignals: [],
 				status: 200,
 				source: "seed",
 				timings: { fetchMs: 1, extractMs: 1, writeMs: 0 },

@@ -24,6 +24,23 @@ export const failureKinds = [
 
 export type FailureKind = (typeof failureKinds)[number];
 
+export const injectionSignals = [
+	"zero-width-text",
+	"unicode-tag-text",
+	"bidi-control",
+	"mixed-script-confusable",
+	"hidden-html-text",
+	"html-comment-instruction",
+	"instruction-override",
+	"fake-system-turn",
+	"ai-directed-instruction",
+	"tool-exfiltration-language",
+	"encoded-injection-blob",
+	"opaque-encoded-blob",
+] as const;
+
+export type InjectionSignal = (typeof injectionSignals)[number];
+
 export const lowQualityConfidence = 0.6;
 
 export type RunStatus = "ok" | "partial" | "failed";
@@ -46,6 +63,7 @@ export type Config = {
 	retryHttp?: boolean;
 	maxBytes: number;
 	failOnLowQuality: boolean;
+	failOnInjectionSignal: boolean;
 	json: boolean;
 	quiet: boolean;
 };
@@ -124,6 +142,7 @@ type PageBase = {
 	etag?: string;
 	lastModified?: string;
 	fetchedAt: string;
+	injectionSignals: InjectionSignal[];
 	publishedAt?: string;
 	updatedAt?: string;
 };
@@ -181,6 +200,8 @@ export type RunSummary = {
 	failed: number;
 	lowQuality: number;
 	qualityWarnings: number;
+	injectionSignalPages: number;
+	byInjectionSignal: Partial<Record<InjectionSignal, number>>;
 	hostRedirects: number;
 	redirectedHosts: Array<{ from: string; to: string; count: number }>;
 	elapsedMs: number;

@@ -144,6 +144,7 @@ function page(url: string, extractor: "html" | "markdown", markdown: string) {
 		finalUrl: url,
 		redirects: [],
 		fetchedAt: "2026-01-01T00:00:00.000Z",
+		injectionSignals: [],
 		status: 200,
 		source: extractor === "markdown" ? ("llms" as const) : ("nav" as const),
 		timings: { fetchMs: 1, extractMs: 1, writeMs: 0 },

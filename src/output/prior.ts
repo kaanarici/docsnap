@@ -13,6 +13,8 @@ import type {
 	PageExtractor,
 	PageSuccess,
 } from "../core/types.ts";
+import { injectionSignals } from "../core/types.ts";
+import { scanMarkdownForInjectionSignals } from "../security/injection.ts";
 import { runFiles } from "./files.ts";
 
 export type PriorPage = Omit<PageSuccess, "markdown"> & {
@@ -78,6 +80,10 @@ export async function recoverPriorPage(
 	void bytes;
 	void contentBytes;
 	void outputHash;
+	const recoveredSignals = cleanInjectionSignals([
+		...record.injectionSignals,
+		...scanMarkdownForInjectionSignals(markdown),
+	]);
 	const etag = updates.etag ?? record.etag;
 	const lastModified = updates.lastModified ?? record.lastModified;
 	return {
@@ -85,10 +91,12 @@ export async function recoverPriorPage(
 		redirects: record.redirects ?? [],
 		qualityReasons: record.qualityReasons ?? [],
 		links: record.links ?? [],
+		injectionSignals: recoveredSignals,
 		markdown,
 		...(etag ? { etag } : {}),
 		...(lastModified ? { lastModified } : {}),
-		fetchedAt: updates.fetchedAt ?? new Date().toISOString(),
+		fetchedAt:
+			record.fetchedAt ?? updates.fetchedAt ?? new Date().toISOString(),
 		timings: {
 			fetchMs: updates.fetchMs,
 			extractMs: 0,
@@ -149,7 +157,7 @@ function parsePriorManifest(text: string, config: Config): PriorPage[] {
 	for (const line of lines) {
 		const record = JSON.parse(line) as unknown;
 		if (!isManifestRecord(record)) throw new Error("invalid manifest record");
-		if (isReusablePrior(record, config)) out.push(record);
+		if (isReusablePrior(record, config)) out.push(normalizePrior(record));
 	}
 	return out;
 }
@@ -177,6 +185,22 @@ function isReusablePrior(
 		Array.isArray(record.links) &&
 		Array.isArray(record.qualityReasons)
 	);
+}
+
+function normalizePrior(record: PriorPage): PriorPage {
+	return {
+		...record,
+		injectionSignals: cleanInjectionSignals(record.injectionSignals),
+	};
+}
+
+function cleanInjectionSignals(value: unknown) {
+	const allowed = new Set(injectionSignals);
+	return Array.isArray(value)
+		? value.filter((item): item is PriorPage["injectionSignals"][number] =>
+				allowed.has(item),
+			)
+		: [];
 }
 
 function isSafeRelativeOutputPath(outputPath: string) {

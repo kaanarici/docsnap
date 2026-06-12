@@ -83,7 +83,8 @@ function hasSeedArg(argv: string[]) {
 function runOk(summary: RunSummary, config: Config) {
 	return (
 		summary.written > 0 &&
-		(!config.failOnLowQuality || summary.lowQuality === 0)
+		(!config.failOnLowQuality || summary.lowQuality === 0) &&
+		(!config.failOnInjectionSignal || summary.injectionSignalPages === 0)
 	);
 }
 
@@ -108,6 +109,8 @@ function jsonResult(summary: RunSummary, config: Config, ok: boolean) {
 		failed: summary.failed,
 		lowQuality: summary.lowQuality,
 		qualityWarnings: summary.qualityWarnings,
+		injectionSignalPages: summary.injectionSignalPages,
+		byInjectionSignal: summary.byInjectionSignal,
 		hostRedirects: summary.hostRedirects,
 		redirectedHosts: summary.redirectedHosts,
 		max: summary.max,

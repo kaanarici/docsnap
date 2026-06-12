@@ -88,6 +88,7 @@ ${section(
 	"Quality warnings",
 	qualityWarnings.map((record) => line(record)),
 )}
+${injectionSignalSection(summary)}
 ${section(
 	"Errors",
 	errors.map((error) => `- ${error.url}: ${error.kind}: ${error.error}`),
@@ -173,6 +174,22 @@ function refreshSection(summary: RunSummary) {
 		...pageList("Changed", changedPages),
 		...pageList("Removed", removedPages),
 	]);
+}
+
+function injectionSignalSection(summary: RunSummary) {
+	if (!summary.injectionSignalPages) return "";
+	return section("Injection Signals", [
+		`- Pages with signals: ${summary.injectionSignalPages}`,
+		`- Signal counts: ${injectionSignalCounts(summary)}`,
+		"- Review `manifest.jsonl` for per-page signal IDs before using captured pages with tool-enabled agents.",
+	]);
+}
+
+function injectionSignalCounts(summary: RunSummary) {
+	const counts = Object.entries(summary.byInjectionSignal)
+		.map(([signal, count]) => `${signal}=${count}`)
+		.join(", ");
+	return counts || "none";
 }
 
 function pageList(title: string, pages: RunSummary["refresh"]["changedPages"]) {

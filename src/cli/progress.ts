@@ -28,6 +28,9 @@ export function printSummary(summary: RunSummary): void {
 	if (summary.qualityWarnings) {
 		note(`docsnap: ${summary.qualityWarnings} quality warnings`);
 	}
+	if (summary.injectionSignalPages) {
+		note(`docsnap: ${summary.injectionSignalPages} injection signal pages`);
+	}
 	if (summary.hostRedirects) {
 		const page = summary.hostRedirects === 1 ? "page" : "pages";
 		note(`docsnap: ${summary.hostRedirects} ${page} changed host via redirect`);
