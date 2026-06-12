@@ -192,6 +192,124 @@ try {
 	setFetchTransportForTest(undefined);
 }
 
+const crossOriginBlockedAlternateFeedConfig = parseArgs([
+	"https://blog.example.com/",
+	"-m",
+	"3",
+]);
+assert(
+	!("help" in crossOriginBlockedAlternateFeedConfig) &&
+		!("version" in crossOriginBlockedAlternateFeedConfig),
+);
+const crossOriginBlockedFetches: string[] = [];
+setFetchTransportForTest(async (input) => {
+	const url = String(input);
+	crossOriginBlockedFetches.push(url);
+	if (url === "https://blog.example.com/robots.txt") {
+		return response(url, 404, "not found", "text/plain");
+	}
+	if (url.endsWith("/llms.txt")) {
+		return response(url, 404, "not found", "text/plain");
+	}
+	if (url === "https://feeds.partner.example/robots.txt") {
+		return response(
+			url,
+			200,
+			"User-agent: *\nDisallow: /blog.xml",
+			"text/plain",
+		);
+	}
+	if (url === "https://feeds.partner.example/blog.xml") {
+		throw new Error("cross-origin robots-disallowed feed fetched");
+	}
+	if (url === "https://blog.example.com/") {
+		return response(
+			url,
+			200,
+			`<html><head><link rel="alternate" type="application/rss+xml" href="https://feeds.partner.example/blog.xml"></head><body><main>Updates</main></body></html>`,
+		);
+	}
+	return response(url, 404, "not found", "text/plain");
+});
+try {
+	const urls = await discover(crossOriginBlockedAlternateFeedConfig);
+	assert(
+		crossOriginBlockedFetches.includes(
+			"https://feeds.partner.example/robots.txt",
+		),
+	);
+	assert(
+		!crossOriginBlockedFetches.includes(
+			"https://feeds.partner.example/blog.xml",
+		),
+	);
+	assert(!urls.some((item) => item.source === "feed"));
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
+const crossOriginAllowedAlternateFeedConfig = parseArgs([
+	"https://blog.example.com/",
+	"-m",
+	"3",
+]);
+assert(
+	!("help" in crossOriginAllowedAlternateFeedConfig) &&
+		!("version" in crossOriginAllowedAlternateFeedConfig),
+);
+const crossOriginAllowedFetches: string[] = [];
+setFetchTransportForTest(async (input) => {
+	const url = String(input);
+	crossOriginAllowedFetches.push(url);
+	if (url === "https://blog.example.com/robots.txt") {
+		return response(url, 404, "not found", "text/plain");
+	}
+	if (url.endsWith("/llms.txt")) {
+		return response(url, 404, "not found", "text/plain");
+	}
+	if (url === "https://feeds.partner.example/robots.txt") {
+		return response(url, 404, "not found", "text/plain");
+	}
+	if (url === "https://feeds.partner.example/blog.xml") {
+		return response(
+			url,
+			200,
+			`<rss><channel><item><link>https://blog.example.com/from-feed</link></item></channel></rss>`,
+			"application/rss+xml",
+		);
+	}
+	if (url === "https://blog.example.com/") {
+		return response(
+			url,
+			200,
+			`<html><head><link rel="alternate" type="application/rss+xml" href="https://feeds.partner.example/blog.xml"></head><body><main>Updates</main></body></html>`,
+		);
+	}
+	return response(url, 404, "not found", "text/plain");
+});
+try {
+	const urls = await discover(crossOriginAllowedAlternateFeedConfig);
+	assert(
+		crossOriginAllowedFetches.includes(
+			"https://feeds.partner.example/robots.txt",
+		),
+	);
+	assert(
+		crossOriginAllowedFetches.includes(
+			"https://feeds.partner.example/blog.xml",
+		),
+	);
+	assert(
+		urls.some(
+			(item) =>
+				item.url === "https://blog.example.com/from-feed" &&
+				item.source === "feed",
+		),
+	);
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
 const crossOriginFeedConfig = parseArgs([
 	"https://scope.example.com/feed.xml",
 	"-m",

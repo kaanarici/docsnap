@@ -202,11 +202,19 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 
 	if (!richSitemap && out.length < Math.min(config.max, 3)) {
 		for (const feedUrl of feedLinks.slice(0, 2)) {
-			if (!allowed(feedUrl)) continue;
+			const feedOrigin = new URL(feedUrl).origin;
+			const feedRobots = await robotsForOrigin(
+				feedOrigin,
+				config,
+				robotsByOrigin,
+			);
+			const feedAllowed = (url: string) =>
+				config.ignoreRobots || feedRobots.allowed(url);
+			if (!feedAllowed(feedUrl)) continue;
 			const feedPages = await discoverFeed(feedUrl, seed, scope, config, {
 				limit: config.max - out.length,
 				accept: (url) => inScope(url, seed, scope) && allowed(url),
-				allowResource: allowed,
+				allowResource: feedAllowed,
 			});
 			for (const page of feedPages) {
 				add(page.url, "feed", page.fetched, page.metadata);
