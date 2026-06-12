@@ -2,6 +2,7 @@ import { emptyRefreshSummary } from "../core/refresh.ts";
 import type { SnapshotStats } from "../core/snapshot.ts";
 import { SNAPSHOT_VERSION } from "../core/snapshot.ts";
 import {
+	type CacheSummary,
 	type Config,
 	discoverySources,
 	type FailureKind,
@@ -15,6 +16,8 @@ import {
 	type RunSummary,
 } from "../core/types.ts";
 
+const cacheDirEnv = "DOCSNAP_CACHE_DIR";
+
 export function buildSummary(
 	records: PageRecord[],
 	config: Config,
@@ -22,8 +25,10 @@ export function buildSummary(
 	deduped: number,
 	snapshot: SnapshotStats,
 	elapsedMs: number,
+	firstPageMs: number | null = null,
 	refresh: RefreshSummary = emptyRefreshSummary(),
 	render: RenderSummary = emptyRenderSummary(config),
+	cache: CacheSummary = emptyCacheSummary(config),
 ): RunSummary {
 	let written = 0;
 	let failed = 0;
@@ -99,6 +104,7 @@ export function buildSummary(
 			.sort((a, b) => b.count - a.count || a.from.localeCompare(b.from))
 			.slice(0, 10),
 		elapsedMs: Number(elapsedMs.toFixed(1)),
+		firstPageMs: firstPageMs === null ? null : Number(firstPageMs.toFixed(1)),
 		pagesPerSecond: Number(
 			(written / Math.max(elapsedMs / 1000, 0.001)).toFixed(2),
 		),
@@ -107,6 +113,7 @@ export function buildSummary(
 		errors,
 		render,
 		refresh,
+		cache,
 	};
 }
 
@@ -123,6 +130,23 @@ export function emptyRenderSummary(config: Config): RenderSummary {
 		blockedRequests: 0,
 		unavailableReason: null,
 		pages: [],
+	};
+}
+
+export function emptyCacheSummary(config: Config): CacheSummary {
+	const enabled =
+		config.cache && process.env[cacheDirEnv]?.trim().toLowerCase() !== "off";
+	return {
+		enabled,
+		dir: enabled ? process.env[cacheDirEnv]?.trim() || null : null,
+		hits: 0,
+		misses: 0,
+		stale: 0,
+		revalidated: 0,
+		written: 0,
+		bytesRead: 0,
+		bytesWritten: 0,
+		evictedBytes: 0,
 	};
 }
 

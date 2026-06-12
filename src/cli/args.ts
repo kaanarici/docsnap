@@ -27,6 +27,7 @@ Flags:
   --dry-run                 run without writing files
   --page                    capture only the given page, no discovery
   --render <mode>           JS rendering mode: auto, never, always; default auto
+  --no-cache                disable the shared fetch cache for this run
   --agent-files             add a docsnap block to AGENTS.md/CLAUDE.md in the current directory
   --json                    print one machine-readable result
   --quiet                   suppress progress logs
@@ -70,6 +71,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
 		agentFiles: false,
 		pageOnly: false,
 		ignoreRobots: false,
+		cache: true,
 		render: "auto",
 		userAgent:
 			"Mozilla/5.0 (compatible; docsnap; +https://npmjs.com/package/docsnap)",
@@ -101,6 +103,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
 		} else if (arg === "--clean") config.clean = true;
 		else if (arg === "--dry-run") config.dryRun = true;
 		else if (arg === "--page") config.pageOnly = true;
+		else if (arg === "--no-cache") config.cache = false;
 		else if (arg === "--agent-files") config.agentFiles = true;
 		else if (arg === "--json") config.json = true;
 		else if (arg === "--quiet") config.quiet = true;

@@ -1,3 +1,5 @@
+import { pruneCache } from "../cache/eviction.ts";
+import { cacheSummary } from "../cache/store.ts";
 import { looksLikeAppShell } from "../discover/assets.ts";
 import { discover } from "../discover/index.ts";
 import { discoverPageLinks } from "../discover/nav.ts";
@@ -58,6 +60,7 @@ export async function runPipeline(
 	progress?: Progress,
 ): Promise<PipelineResult> {
 	const started = performance.now();
+	let firstPageMs: number | null = null;
 	const renderState = createRenderState(config, progress);
 	assertOutputRootSafe(config);
 	try {
@@ -138,8 +141,11 @@ export async function runPipeline(
 		progress?.(
 			config.dryRun ? "docsnap: finalizing" : "docsnap: writing output",
 		);
-		const writeStats = await writePages(finalRecords, config);
+		const writeStats = await writePages(finalRecords, config, () => {
+			firstPageMs ??= performance.now() - started;
+		});
 		refreshReport.skippedWrites = writeStats.skippedWrites;
+		await pruneCache(config);
 		const summary = buildSummary(
 			finalRecords,
 			config,
@@ -147,8 +153,10 @@ export async function runPipeline(
 			dedupe.deduped,
 			snapshot,
 			performance.now() - started,
+			firstPageMs,
 			refreshReport,
 			renderState.summary,
+			cacheSummary(config),
 		);
 		await writeRunFiles(finalRecords, summary, config);
 

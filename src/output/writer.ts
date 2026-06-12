@@ -68,6 +68,7 @@ export function assertOutputRootSafe(config: Config): void {
 export async function writePages(
 	records: PageRecord[],
 	config: Config,
+	onPageDone?: () => void,
 ): Promise<WriteStats> {
 	if (config.dryRun) return { pageWrites: 0, skippedWrites: 0 };
 	const stats: WriteStats = { pageWrites: 0, skippedWrites: 0 };
@@ -75,6 +76,7 @@ export async function writePages(
 		const wrote = await writePage(record, config);
 		if (wrote) stats.pageWrites++;
 		else stats.skippedWrites++;
+		onPageDone?.();
 	});
 	return stats;
 }

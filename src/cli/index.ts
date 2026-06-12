@@ -124,12 +124,14 @@ function jsonResult(summary: RunSummary, config: Config, ok: boolean) {
 		discovered: summary.discovered,
 		deduped: summary.deduped,
 		elapsedMs: summary.elapsedMs,
+		firstPageMs: summary.firstPageMs,
 		pagesPerSecond: summary.pagesPerSecond,
 		bySource: summary.bySource,
 		byFailureKind: summary.byFailureKind,
 		errors: summary.errors,
 		render: summary.render,
 		refresh: summary.refresh,
+		cache: summary.cache,
 		...(config.agentFiles
 			? { agentFilesUpdated: summary.agentFilesUpdated ?? [] }
 			: {}),

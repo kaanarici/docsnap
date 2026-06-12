@@ -52,6 +52,7 @@ Options:
   --clean                   remove output dir before writing
   --dry-run                 run without writing files
   --page                    capture only the given page, no discovery
+  --no-cache                disable the shared fetch cache for this run
   --agent-files             add a docsnap block to AGENTS.md/CLAUDE.md in the current directory
   --json                    print one machine-readable result
   --quiet                   suppress progress logs
@@ -77,6 +78,10 @@ docsnap https://docs.djangoproject.com/en/stable/ --agent-files
 ```
 
 Use an absolute `--out` path for output outside the current directory.
+
+## Cache
+
+docsnap keeps a shared fetch cache in `~/.cache/docsnap` so repeated captures can reuse public page bodies across output directories. Set `DOCSNAP_CACHE_DIR` to choose another cache directory, `DOCSNAP_CACHE_DIR=off` or `--no-cache` to bypass it, and `DOCSNAP_CACHE_MAX_MB` to change the default 2048 MB cap.
 
 ## MCP
 

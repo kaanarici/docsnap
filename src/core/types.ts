@@ -66,6 +66,7 @@ export type Config = {
 	agentFiles: boolean;
 	pageOnly: boolean;
 	ignoreRobots: boolean;
+	cache: boolean;
 	render: RenderMode;
 	userAgent: string;
 	timeoutMs: number;
@@ -88,6 +89,7 @@ type FetchBase = {
 	etag?: string;
 	lastModified?: string;
 	fetchedAt?: string;
+	cacheControl?: string;
 };
 
 export type RedirectHop = {
@@ -225,13 +227,28 @@ export type RunSummary = {
 	hostRedirects: number;
 	redirectedHosts: Array<{ from: string; to: string; count: number }>;
 	elapsedMs: number;
+	firstPageMs: number | null;
 	pagesPerSecond: number;
 	bySource: Record<DiscoverySource, number>;
 	byFailureKind: Partial<Record<FailureKind, number>>;
 	errors: Array<{ url: string; error: string; kind: FailureKind }>;
 	render: RenderSummary;
 	refresh: RefreshSummary;
+	cache: CacheSummary;
 	agentFilesUpdated?: string[];
+};
+
+export type CacheSummary = {
+	enabled: boolean;
+	dir: string | null;
+	hits: number;
+	misses: number;
+	stale: number;
+	revalidated: number;
+	written: number;
+	bytesRead: number;
+	bytesWritten: number;
+	evictedBytes: number;
 };
 
 export type RenderPageSummary = {
