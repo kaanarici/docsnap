@@ -267,6 +267,100 @@ try {
 	setFetchTransportForTest(undefined);
 }
 
+// a Disallow:/ seed with Allow carve-outs and a declared sitemap must yield
+// the allowed subtree without fetching the seed or probing default sitemaps
+const carveOutConfig = parseArgs(["https://carveout.example/", "-m", "5"]);
+assert(!("help" in carveOutConfig) && !("version" in carveOutConfig));
+const carveOutFetches: string[] = [];
+setFetchTransportForTest(async (input) => {
+	const url = String(input);
+	carveOutFetches.push(url);
+	if (url === "https://carveout.example/robots.txt") {
+		return response(
+			url,
+			200,
+			[
+				"User-agent: *",
+				"Disallow: /",
+				"Allow: /en/stable",
+				"Sitemap: https://carveout.example/declared-sitemap.xml",
+			].join("\n"),
+			"text/plain",
+		);
+	}
+	if (url === "https://carveout.example/declared-sitemap.xml") {
+		return response(
+			url,
+			200,
+			`<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+				<url><loc>https://carveout.example/en/stable/intro</loc></url>
+				<url><loc>https://carveout.example/en/stable/config</loc></url>
+				<url><loc>https://carveout.example/private/admin</loc></url>
+			</urlset>`,
+			"application/xml",
+		);
+	}
+	if (url === "https://carveout.example/") {
+		throw new Error("disallowed seed fetched");
+	}
+	if (url === "https://carveout.example/sitemap.xml") {
+		throw new Error("undeclared sitemap probed despite Disallow:/");
+	}
+	return response(url, 404, "not found", "text/plain");
+});
+try {
+	const urls = await discover(carveOutConfig);
+	assert(
+		urls.some(
+			(item) => item.url === "https://carveout.example/en/stable/intro",
+		),
+	);
+	assert(
+		urls.some(
+			(item) => item.url === "https://carveout.example/en/stable/config",
+		),
+	);
+	assert(!urls.some((item) => item.url.includes("/private/")));
+	assert(!carveOutFetches.includes("https://carveout.example/"));
+	assert(!carveOutFetches.includes("https://carveout.example/sitemap.xml"));
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
+// Disallow:/ with no declared sitemap and no allowed llms: blocked seed only,
+// and no sitemap probing at all
+const fullyBlockedConfig = parseArgs([
+	"https://fullyblocked.example/",
+	"-m",
+	"3",
+]);
+assert(!("help" in fullyBlockedConfig) && !("version" in fullyBlockedConfig));
+const fullyBlockedFetches: string[] = [];
+setFetchTransportForTest(async (input) => {
+	const url = String(input);
+	fullyBlockedFetches.push(url);
+	if (url === "https://fullyblocked.example/robots.txt") {
+		return response(url, 200, "User-agent: *\nDisallow: /", "text/plain");
+	}
+	if (url.includes("sitemap")) {
+		throw new Error("sitemap probed on fully blocked origin");
+	}
+	if (url === "https://fullyblocked.example/") {
+		throw new Error("disallowed seed fetched");
+	}
+	return response(url, 404, "not found", "text/plain");
+});
+try {
+	const urls = await discover(fullyBlockedConfig);
+	assert(urls.length === 1);
+	assert(urls[0]?.fetched?.ok === false);
+	assert(urls[0]?.fetched?.failureKind === "blocked");
+	assert(fullyBlockedFetches[0] === "https://fullyblocked.example/robots.txt");
+	assert(!fullyBlockedFetches.some((url) => url.includes("sitemap")));
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
 function response(
 	url: string,
 	status: number,

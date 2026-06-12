@@ -15,7 +15,7 @@ import {
 	isFeedResponse,
 } from "./feed.ts";
 import { discoverNav, discoverPageLinks } from "./nav.ts";
-import { loadRobots } from "./robots.ts";
+import { loadRobots, type Robots } from "./robots.ts";
 import { discoverSitemaps } from "./sitemap.ts";
 import {
 	addDiscovered,
@@ -37,9 +37,7 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 	]);
 	const llmsOptions: LlmsCorpusOptions = { cache: new Map(), robotsByOrigin };
 	if (!seedRobots.allowed(inputSeed)) {
-		return [
-			{ url: inputSeed, source: "seed", fetched: robotsBlockedUrl(inputSeed) },
-		];
+		return disallowedSeedDiscovery(inputSeed, seedRobots, config, llmsOptions);
 	}
 	if (inputUrl.pathname.endsWith("/llms.txt")) {
 		return discoverLlmsCorpus(inputSeed, inputSeed, "/", config, {
@@ -394,6 +392,47 @@ function robotsBlockedUrl(url: string): FetchResult {
 		error: "blocked by robots.txt",
 		failureKind: "blocked",
 	};
+}
+
+// a robots-disallowed seed often sits on a site that carves out Allow:
+// subtrees and declares sitemaps; honor those explicit signals without ever
+// fetching the seed itself or probing undeclared sitemap paths
+async function disallowedSeedDiscovery(
+	inputSeed: string,
+	robots: Robots,
+	config: Config,
+	llmsOptions: LlmsCorpusOptions,
+): Promise<DiscoveredUrl[]> {
+	const out = await discoverLlmsCorpus(
+		inputSeed,
+		inputSeed,
+		"/",
+		config,
+		llmsOptions,
+	);
+	const seen = new Set(out.map((item) => item.url));
+	if (robots.sitemaps.length > 0 && out.length < config.max) {
+		const sitemapUrls = await discoverSitemaps(
+			inputSeed,
+			robots.sitemaps,
+			config,
+			{
+				limit: config.max - out.length,
+				scope: "/",
+				declaredOnly: true,
+				accept: (url) => !seen.has(url) && robots.allowed(url),
+			},
+		);
+		for (const url of sitemapUrls) {
+			if (seen.has(url) || !robots.allowed(url)) continue;
+			seen.add(url);
+			out.push({ url, source: "sitemap" });
+		}
+	}
+	if (out.length > 0) return out;
+	return [
+		{ url: inputSeed, source: "seed", fetched: robotsBlockedUrl(inputSeed) },
+	];
 }
 
 function isLanguageSelector(finalUrl: string, html: string) {

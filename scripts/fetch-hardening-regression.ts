@@ -74,6 +74,7 @@ await withMockFetch(
 		const result = await fetchText("https://a.co.uk/start", config);
 		assert(result.ok);
 		assert(
+			// biome-ignore lint/complexity/useLiteralKeys: tsconfig requires index access
 			publicSuffixCookieCalls.find((call) => call.url === "https://b.co.uk/end")
 				?.headers["cookie"] === undefined,
 		);
@@ -103,6 +104,7 @@ await withMockFetch(
 		assert(
 			parentDomainCookieCalls.find(
 				(call) => call.url === "https://www.example.co.uk/end",
+				// biome-ignore lint/complexity/useLiteralKeys: tsconfig requires index access
 			)?.headers["cookie"] === "sid=good",
 		);
 	},

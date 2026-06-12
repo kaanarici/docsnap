@@ -64,8 +64,13 @@ setFetchTransportForTest(async (input) => {
 });
 try {
 	const urls = await discover(seedBlockedConfig);
-	assert(seedBlockedFetches.length === 1);
 	assert(seedBlockedFetches[0] === "https://blockedseed.example/robots.txt");
+	// robots-allowed llms probes may follow, but never the disallowed seed
+	assert(
+		seedBlockedFetches.every(
+			(url) => url.endsWith("/robots.txt") || url.endsWith("/llms.txt"),
+		),
+	);
 	assert(urls.length === 1);
 	assert(urls[0]?.url === "https://blockedseed.example/docs/");
 	assert(urls[0]?.source === "seed");

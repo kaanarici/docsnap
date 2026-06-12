@@ -8,6 +8,10 @@ type SitemapOptions = {
 	limit?: number;
 	accept?: (url: string) => boolean;
 	scope?: string;
+	// only fetch sitemaps explicitly declared in robots.txt — required when the
+	// seed path is robots-disallowed, where probing default sitemap paths would
+	// itself violate the rules while declared sitemaps are an explicit invitation
+	declaredOnly?: boolean;
 };
 
 const SITEMAP_INDEX_CHILD_CONCURRENCY = 4;
@@ -27,15 +31,19 @@ export async function discoverSitemaps(
 		const url = absoluteHttpUrl(raw, base.href);
 		if (url && sameOrigin(url, base.origin)) candidates.add(url);
 	};
-	for (const sitemap of scopedSitemapCandidates(base)) addCandidate(sitemap);
+	if (!options.declaredOnly) {
+		for (const sitemap of scopedSitemapCandidates(base)) addCandidate(sitemap);
+	}
 	for (const sitemap of sitemapUrls) addCandidate(sitemap);
-	for (const path of [
-		"/sitemap.xml",
-		"/sitemap_index.xml",
-		"/sitemap-index.xml",
-		"/sitemap-0.xml",
-	]) {
-		addCandidate(`${base.origin}${path}`);
+	if (!options.declaredOnly) {
+		for (const path of [
+			"/sitemap.xml",
+			"/sitemap_index.xml",
+			"/sitemap-index.xml",
+			"/sitemap-0.xml",
+		]) {
+			addCandidate(`${base.origin}${path}`);
+		}
 	}
 
 	const found = new Set<string>();

@@ -50,9 +50,14 @@ setFetchTransportForTest(async (input) => {
 });
 try {
 	const urls = await discover(feedSeedBlockedConfig);
-	assert(feedSeedBlockedFetches.length === 1);
 	assert(
 		feedSeedBlockedFetches[0] === "https://blogblocked.example/robots.txt",
+	);
+	// robots-allowed llms probes may follow, but never the disallowed seed
+	assert(
+		feedSeedBlockedFetches.every(
+			(url) => url.endsWith("/robots.txt") || url.endsWith("/llms.txt"),
+		),
 	);
 	assert(urls.length === 1);
 	assert(urls[0]?.url === "https://blogblocked.example/feed.xml");
