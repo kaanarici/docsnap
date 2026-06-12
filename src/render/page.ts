@@ -123,7 +123,7 @@ export class ChromeRenderer {
 		} catch (error) {
 			return failure(
 				started,
-				error instanceof Error ? error.message : String(error),
+				renderError(error),
 				this.session.product,
 				pagePolicy.resourceRequests,
 				pagePolicy.blockedRequests,
@@ -312,6 +312,18 @@ function failure(
 		resourceRequests,
 		blockedRequests,
 	};
+}
+
+function renderError(error: unknown) {
+	const message = error instanceof Error ? error.message : String(error);
+	if (/^browser_crash:/i.test(message)) return message;
+	return isBrowserCrash(message) ? `browser_crash: ${message}` : message;
+}
+
+function isBrowserCrash(message: string) {
+	return /\b(browser exited|CDP connection closed|EPIPE|ECONNRESET|ERR_STREAM_DESTROYED|target closed|session closed)\b/i.test(
+		message,
+	);
 }
 
 function pageTimeoutMs(config: Config) {

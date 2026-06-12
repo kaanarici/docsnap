@@ -50,6 +50,12 @@ export class CdpConnection {
 		this.fromBrowser.on("data", (chunk: Buffer) => this.read(chunk));
 		this.fromBrowser.on("error", (error) => this.close(error));
 		this.toBrowser.on("error", (error) => this.close(error));
+		this.fromBrowser.on("close", () =>
+			this.close(new Error("CDP connection closed")),
+		);
+		this.toBrowser.on("close", () =>
+			this.close(new Error("CDP connection closed")),
+		);
 	}
 
 	send<T = unknown>(
@@ -61,7 +67,6 @@ export class CdpConnection {
 		if (this.closed) return Promise.reject(this.closed);
 		const id = this.nextId++;
 		const payload = { id, method, params, ...(sessionId ? { sessionId } : {}) };
-		this.toBrowser.write(`${JSON.stringify(payload)}\0`);
 		return new Promise<T>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				if (!this.pending.delete(id)) return;
@@ -73,6 +78,11 @@ export class CdpConnection {
 				reject,
 				timer,
 			});
+			try {
+				this.toBrowser.write(`${JSON.stringify(payload)}\0`);
+			} catch (error) {
+				this.close(error instanceof Error ? error : new Error(String(error)));
+			}
 		});
 	}
 

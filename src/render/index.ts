@@ -6,7 +6,12 @@ import type {
 	RenderReason,
 	RenderSummary,
 } from "../core/types.ts";
-import { findBrowserBinary, launchBrowser } from "./browser.ts";
+import {
+	type BrowserBinary,
+	type BrowserSession,
+	findBrowserBinary,
+	launchBrowser,
+} from "./browser.ts";
 import { ChromeRenderer } from "./page.ts";
 
 type Progress = (message: string) => void;
@@ -40,16 +45,27 @@ export type RenderFunctionForTest = (
 	config: Config,
 ) => Promise<RenderPageOutput>;
 
+export type BrowserLauncherForTest = (
+	binary: BrowserBinary,
+) => Promise<BrowserSession>;
+
 export type RenderState = {
 	summary: RenderSummary;
 };
 
 let rendererForTest: RenderFunctionForTest | undefined;
+let browserLauncherForTest: BrowserLauncherForTest | undefined;
 
 export function setRendererForTest(
 	renderer: RenderFunctionForTest | undefined,
 ) {
 	rendererForTest = renderer;
+}
+
+export function setBrowserLauncherForTest(
+	launcher: BrowserLauncherForTest | undefined,
+) {
+	browserLauncherForTest = launcher;
 }
 
 export function createRenderState(
@@ -90,7 +106,12 @@ export async function renderCandidates(
 	const selected = candidates.slice(0, remaining);
 	const started = performance.now();
 	const renderer = await ensureRenderer(config, state, selected);
-	if (!renderer) return [];
+	if (!renderer) {
+		state.summary.elapsedMs = Number(
+			(state.summary.elapsedMs + performance.now() - started).toFixed(1),
+		);
+		return [];
+	}
 	state.progress?.(
 		`docsnap: rendering ${selected.length} pages with chrome-cdp`,
 	);
@@ -157,25 +178,43 @@ async function ensureRenderer(
 		unavailableHinted?: boolean;
 	};
 	if (active.renderer) return active.renderer;
+	if (state.summary.unavailableReason) return undefined;
 	const binary = await findBrowserBinary();
 	if (!binary) {
-		state.summary.unavailableReason = "no Chrome/Chromium/Edge binary found";
-		if (!active.unavailableHinted && config.render === "auto") {
-			state.progress?.(
-				"docsnap: render unavailable; install Chrome/Chromium/Edge or set DOCSNAP_CHROME_PATH (using static capture)",
-			);
-			active.unavailableHinted = true;
-		}
+		markUnavailable(
+			config,
+			state,
+			"no Chrome/Chromium/Edge binary found",
+			"install Chrome/Chromium/Edge or set DOCSNAP_CHROME_PATH",
+		);
 		return undefined;
 	}
 	try {
-		const session = await launchBrowser(binary);
+		const session = await (browserLauncherForTest ?? launchBrowser)(binary);
 		active.renderer = new ChromeRenderer(session, config);
 		state.summary.browser = session.product;
 		return active.renderer;
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		return failLaunch(candidates, state, message);
+		const reason = `browser launch failed: ${message}`;
+		markUnavailable(config, state, reason, reason);
+		return failLaunch(candidates, state, reason);
+	}
+}
+
+function markUnavailable(
+	config: Config,
+	state: RenderState & { progress?: Progress },
+	reason: string,
+	hint: string,
+) {
+	state.summary.unavailableReason = reason;
+	const active = state as RenderState & { unavailableHinted?: boolean };
+	if (!active.unavailableHinted && config.render === "auto") {
+		state.progress?.(
+			`docsnap: render unavailable; ${hint} (using static capture)`,
+		);
+		active.unavailableHinted = true;
 	}
 }
 

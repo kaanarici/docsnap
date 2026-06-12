@@ -25,9 +25,23 @@ export type BrowserSession = {
 	close: () => Promise<void>;
 };
 
+export type BrowserLaunchAttempt = (
+	binary: BrowserBinary,
+	profile: string,
+) => Promise<BrowserSession>;
+
+export type BrowserLaunchOptions = {
+	retries?: number;
+	profileRoot?: string;
+	retryDelayMs?: (attempt: number) => number;
+	launchAttempt?: BrowserLaunchAttempt;
+};
+
 type VersionResult = {
 	product?: string;
 };
+
+const defaultLaunchRetries = 2;
 
 const pathCommands = [
 	["google-chrome", "chrome"],
@@ -64,9 +78,37 @@ export async function findBrowserBinary(
 
 export async function launchBrowser(
 	binary: BrowserBinary,
+	options: BrowserLaunchOptions = {},
 ): Promise<BrowserSession> {
-	const profile = await mkdtemp(join(tmpdir(), "docsnap-render-"));
+	const maxRetries = Math.max(
+		0,
+		Math.floor(options.retries ?? defaultLaunchRetries),
+	);
+	const profileRoot = options.profileRoot ?? tmpdir();
+	const launch = options.launchAttempt ?? launchBrowserAttempt;
+	let lastError: unknown;
+	for (let attempt = 0; attempt <= maxRetries; attempt++) {
+		const profile = await mkdtemp(join(profileRoot, "docsnap-render-"));
+		try {
+			const session = await launch(binary, profile);
+			return withProfileCleanup(session, profile);
+		} catch (error) {
+			lastError = error;
+			await rm(profile, { recursive: true, force: true });
+			if (attempt < maxRetries) {
+				await Bun.sleep((options.retryDelayMs ?? retryDelayMs)(attempt));
+			}
+		}
+	}
+	throw errorFrom(lastError);
+}
+
+async function launchBrowserAttempt(
+	binary: BrowserBinary,
+	profile: string,
+): Promise<BrowserSession> {
 	let child: ChildProcess | undefined;
+	let cdp: CdpConnection | undefined;
 	let closed = false;
 	try {
 		child = spawn(
@@ -89,31 +131,67 @@ export async function launchBrowser(
 		);
 		const toBrowser = child.stdio[3] as Writable;
 		const fromBrowser = child.stdio[4] as Readable;
-		const cdp = new CdpConnection(toBrowser, fromBrowser);
-		child.once("exit", () => cdp.close(new Error("browser exited")));
+		cdp = new CdpConnection(toBrowser, fromBrowser);
+		child.once("exit", (code, signal) =>
+			cdp?.close(browserExitError(code, signal)),
+		);
+		child.once("error", (error) => cdp?.close(error));
 		const version = await cdp.send<VersionResult>("Browser.getVersion");
+		const connection = cdp;
 		return {
-			cdp,
+			cdp: connection,
 			binary,
 			product: version.product ?? binary.name,
 			close: async () => {
 				if (closed) return;
 				closed = true;
 				try {
-					await cdp.send("Browser.close", {}, undefined, 1_000);
+					await connection.send("Browser.close", {}, undefined, 1_000);
 				} catch {
 					// Browser.close can fail after a crash; cleanup below is authoritative.
 				}
-				cdp.close();
+				connection.close();
 				await stopChild(child);
-				await rm(profile, { recursive: true, force: true });
 			},
 		};
 	} catch (error) {
+		cdp?.close(errorFrom(error));
 		await stopChild(child);
-		await rm(profile, { recursive: true, force: true });
 		throw error;
 	}
+}
+
+function withProfileCleanup(
+	session: BrowserSession,
+	profile: string,
+): BrowserSession {
+	let closed = false;
+	return {
+		...session,
+		close: async () => {
+			if (closed) return;
+			closed = true;
+			try {
+				await session.close();
+			} finally {
+				await rm(profile, { recursive: true, force: true });
+			}
+		},
+	};
+}
+
+function retryDelayMs(attempt: number) {
+	return Math.min(400, 150 * (attempt + 1));
+}
+
+function browserExitError(code: number | null, signal: NodeJS.Signals | null) {
+	if (signal) return new Error(`browser exited with signal ${signal}`);
+	if (code !== null) return new Error(`browser exited with code ${code}`);
+	return new Error("browser exited");
+}
+
+function errorFrom(error: unknown) {
+	return error instanceof Error ? error : new Error(String(error));
 }
 
 function commandForPlatform(command: string, platform: NodeJS.Platform) {
