@@ -48,9 +48,9 @@ const protectedHomeDirs = new Set([
 ]);
 
 export async function prepareOutput(config: Config): Promise<void> {
+	assertOutputRootSafe(config);
 	if (config.dryRun) return;
 	const outDir = resolve(config.outDir);
-	assertSafeOutputDir(outDir, config.outDir);
 	if (config.clean) {
 		assertSafeCleanDir(outDir, config.outDir);
 		await rm(outDir, { recursive: true, force: true });
@@ -58,6 +58,11 @@ export async function prepareOutput(config: Config): Promise<void> {
 	await assertSafeOutputRoot(outDir, config.outDir);
 	await mkdir(outDir, { recursive: true });
 	await assertSafeOutputRoot(outDir, config.outDir);
+}
+
+export function assertOutputRootSafe(config: Config): void {
+	const outDir = resolve(config.outDir);
+	assertSafeOutputDir(outDir, config.outDir);
 }
 
 export async function writePages(

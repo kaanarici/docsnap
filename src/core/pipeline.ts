@@ -11,7 +11,12 @@ import {
 	type PriorState,
 	recoverPriorPage,
 } from "../output/prior.ts";
-import { prepareOutput, writePages, writeRunFiles } from "../output/writer.ts";
+import {
+	assertOutputRootSafe,
+	prepareOutput,
+	writePages,
+	writeRunFiles,
+} from "../output/writer.ts";
 import { buildSummary } from "../report/summary.ts";
 import { dedupeRecords } from "./dedupe.ts";
 import { hasOutputPath, isPageSuccess } from "./records.ts";
@@ -39,6 +44,7 @@ export async function runPipeline(
 	progress?: Progress,
 ): Promise<PipelineResult> {
 	const started = performance.now();
+	assertOutputRootSafe(config);
 	const prior = await loadPrior(config);
 	const refresh = refreshCounters();
 	await prepareOutput(config);

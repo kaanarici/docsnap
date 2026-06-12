@@ -44,10 +44,20 @@ export async function requestPublicHttp(
 	config: Config,
 ): Promise<HttpResponse> {
 	const resolved = await resolveForRequest(raw);
+	const deadlineAt = Date.now() + config.timeoutMs * 3;
 	let lastError: unknown;
 	for (const address of resolved.addresses) {
+		const remainingMs = deadlineAt - Date.now();
+		if (remainingMs <= 0) throw deadlineError();
 		try {
-			return await requestAddress(raw, headers, config, resolved, address);
+			return await requestAddress(
+				raw,
+				headers,
+				config,
+				resolved,
+				address,
+				remainingMs,
+			);
 		} catch (error) {
 			lastError = error;
 		}
@@ -61,6 +71,7 @@ function requestAddress(
 	config: Config,
 	resolved: PublicHttpAddress,
 	address: PublicAddress,
+	deadlineMs: number,
 ): Promise<HttpResponse> {
 	const request =
 		resolved.url.protocol === "https:" ? httpsRequest : httpRequest;
@@ -124,7 +135,7 @@ function requestAddress(
 		const deadline = setTimeout(() => {
 			deadlineHit = true;
 			req.destroy(deadlineError());
-		}, config.timeoutMs * 3);
+		}, deadlineMs);
 		req.on("timeout", () => req.destroy(new Error("request timed out")));
 		req.on("error", (error) => {
 			clearTimeout(deadline);

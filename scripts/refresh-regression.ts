@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import { parseArgs } from "../src/cli/args.ts";
 import { runPipeline } from "../src/core/pipeline.ts";
 import { hashContent } from "../src/core/snapshot.ts";
@@ -269,6 +269,29 @@ try {
 	setFetchTransportForTest(undefined);
 }
 
+const unsafeRootConfig = parseArgs([
+	"https://unsafe-root.example.com/docs/",
+	"-o",
+	parse(process.cwd()).root,
+	"--quiet",
+]);
+assert(!("help" in unsafeRootConfig) && !("version" in unsafeRootConfig));
+setFetchTransportForTest(async () => {
+	throw new Error("unsafe output root validation did not run first");
+});
+try {
+	await rejectsWith(
+		() => runPipeline(unsafeRootConfig),
+		/Refusing to use unsafe output directory/,
+	);
+	await rejectsWith(
+		() => runPipeline({ ...unsafeRootConfig, dryRun: true }),
+		/Refusing to use unsafe output directory/,
+	);
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
 function page(title: string, text: string) {
 	return `<html><head><title>${title}</title></head><body><main><h1>${title}</h1><p>${text}</p></main></body></html>`;
 }
@@ -396,4 +419,16 @@ function outputFor(
 
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");
+}
+
+async function rejectsWith(run: () => Promise<unknown>, pattern: RegExp) {
+	try {
+		await run();
+	} catch (error) {
+		assert(
+			pattern.test(error instanceof Error ? error.message : String(error)),
+		);
+		return;
+	}
+	throw new Error("expected rejection");
 }

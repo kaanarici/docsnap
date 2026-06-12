@@ -98,6 +98,16 @@ async function fetchOnce(
 			storeCookies(cookies, requestUrl, response);
 			const redirect = redirectUrl(response, requestUrl);
 			if (redirect) {
+				if (redirect instanceof Error) {
+					return fail(
+						url,
+						requestUrl,
+						response.status,
+						started,
+						redirect.message,
+						redirects,
+					);
+				}
 				if (seenRedirects.has(redirect) || seenRedirects.size >= 8) {
 					return fail(
 						url,
@@ -192,12 +202,18 @@ async function fetchOnce(
 	return fail(url, currentUrl, 0, started, "fetch failed", redirects);
 }
 
-function redirectUrl(response: HttpResponse, base: string): string | undefined {
+function redirectUrl(
+	response: HttpResponse,
+	base: string,
+): string | Error | undefined {
 	if (response.status < 300 || response.status > 399) return undefined;
 	const location = response.headers.get("location");
 	if (!location) return undefined;
 	try {
 		const next = new URL(location, base);
+		if (next.protocol !== "http:" && next.protocol !== "https:") {
+			return new Error("unsafe URL: redirect to unsupported scheme");
+		}
 		next.hash = "";
 		return next.href;
 	} catch {

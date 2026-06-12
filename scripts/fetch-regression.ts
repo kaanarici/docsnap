@@ -481,3 +481,5 @@ function httpResponse(
 		body: new TextEncoder().encode(body),
 	};
 }
+
+await import("./fetch-hardening-regression.ts");

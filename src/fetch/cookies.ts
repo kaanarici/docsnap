@@ -43,13 +43,18 @@ export function storeCookies(
 			?.slice("domain=".length)
 			.replace(/^\./, "")
 			.toLowerCase();
-		const domain =
-			rawDomain && domainMatches(host, rawDomain) ? rawDomain : host;
+		const acceptedDomain =
+			rawDomain &&
+			domainMatches(host, rawDomain) &&
+			!isRejectedCookieDomain(rawDomain)
+				? rawDomain
+				: undefined;
+		const domain = acceptedDomain ?? host;
 		const cookie = {
 			name: pair.slice(0, split),
 			value: pair.slice(split + 1),
 			domain,
-			hostOnly: domain === host && rawDomain !== host,
+			hostOnly: acceptedDomain === undefined,
 			secure: parts.some((part) => /^secure$/i.test(part)),
 		};
 		const index = cookies.findIndex(
@@ -63,5 +68,45 @@ export function storeCookies(
 function domainMatches(host: string, domain: string) {
 	return (
 		domain.includes(".") && (host === domain || host.endsWith(`.${domain}`))
+	);
+}
+
+const publicSuffixCookieDomains = new Set([
+	"ac.uk",
+	"co.in",
+	"co.jp",
+	"co.nz",
+	"co.uk",
+	"co.za",
+	"com.au",
+	"com.br",
+	"com.mx",
+	"gov.uk",
+	"net.au",
+	"org.au",
+	"org.uk",
+]);
+
+const sharedHostCookieDomains = new Set([
+	"appspot.com",
+	"cloudflarepages.com",
+	"firebaseapp.com",
+	"fly.dev",
+	"github.io",
+	"gitlab.io",
+	"glitch.me",
+	"herokuapp.com",
+	"netlify.app",
+	"pages.dev",
+	"readthedocs.io",
+	"replit.app",
+	"surge.sh",
+	"vercel.app",
+	"web.app",
+]);
+
+function isRejectedCookieDomain(domain: string) {
+	return (
+		publicSuffixCookieDomains.has(domain) || sharedHostCookieDomains.has(domain)
 	);
 }
