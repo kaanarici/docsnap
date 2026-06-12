@@ -40,10 +40,12 @@ if (serverStarted) {
 				{ address: "127.0.0.1", family: 4 },
 			],
 		}));
+		// dead loopback aliases (127.0.0.2/.3) drop rather than refuse on macOS,
+		// so a short timeout keeps address fallback from waiting full socket timeouts
 		const response = await requestPublicHttp(
 			raw,
 			{ accept: "text/plain", "user-agent": config.userAgent },
-			config,
+			{ ...config, timeoutMs: 500 },
 		);
 		assert(response.status === 200);
 		assert(new TextDecoder().decode(response.body) === "second address");
