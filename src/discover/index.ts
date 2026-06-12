@@ -1,6 +1,7 @@
 import type { Config, DiscoveredUrl, FetchResult } from "../core/types.ts";
 import { fetchText } from "../fetch/fetcher.ts";
 import { discoverAssetPages, looksLikeAppShell } from "./assets.ts";
+import { canonicalOriginSeed, literalAllowPrefix } from "./blocked-seed.ts";
 import {
 	discoverLlmsCorpus,
 	discoverLlmsUrls,
@@ -37,6 +38,17 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 	]);
 	const llmsOptions: LlmsCorpusOptions = { cache: new Map(), robotsByOrigin };
 	if (!seedRobots.allowed(inputSeed)) {
+		if (seedRobots.unreachable) {
+			const { moved, failure } = await canonicalOriginSeed(inputSeed, config);
+			if (moved) return discover({ ...config, seedUrl: moved });
+			return [
+				{
+					url: inputSeed,
+					source: "seed",
+					fetched: failure ?? robotsBlockedUrl(inputSeed),
+				},
+			];
+		}
 		return disallowedSeedDiscovery(inputSeed, seedRobots, config, llmsOptions);
 	}
 	if (inputUrl.pathname.endsWith("/llms.txt")) {
@@ -430,6 +442,10 @@ async function disallowedSeedDiscovery(
 		}
 	}
 	if (out.length > 0) return out;
+	// no corpus and no declared sitemap: a literal Allow prefix (no wildcards)
+	// is an explicit entry invitation — restart discovery seeded there
+	const prefix = literalAllowPrefix(robots, inputSeed);
+	if (prefix) return discover({ ...config, seedUrl: prefix });
 	return [
 		{ url: inputSeed, source: "seed", fetched: robotsBlockedUrl(inputSeed) },
 	];

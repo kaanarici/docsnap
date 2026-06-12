@@ -361,6 +361,103 @@ try {
 	setFetchTransportForTest(undefined);
 }
 
+// apex origins that refuse robots.txt but redirect the seed to a related www
+// origin must restart discovery there, gated by the www origin's robots
+const apexConfig = parseArgs(["https://apex.example/", "-m", "4"]);
+assert(!("help" in apexConfig) && !("version" in apexConfig));
+const apexFetches: string[] = [];
+setFetchTransportForTest(async (input) => {
+	const url = String(input);
+	apexFetches.push(url);
+	if (url === "https://apex.example/robots.txt") {
+		throw new Error("connect ECONNREFUSED apex.example:443");
+	}
+	if (url === "https://apex.example/") {
+		return response(url, 301, "", "text/plain", "https://www.apex.example/");
+	}
+	if (url === "https://www.apex.example/robots.txt") {
+		return response(
+			url,
+			200,
+			"User-agent: *\nDisallow: /private/",
+			"text/plain",
+		);
+	}
+	if (url === "https://www.apex.example/") {
+		return response(
+			url,
+			200,
+			`<html><body><main><a href="/guide">Guide</a><a href="/private/x">No</a></main></body></html>`,
+			"text/html",
+		);
+	}
+	if (url === "https://www.apex.example/guide") {
+		return response(
+			url,
+			200,
+			"<html><body><main><h1>Guide</h1><p>Readable canonical content here.</p></main></body></html>",
+			"text/html",
+		);
+	}
+	return response(url, 404, "not found", "text/plain");
+});
+try {
+	const urls = await discover(apexConfig);
+	assert(urls.some((item) => item.url === "https://www.apex.example/guide"));
+	assert(!urls.some((item) => item.url.includes("/private/")));
+	assert(apexFetches.includes("https://www.apex.example/robots.txt"));
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
+// Disallow:/ with a literal Allow prefix and no sitemap: the prefix is an
+// explicit entry invitation — discovery restarts there, never fetching /
+const allowPrefixConfig = parseArgs(["https://prefix.example/", "-m", "4"]);
+assert(!("help" in allowPrefixConfig) && !("version" in allowPrefixConfig));
+const allowPrefixFetches: string[] = [];
+setFetchTransportForTest(async (input) => {
+	const url = String(input);
+	allowPrefixFetches.push(url);
+	if (url === "https://prefix.example/robots.txt") {
+		return response(
+			url,
+			200,
+			"User-agent: *\nDisallow: /\nAllow: /latest/",
+			"text/plain",
+		);
+	}
+	if (url === "https://prefix.example/") {
+		throw new Error("disallowed root fetched");
+	}
+	if (url === "https://prefix.example/latest/") {
+		return response(
+			url,
+			200,
+			`<html><body><main><h1>Latest</h1><p>Docs index with real text.</p><a href="/latest/setup">Setup</a></main></body></html>`,
+			"text/html",
+		);
+	}
+	if (url === "https://prefix.example/latest/setup") {
+		return response(
+			url,
+			200,
+			"<html><body><main><h1>Setup</h1><p>Install and configure things.</p></main></body></html>",
+			"text/html",
+		);
+	}
+	return response(url, 404, "not found", "text/plain");
+});
+try {
+	const urls = await discover(allowPrefixConfig);
+	assert(urls.some((item) => item.url === "https://prefix.example/latest/"));
+	assert(
+		urls.some((item) => item.url === "https://prefix.example/latest/setup"),
+	);
+	assert(!allowPrefixFetches.includes("https://prefix.example/"));
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
 function response(
 	url: string,
 	status: number,

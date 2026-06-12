@@ -6,6 +6,10 @@ export type Robots = {
 	allows: Rule[];
 	disallows: Rule[];
 	allowed: (url: string) => boolean;
+	// robots.txt could not be fetched at the network level (vs parsed rules or
+	// a 5xx); bare apex domains often refuse connections while the canonical
+	// www origin serves both content and robots
+	unreachable?: boolean;
 };
 
 type Rule = {
@@ -26,7 +30,7 @@ export async function loadRobots(
 	);
 	if (!response.ok) {
 		if (response.status >= 400 && response.status < 500) return openRobots();
-		return closedRobots();
+		return closedRobots(response.status === 0);
 	}
 	return parseRobots(response.body, origin, config.userAgent);
 }
@@ -89,12 +93,13 @@ function openRobots(): Robots {
 	return { sitemaps: [], allows: [], disallows: [], allowed: () => true };
 }
 
-function closedRobots(): Robots {
+function closedRobots(unreachable = false): Robots {
 	return {
 		sitemaps: [],
 		allows: [],
 		disallows: [{ value: "/", specificity: 1, matches: () => true }],
 		allowed: () => false,
+		unreachable,
 	};
 }
 
