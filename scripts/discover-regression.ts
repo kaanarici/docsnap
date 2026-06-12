@@ -342,6 +342,37 @@ const blankLineRobots = parseRobots(
 assert(!blankLineRobots.allowed("https://robots.example/private/page"));
 assert(blankLineRobots.allowed("https://robots.example/public/page"));
 
+const robotsRuleStart = performance.now();
+for (const [rule, path, expectedAllowed] of [
+	["/private", "/private/x", false],
+	["/private", "/priv", true],
+	["/a*z", "/abcz", false],
+	["/a*z", "/abc", true],
+	["/a*z$", "/abcz", false],
+	["/a*z$", "/abczq", true],
+	["/a*z$", "/azqz", false],
+	["/*.pdf$", "/x/doc.pdf", false],
+	["/*.pdf$", "/x/doc.pdfx", true],
+	["/a**b", "/a-b", false],
+	["/*", "/anything", false],
+] as const) {
+	const robots = parseRobots(
+		`User-agent: *\nDisallow: ${rule}`,
+		"https://robots.example",
+		parsed.userAgent,
+	);
+	assert(robots.allowed(`https://robots.example${path}`) === expectedAllowed);
+}
+const pathologicalRobots = parseRobots(
+	`User-agent: *\nDisallow: /${"a*".repeat(20)}Z$`,
+	"https://robots.example",
+	parsed.userAgent,
+);
+assert(
+	pathologicalRobots.allowed(`https://robots.example/${"a".repeat(10_000)}`),
+);
+assert(performance.now() - robotsRuleStart < 1000);
+
 setFetchTransportForTest(async (input) =>
 	response(String(input), 404, "not found", "text/plain"),
 );

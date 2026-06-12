@@ -145,14 +145,40 @@ function strongestMatch(path: string, rules: Rule[]) {
 }
 
 function toRule(value: string): Rule {
-	const escaped = value.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
-	const source = escaped.replaceAll("*", ".*").replace(/\\\$$/, "$");
-	const pattern = new RegExp(`^${source}`);
+	const anchored = value.endsWith("$");
+	const body = anchored ? value.slice(0, -1) : value;
+	const segments = body.split("*");
 	return {
 		value,
 		specificity: value.replace(/[*$]/g, "").length,
-		matches: (path) => pattern.test(path),
+		matches: (path) => wildcardMatch(path, segments, anchored),
 	};
+}
+
+function wildcardMatch(
+	path: string,
+	segments: string[],
+	anchored: boolean,
+): boolean {
+	const first = segments[0] ?? "";
+	if (!path.startsWith(first)) return false;
+	if (segments.length === 1) return anchored ? path === first : true;
+
+	let pos = first.length;
+	const lastIndex = segments.length - 1;
+	for (let i = 1; i < (anchored ? lastIndex : segments.length); i++) {
+		const segment = segments[i]!;
+		if (!segment) continue;
+		const found = path.indexOf(segment, pos);
+		if (found < 0) return false;
+		pos = found + segment.length;
+	}
+
+	if (!anchored) return true;
+	const last = segments[lastIndex] ?? "";
+	if (!last) return true;
+	const start = path.length - last.length;
+	return start >= pos && path.startsWith(last, start);
 }
 
 function toUrl(value: string, origin: string) {
