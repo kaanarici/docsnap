@@ -6,6 +6,11 @@ import { note, printSummary } from "./progress.ts";
 
 export async function runCli(argv: string[]): Promise<void> {
 	try {
+		if (argv[0] === "mcp") {
+			const { runMcpServer } = await import("../mcp/server.ts");
+			await runMcpServer(argv.slice(1));
+			return;
+		}
 		const parsed = parseArgs(await normalizeArgv(argv));
 		if ("help" in parsed) {
 			process.stdout.write(`${parsed.help}\n`);

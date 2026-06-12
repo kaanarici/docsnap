@@ -43,6 +43,7 @@ bun add -g docsnap
 
 ```text
 docsnap <url> [options]
+docsnap mcp
 
 Options:
   -o, --out <dir>           output dir; relative paths must stay under the current directory
@@ -76,6 +77,22 @@ docsnap https://docs.djangoproject.com/en/stable/ --agent-files
 ```
 
 Use an absolute `--out` path for output outside the current directory.
+
+## MCP
+
+Run docsnap as a local stdio MCP server for agents:
+
+```bash
+claude mcp add docsnap -- docsnap mcp
+```
+
+Claude Desktop:
+
+```json
+{"mcpServers":{"docsnap":{"command":"docsnap","args":["mcp"]}}}
+```
+
+The MCP server exposes `docsnap_capture`, `docsnap_refresh`, corpus summary/list/search tools, bounded page reads, and read-only resources. Captured page text is returned as web-derived untrusted data with source provenance.
 
 ## Output
 

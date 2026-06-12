@@ -16,6 +16,7 @@ const valueFlags = new Set([
 
 const usage = `Usage:
   docsnap <url> [flags]
+  docsnap mcp                  run local stdio MCP server
 
 Flags:
   -o, --out <dir>           output dir; relative paths must stay under the current directory
