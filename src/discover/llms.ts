@@ -12,6 +12,7 @@ const CORPUS_INDEX_LIMIT = 256;
 export type LlmsDiscoveryOptions = {
 	cache?: Map<string, Promise<FetchResult>>;
 	retryHttp?: boolean;
+	allowResource?: (url: string) => Promise<boolean> | boolean;
 };
 
 export async function discoverLlms(
@@ -43,8 +44,17 @@ export async function discoverLlms(
 		const llmsUrl = queue.shift()!;
 		if (seen.has(llmsUrl)) continue;
 		seen.add(llmsUrl);
+		if (options.allowResource && !(await options.allowResource(llmsUrl)))
+			continue;
 		const response = await fetchLlmsText(llmsUrl, config, options);
 		if (!response.ok || !isLlmsCorpus(response.contentType, response.body))
+			continue;
+		// redirects can land on a robots-disallowed URL; never use that content
+		if (
+			options.allowResource &&
+			response.finalUrl !== llmsUrl &&
+			!(await options.allowResource(response.finalUrl))
+		)
 			continue;
 		const corpusBase = response.finalUrl;
 		if (roots.has(llmsUrl)) urls.add(corpusBase);

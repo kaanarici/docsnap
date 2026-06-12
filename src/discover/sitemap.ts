@@ -1,6 +1,7 @@
 import { DOMParser } from "linkedom";
 import type { Config } from "../core/types.ts";
 import { fetchText } from "../fetch/fetcher.ts";
+import { runBounded } from "../fetch/rate-limit.ts";
 import { normalizeUrl, pathInScope } from "./url.ts";
 
 type SitemapOptions = {
@@ -21,15 +22,20 @@ export async function discoverSitemaps(
 	if (limit <= 0) return [];
 
 	const base = new URL(seed);
-	const candidates = new Set<string>(scopedSitemapCandidates(base));
-	for (const sitemap of sitemapUrls) candidates.add(sitemap);
+	const candidates = new Set<string>();
+	const addCandidate = (raw: string) => {
+		const url = absoluteHttpUrl(raw, base.href);
+		if (url && sameOrigin(url, base.origin)) candidates.add(url);
+	};
+	for (const sitemap of scopedSitemapCandidates(base)) addCandidate(sitemap);
+	for (const sitemap of sitemapUrls) addCandidate(sitemap);
 	for (const path of [
 		"/sitemap.xml",
 		"/sitemap_index.xml",
 		"/sitemap-index.xml",
 		"/sitemap-0.xml",
 	]) {
-		candidates.add(`${base.origin}${path}`);
+		addCandidate(`${base.origin}${path}`);
 	}
 
 	const found = new Set<string>();
@@ -39,6 +45,7 @@ export async function discoverSitemaps(
 		await readSitemap(sitemap, config, 0, found, {
 			...options,
 			limit,
+			origin: base.origin,
 			scope,
 		});
 	}
@@ -56,7 +63,8 @@ async function readSitemap(
 	config: Config,
 	depth: number,
 	found: Set<string>,
-	options: Required<Pick<SitemapOptions, "limit" | "scope">> & SitemapOptions,
+	options: Required<Pick<SitemapOptions, "limit" | "scope">> &
+		SitemapOptions & { origin: string },
 ): Promise<"blocked" | "empty" | "found"> {
 	const before = found.size;
 	if (depth > 3 || found.size >= options.limit) return "empty";
@@ -69,16 +77,22 @@ async function readSitemap(
 		return response.status === 403 || response.failureKind === "blocked"
 			? "blocked"
 			: "empty";
+	if (new URL(response.finalUrl).origin !== options.origin) return "empty";
 	if (!response.body.includes("<")) return "empty";
 	const document = new DOMParser().parseFromString(response.body, "text/xml");
 	const rawLocs = [...document.querySelectorAll("loc")]
 		.map((element) => absoluteHttpUrl(element.textContent ?? "", url))
 		.filter((value): value is string => Boolean(value));
 	const locs = rawLocs
+		.filter((loc) => sameOrigin(loc, options.origin))
 		.map((loc) => normalizeUrl(loc))
 		.filter((value): value is string => Boolean(value));
-	const sitemapLocs = rawLocs.filter(isSitemapUrl);
-	const xmlLocs = rawLocs.filter(isXmlUrl);
+	const sitemapLocs = rawLocs.filter(
+		(loc) => sameOrigin(loc, options.origin) && isSitemapUrl(loc),
+	);
+	const xmlLocs = rawLocs.filter(
+		(loc) => sameOrigin(loc, options.origin) && isXmlUrl(loc),
+	);
 	const pageLocs = locs.filter((loc) => !isXmlUrl(loc));
 	const rootName = document.documentElement?.localName;
 	const indexLocs = rootName === "sitemapindex" ? xmlLocs : sitemapLocs;
@@ -122,18 +136,18 @@ async function readSitemap(
 		}
 		return found.size > before ? "found" : "empty";
 	}
-	let nextChild = 0;
-	const workers = Array.from(
-		{ length: Math.min(childConcurrency, childSitemaps.length) },
-		async () => {
-			while (found.size < options.limit) {
-				const child = childSitemaps[nextChild++];
-				if (!child) return;
-				await readSitemap(child, config, depth + 1, found, options);
-			}
+	await runBounded(
+		childSitemaps,
+		{
+			concurrency: childConcurrency,
+			perOrigin: config.perOrigin,
+			key: (child) => new URL(child).origin,
+		},
+		async (child) => {
+			if (found.size >= options.limit) return;
+			await readSitemap(child, config, depth + 1, found, options);
 		},
 	);
-	await Promise.all(workers);
 	return found.size > before ? "found" : "empty";
 }
 
@@ -198,10 +212,19 @@ function absoluteHttpUrl(raw: string, base: string) {
 	try {
 		const url = new URL(raw, base);
 		if (!["http:", "https:"].includes(url.protocol)) return;
+		if (url.username || url.password) return;
 		url.hash = "";
 		return url.href;
 	} catch {
 		return;
+	}
+}
+
+function sameOrigin(raw: string, origin: string) {
+	try {
+		return new URL(raw).origin === origin;
+	} catch {
+		return false;
 	}
 }
 

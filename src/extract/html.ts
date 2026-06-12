@@ -32,10 +32,16 @@ type ExtractedBody = {
 };
 
 export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
-	const { result, source } = input;
+	const { metadata, result, source } = input;
 	const started = performance.now();
 	if (!result.ok)
-		return failedRecord(result, source, result.error, result.failureKind);
+		return failedRecord(
+			result,
+			source,
+			metadata,
+			result.error,
+			result.failureKind,
+		);
 
 	try {
 		const extracted = await extractBody(result);
@@ -44,6 +50,7 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 			return failedRecord(
 				result,
 				source,
+				metadata,
 				emptyContentError(result.body),
 				"empty",
 			);
@@ -51,6 +58,7 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 			return failedRecord(
 				result,
 				source,
+				metadata,
 				"blocked by client challenge",
 				"blocked",
 			);
@@ -59,6 +67,7 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 			return failedRecord(
 				result,
 				source,
+				metadata,
 				"language selector without article content",
 				"empty",
 			);
@@ -75,6 +84,11 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 			ok: true,
 			url: result.url,
 			finalUrl: result.finalUrl,
+			redirects: result.redirects ?? [],
+			...(result.etag ? { etag: result.etag } : {}),
+			...(result.lastModified ? { lastModified: result.lastModified } : {}),
+			fetchedAt: result.fetchedAt ?? new Date().toISOString(),
+			...(metadata ?? {}),
 			...(extracted.canonicalUrl
 				? { canonicalUrl: extracted.canonicalUrl }
 				: {}),
@@ -97,6 +111,7 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 		return failedRecord(
 			result,
 			source,
+			metadata,
 			error instanceof Error ? error.message : String(error),
 			"extract",
 		);
@@ -355,7 +370,11 @@ function renderTextAsset(title: string, body: string, url: string) {
 async function parseWithDefuddle(document: Document, url: string) {
 	const restore = silenceDefuddleErrors();
 	try {
-		return await Defuddle(document, url, { markdown: true, debug: false });
+		return await Defuddle(document, url, {
+			markdown: true,
+			debug: false,
+			useAsync: false,
+		});
 	} catch {
 		return undefined;
 	} finally {
@@ -384,6 +403,7 @@ function silenceDefuddleErrors() {
 function failedRecord(
 	result: FetchResult,
 	source: DiscoverySource,
+	metadata: FetchedUrl["metadata"],
 	error: string,
 	failureKind: FailureKind = "extract",
 ): PageRecord {
@@ -391,6 +411,11 @@ function failedRecord(
 		ok: false,
 		url: result.url,
 		finalUrl: result.finalUrl,
+		redirects: result.redirects ?? [],
+		...(result.etag ? { etag: result.etag } : {}),
+		...(result.lastModified ? { lastModified: result.lastModified } : {}),
+		fetchedAt: result.fetchedAt ?? new Date().toISOString(),
+		...(metadata ?? {}),
 		markdown: "",
 		links: [],
 		status: result.status,

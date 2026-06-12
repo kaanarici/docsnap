@@ -10,10 +10,14 @@ function frontmatter(record: PageSuccess) {
 		url: record.url,
 		finalUrl: record.finalUrl,
 		status: record.status,
+		source: record.source,
 		extractor: record.extractor,
 		confidence: record.confidence,
 		contentHash: record.contentHash,
+		...(record.publishedAt ? { publishedAt: record.publishedAt } : {}),
+		...(record.updatedAt ? { updatedAt: record.updatedAt } : {}),
 		...(record.aliases?.length ? { aliases: record.aliases } : {}),
+		...(record.redirects.length ? { redirects: record.redirects } : {}),
 	};
 	return `---\n${Object.entries(fields)
 		.map(([key, value]) => `${key}: ${JSON.stringify(value)}`)

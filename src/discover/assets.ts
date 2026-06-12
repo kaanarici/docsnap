@@ -2,6 +2,7 @@ import { parseHTML } from "linkedom";
 import { uniqueByWhitespace, whitespaceKey } from "../core/text.ts";
 import type { Config, DiscoveredUrl, FetchResult } from "../core/types.ts";
 import { fetchText } from "../fetch/fetcher.ts";
+import { runBounded } from "../fetch/rate-limit.ts";
 import { inScope, normalizeUrl } from "./url.ts";
 
 type AssetOptions = {
@@ -62,13 +63,13 @@ export async function discoverAssetPages(
 ): Promise<DiscoveredUrl[]> {
 	if (options.limit <= 0 || !looksLikeAppShell(html)) return [];
 
-	const base = assetBase(seed, html);
+	const assetRoot = assetBase(seed, html);
 	const queue: AssetRef[] = [];
 	const prefixesByAsset = new Map<string, Set<string>>();
 	const assets: TextAsset[] = [];
 	const fetched = new Set<string>();
 
-	for (const url of scriptUrls(html, base)) {
+	for (const url of scriptUrls(html, assetRoot)) {
 		enqueueAsset(queue, prefixesByAsset, {
 			url,
 			prefixes: new Set([""]),
@@ -83,11 +84,17 @@ export async function discoverAssetPages(
 			config.concurrency,
 		);
 		if (batch.length === 0) break;
-		const responses = await Promise.all(
-			batch.map(async (item) => ({
+		const responses = await runBounded(
+			batch,
+			{
+				concurrency: config.concurrency,
+				perOrigin: config.perOrigin,
+				key: (item) => new URL(item.url).origin,
+			},
+			async (item) => ({
 				item,
 				response: await fetchText(item.url, config, jsAccept),
-			})),
+			}),
 		);
 
 		for (const { item, response } of responses) {
@@ -107,7 +114,7 @@ export async function discoverAssetPages(
 	const pages = new Map<string, DiscoveredUrl>();
 	for (const asset of assets) {
 		const prefixes = prefixesByAsset.get(asset.url) ?? new Set([""]);
-		for (const page of textPages(base, asset.body, prefixes)) {
+		for (const page of textPages(seed, asset.body, prefixes)) {
 			if (pages.size >= options.limit) break;
 			if (!inScope(page.url, seed, options.scope) || !options.accept(page.url))
 				continue;
@@ -181,7 +188,7 @@ function importedAssets(
 		/path:"([^"]+)",loadChildren:\(\)=>import\("([^"]+)"\)/g,
 	)) {
 		const url = normalizeUrl(match[2]!, base);
-		if (!url) continue;
+		if (!url || new URL(url).origin !== new URL(base).origin) continue;
 		out.push({
 			url,
 			prefixes: new Set(
@@ -191,7 +198,9 @@ function importedAssets(
 	}
 	for (const match of js.matchAll(/\bimport\("([^"]+\.m?js)"\)/g)) {
 		const url = normalizeUrl(match[1]!, base);
-		if (url) out.push({ url, prefixes });
+		if (url && new URL(url).origin === new URL(base).origin) {
+			out.push({ url, prefixes });
+		}
 	}
 	return out;
 }
@@ -320,6 +329,7 @@ function syntheticFetch(url: string, body: string): FetchResult {
 		body,
 		ok: true,
 		fetchMs: 0,
+		redirects: [],
 	};
 }
 

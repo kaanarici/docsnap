@@ -1,8 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { parseArgs } from "../src/cli/args.ts";
-import { dedupeRecords } from "../src/core/dedupe.ts";
 import { type FetchedUrl, lowQualityConfidence } from "../src/core/types.ts";
 import { discoverLlms } from "../src/discover/llms.ts";
 import { discoverPageLinks } from "../src/discover/nav.ts";
@@ -11,7 +7,6 @@ import { normalizeUrl, sameScopeLinks } from "../src/discover/url.ts";
 import { extractPage } from "../src/extract/html.ts";
 import { scoreMarkdown } from "../src/extract/quality.ts";
 import { fetchText, setFetchTransportForTest } from "../src/fetch/fetcher.ts";
-import { installAgentFiles } from "../src/output/agent-files.ts";
 import { validatePublicHttpUrl } from "../src/security/url.ts";
 
 const html = `
@@ -85,6 +80,7 @@ await withMockFetch(
 		const result = await fetchText("https://93.184.216.34/start", parsedPage);
 		assert(!result.ok);
 		assert(result.failureKind === "unsafe_url");
+		assert(result.redirects?.[0]?.to === "http://127.0.0.1/private");
 	},
 	async () => Response.redirect("http://127.0.0.1/private", 302),
 );
@@ -93,6 +89,7 @@ await withMockFetch(
 		const result = await fetchText("https://93.184.216.34/start", parsedPage);
 		assert(!result.ok);
 		assert(result.failureKind === "unsafe_url");
+		assert(result.redirects?.[0]?.to === "http://127.0.0.1/private");
 	},
 	async () =>
 		new Response(
@@ -101,6 +98,39 @@ await withMockFetch(
 				headers: { "content-type": "text/html" },
 			},
 		),
+);
+await withMockFetch(
+	async () => {
+		const result = await fetchText(
+			"https://93.184.216.34/credential-redirect",
+			parsedPage,
+		);
+		assert(!result.ok);
+		assert(result.failureKind === "unsafe_url");
+		assert(result.finalUrl === "https://target.example/secret");
+		assert(result.redirects?.[0]?.to === "https://target.example/secret");
+		assert(!JSON.stringify(result).includes("user:pass"));
+	},
+	async () =>
+		new Response("", {
+			status: 302,
+			headers: { location: "https://user:pass@target.example/secret#token" },
+		}),
+);
+await withMockFetch(
+	async () => {
+		const result = await fetchText(
+			"https://93.184.216.34/non-http-redirect",
+			parsedPage,
+		);
+		assert(!result.ok);
+		assert(result.redirects?.length === 0);
+	},
+	async () =>
+		new Response("", {
+			status: 302,
+			headers: { location: "javascript:alert(1)" },
+		}),
 );
 await withMockFetch(
 	async () => {
@@ -378,68 +408,6 @@ assert(
 		"https://docs.scrapy.org/en/latest/llms.txt",
 	).includes("https://docs.scrapy.org/en/latest/index.md"),
 );
-const duplicate = dedupeRecords([
-	page("https://docs.peel.sh/reference/exports", "html", "html body"),
-	page(
-		"https://docs.peel.sh/reference/exports.md",
-		"markdown",
-		"markdown body",
-	),
-]);
-assert(duplicate.deduped === 1);
-assert(duplicate.records.length === 1);
-assert(
-	duplicate.records[0]?.ok && duplicate.records[0].markdown === "markdown body",
-);
-const encodedDuplicate = dedupeRecords([
-	page("https://docs.example.com/Web/API/Fetch_API/Using_Fetch", "html", "one"),
-	page(
-		"https://docs.example.com/Web/API/Fetch%5FAPI/Using%5FFetch",
-		"html",
-		"two",
-	),
-]);
-assert(encodedDuplicate.deduped === 1);
-assert(encodedDuplicate.records.length === 1);
-const dir = await mkdtemp(join(tmpdir(), "docsnap-regression-"));
-await writeFile(join(dir, "AGENTS.md"), "# Repo\n");
-const files = await installAgentFiles(
-	{
-		status: "ok",
-		seedUrl: "https://docs.example.com/",
-		outDir: "docsnap/docs-example-com",
-		dryRun: false,
-		generatedAt: "2026-04-30T00:00:00.000Z",
-		snapshotVersion: 1,
-		rootHash: "hash",
-		renderedFiles: 1,
-		renderedBytes: 1,
-		max: 50,
-		maxAppliesTo: "non-llms",
-		maxReached: false,
-		discovered: 1,
-		deduped: 0,
-		written: 1,
-		failed: 0,
-		lowQuality: 0,
-		elapsedMs: 1,
-		pagesPerSecond: 1,
-		bySource: {
-			seed: 1,
-			llms: 0,
-			sitemap: 0,
-			nav: 0,
-			crawl: 0,
-			asset: 0,
-		},
-		byFailureKind: {},
-		errors: [],
-	},
-	dir,
-);
-const agentFile = await readFile(join(dir, "AGENTS.md"), "utf8");
-assert(files.length === 1 && files[0] === "AGENTS.md");
-assert(agentFile.includes("docsnap/docs-example-com/AGENT_README.md"));
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");
 }
@@ -480,20 +448,4 @@ async function withMockFetch(
 	} finally {
 		setFetchTransportForTest(undefined);
 	}
-}
-function page(url: string, extractor: "html" | "markdown", markdown: string) {
-	return {
-		ok: true as const,
-		url,
-		finalUrl: url,
-		status: 200,
-		source: extractor === "markdown" ? ("llms" as const) : ("nav" as const),
-		timings: { fetchMs: 1, extractMs: 1, writeMs: 0 },
-		markdown,
-		links: [],
-		contentHash: markdown,
-		extractor,
-		confidence: 1,
-		qualityReasons: [],
-	};
 }

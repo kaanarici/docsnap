@@ -1,5 +1,6 @@
 import type { Config, DiscoveredUrl, FetchResult } from "../core/types.ts";
 import { fetchText } from "../fetch/fetcher.ts";
+import { runBounded } from "../fetch/rate-limit.ts";
 import { discoverPageLinks } from "./nav.ts";
 import type { Robots } from "./robots.ts";
 import { inScope } from "./url.ts";
@@ -21,10 +22,15 @@ export async function crawlScoped(
 		const batch = takeBatch();
 		if (batch.length === 0) continue;
 
-		const responses = await Promise.all(
-			batch.map((url) =>
-				url === seed && first ? first : fetchText(url, config),
-			),
+		const responses = await runBounded(
+			batch,
+			{
+				concurrency: config.concurrency,
+				perOrigin: config.perOrigin,
+				key: (url) => new URL(url).origin,
+			},
+			(url) =>
+				url === seed && first ? Promise.resolve(first) : fetchText(url, config),
 		);
 		for (const response of responses) {
 			if (!response.ok || !response.contentType.toLowerCase().includes("html"))

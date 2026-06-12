@@ -5,7 +5,7 @@ import type {
 	PageSuccess,
 	RunSummary,
 } from "../core/types.ts";
-import { lowQualityConfidence } from "../core/types.ts";
+import { isLowQuality, isQualityWarning } from "../report/summary.ts";
 import { runFiles } from "./files.ts";
 
 export function agentReadme(
@@ -15,11 +15,15 @@ export function agentReadme(
 	const pages = records.filter(hasOutputPath);
 	const lowQuality = records
 		.filter(isPageSuccess)
-		.filter((record) => record.confidence < lowQualityConfidence)
+		.filter(isLowQuality)
+		.slice(0, 10);
+	const qualityWarnings = records
+		.filter(isPageSuccess)
+		.filter(isQualityWarning)
 		.slice(0, 10);
 	const errors = summary.errors.slice(0, 10);
 
-	const body = `# docsnap agent handoff
+	const body = `# docsnap capture guide
 
 Use this directory as local source material for answering questions about:
 
@@ -50,16 +54,20 @@ Prefer focused reads for large files. Use frontmatter URLs when you need to cite
 
 - Generated: ${summary.generatedAt}
 - Pages written: ${summary.written}
-- Skipped/failed attempts: ${summary.failed}
+- Failed attempts: ${summary.failed}
 - Stale/not-found links: ${summary.byFailureKind.not_found ?? 0}
 - Low quality: ${summary.lowQuality}
+- Quality warnings: ${summary.qualityWarnings}
+- Pages with host redirects: ${summary.hostRedirects}
 - Page limit: ${summary.max} (${summary.maxAppliesTo})
 - Page limit reached: ${summary.maxReached ? `yes, stopped at ${summary.max}; this capture may be incomplete` : "no"}
 - Failure kinds: ${failureKinds(summary)}
+- Refresh: ${refreshLine(summary)}
 - Snapshot root: ${summary.rootHash}
 - Rendered bytes: ${summary.renderedBytes}
 - Output: ${summary.outDir}
 
+${refreshSection(summary)}
 ${section(
 	"Large reference files",
 	largePages(pages).map(
@@ -67,8 +75,18 @@ ${section(
 	),
 )}
 ${section(
+	"Redirected hosts",
+	summary.redirectedHosts.map(
+		(pair) => `- ${pair.from} -> ${pair.to} (${pair.count})`,
+	),
+)}
+${section(
 	"Low-quality pages",
 	lowQuality.map((record) => line(record)),
+)}
+${section(
+	"Quality warnings",
+	qualityWarnings.map((record) => line(record)),
 )}
 ${section(
 	"Errors",
@@ -122,6 +140,49 @@ function failureKinds(summary: RunSummary) {
 		.map(([kind, count]) => `${kind}=${count}`)
 		.join(", ");
 	return kinds || "none";
+}
+
+function refreshLine(summary: RunSummary) {
+	const refresh = summary.refresh;
+	if (!refresh.enabled) return `disabled (${refresh.reason ?? "unknown"})`;
+	return `new=${refresh.new}, changed=${refresh.changed}, unchanged=${refresh.unchanged}, removed=${refresh.removed}`;
+}
+
+function refreshSection(summary: RunSummary) {
+	const refresh = summary.refresh;
+	const newPages = refresh.changedPages.filter((page) => page.change === "new");
+	const changedPages = refresh.changedPages.filter(
+		(page) => page.change === "changed",
+	);
+	const removedPages = refresh.changedPages.filter(
+		(page) => page.change === "removed",
+	);
+	return section("Refresh changes", [
+		`- Enabled: ${refresh.enabled ? "yes" : "no"}`,
+		`- Prior records: ${refresh.priorRecords}`,
+		`- Checked: ${refresh.checked}`,
+		`- Not modified: ${refresh.notModified}`,
+		`- Reused: ${refresh.reused}`,
+		`- Fallback refetches: ${refresh.fallbackRefetches}`,
+		`- Skipped page writes: ${refresh.skippedWrites}`,
+		`- New pages: ${refresh.new}`,
+		`- Changed pages: ${refresh.changed}`,
+		`- Unchanged pages: ${refresh.unchanged}`,
+		`- Removed pages: ${refresh.removed}`,
+		...pageList("New", newPages),
+		...pageList("Changed", changedPages),
+		...pageList("Removed", removedPages),
+	]);
+}
+
+function pageList(title: string, pages: RunSummary["refresh"]["changedPages"]) {
+	if (pages.length === 0) return [];
+	return [
+		`- ${title}:`,
+		...pages
+			.slice(0, 8)
+			.map((page) => `  - ${page.outputPath ?? page.url}: ${page.url}`),
+	];
 }
 
 function addPath(root: Node, file: string) {

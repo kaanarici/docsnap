@@ -3,14 +3,21 @@ import { isIP } from "node:net";
 
 const blockedHostname = /(^|\.)localhost$/i;
 const addressCacheTtlMs = 60_000;
+const allowTestHostEnv = "DOCSNAP_ALLOW_TEST_HOST";
 const addressCache = new Map<
 	string,
-	{ address: string; family: 4 | 6; expires: number }
+	{ addresses: PublicAddress[]; expires: number }
 >();
 
 export type PublicHttpAddress = {
 	url: URL;
 	hostname: string;
+	address: string;
+	family: 4 | 6;
+	addresses: PublicAddress[];
+};
+
+export type PublicAddress = {
 	address: string;
 	family: 4 | 6;
 };
@@ -28,6 +35,7 @@ export function validatePublicHttpUrl(raw: string): string | undefined {
 	if (url.username || url.password) {
 		return "URL credentials are not allowed";
 	}
+	if (allowsExactTestOrigin(url)) return undefined;
 	const hostname = normalizedHostname(url);
 	if (!hostname || blockedHostname.test(hostname)) {
 		return "localhost URLs are not allowed";
@@ -59,15 +67,20 @@ export async function resolvePublicHttpUrl(
 	const hostname = normalizedHostname(url);
 	const ipVersion = isIP(hostname);
 	if (ipVersion === 4 || ipVersion === 6) {
-		return { url, hostname, address: hostname, family: ipVersion };
+		const address: PublicAddress = { address: hostname, family: ipVersion };
+		return { url, hostname, ...address, addresses: [address] };
 	}
 	const cached = addressCache.get(hostname);
 	if (cached && cached.expires > Date.now()) {
+		const [address] = cached.addresses;
+		if (!address)
+			throw new Error("hostname did not resolve to a public address");
 		return {
 			url,
 			hostname,
-			address: cached.address,
-			family: cached.family,
+			address: address.address,
+			family: address.family,
+			addresses: cached.addresses,
 		};
 	}
 
@@ -83,27 +96,65 @@ export async function resolvePublicHttpUrl(
 			throw new Error("hostname resolves to a private or internal address");
 		}
 	}
-	const address = addresses.find(
-		(item): item is { address: string; family: 4 | 6 } =>
-			(item.family === 4 || item.family === 6) &&
-			isPublicIp(item.address, item.family),
+	const publicAddresses = uniqueAddresses(
+		addresses.filter(
+			(item): item is PublicAddress =>
+				(item.family === 4 || item.family === 6) &&
+				isPublicIp(item.address, item.family),
+		),
 	);
+	const [address] = publicAddresses;
 	if (!address) throw new Error("hostname did not resolve to a public address");
 	addressCache.set(hostname, {
-		address: address.address,
-		family: address.family,
+		addresses: publicAddresses,
 		expires: Date.now() + addressCacheTtlMs,
 	});
-	return { url, hostname, address: address.address, family: address.family };
+	return {
+		url,
+		hostname,
+		address: address.address,
+		family: address.family,
+		addresses: publicAddresses,
+	};
 }
 
 function normalizedHostname(url: URL): string {
 	return url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
 }
 
+function allowsExactTestOrigin(url: URL): boolean {
+	const allowed = process.env[allowTestHostEnv]?.trim();
+	if (!allowed) return false;
+	let allowedUrl: URL;
+	try {
+		allowedUrl = new URL(allowed);
+	} catch {
+		return false;
+	}
+	return (
+		allowed === allowedUrl.origin &&
+		allowedUrl.protocol === "http:" &&
+		allowedUrl.hostname === "127.0.0.1" &&
+		allowedUrl.port !== "" &&
+		url.origin === allowedUrl.origin
+	);
+}
+
 function isPublicIp(address: string, family: 4 | 6): boolean {
 	if (family === 4) return isPublicIpv4(address);
 	return isPublicIpv6(address);
+}
+
+function uniqueAddresses(addresses: PublicAddress[]): PublicAddress[] {
+	const seen = new Set<string>();
+	return addresses
+		.sort((a, b) => a.family - b.family)
+		.filter((address) => {
+			const key = `${address.family}:${address.address}`;
+			if (seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		});
 }
 
 function isPublicIpv4(address: string): boolean {

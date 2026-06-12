@@ -16,6 +16,8 @@ export async function runCli(argv: string[]): Promise<void> {
 			return;
 		}
 		const progress = parsed.quiet || parsed.json ? undefined : note;
+		if (parsed.ignoreRobots)
+			note("docsnap: warning: --ignore-robots bypasses robots.txt rules");
 		const result = await runPipeline(parsed, progress);
 		const ok = runOk(result.summary, parsed);
 		if (parsed.json) {
@@ -52,16 +54,16 @@ async function normalizeArgv(argv: string[]) {
 		return next;
 	if (hasSeedArg(next))
 		throw new Error(
-			"--stdin cannot be used with a URL argument\n\nTry: echo https://example.com | docsnap --stdin",
+			"--stdin cannot be used with a URL argument\n\nTry: echo https://react.dev/reference | docsnap --stdin",
 		);
 	if (process.stdin.isTTY)
 		throw new Error(
-			"No URL received on stdin\n\nTry: echo https://example.com | docsnap --stdin",
+			"No URL received on stdin\n\nTry: echo https://react.dev/reference | docsnap --stdin",
 		);
 	const seedUrl = (await Bun.stdin.text()).trim().split(/\s+/)[0];
 	if (!seedUrl)
 		throw new Error(
-			"No URL received on stdin\n\nTry: echo https://example.com | docsnap --stdin",
+			"No URL received on stdin\n\nTry: echo https://react.dev/reference | docsnap --stdin",
 		);
 	return [seedUrl, ...next];
 }
@@ -92,6 +94,8 @@ function jsonResult(summary: RunSummary, config: Config, ok: boolean) {
 		seedUrl: summary.seedUrl,
 		outDir: summary.outDir,
 		dryRun: summary.dryRun,
+		userAgent: summary.userAgent,
+		...(summary.ignoreRobots ? { ignoreRobots: true } : {}),
 		paths: config.dryRun
 			? undefined
 			: {
@@ -103,6 +107,9 @@ function jsonResult(summary: RunSummary, config: Config, ok: boolean) {
 		written: summary.written,
 		failed: summary.failed,
 		lowQuality: summary.lowQuality,
+		qualityWarnings: summary.qualityWarnings,
+		hostRedirects: summary.hostRedirects,
+		redirectedHosts: summary.redirectedHosts,
 		max: summary.max,
 		maxAppliesTo: summary.maxAppliesTo,
 		maxReached: summary.maxReached,
@@ -113,6 +120,7 @@ function jsonResult(summary: RunSummary, config: Config, ok: boolean) {
 		bySource: summary.bySource,
 		byFailureKind: summary.byFailureKind,
 		errors: summary.errors,
+		refresh: summary.refresh,
 		...(config.agentFiles
 			? { agentFilesUpdated: summary.agentFilesUpdated ?? [] }
 			: {}),

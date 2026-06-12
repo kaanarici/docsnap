@@ -1,6 +1,6 @@
+import { identityKeys } from "./identity.ts";
 import { wordCount } from "./text.ts";
 import type { PageRecord, PageSuccess } from "./types.ts";
-import { dropFragmentAndQuery } from "./url.ts";
 
 type DedupeResult = {
 	records: PageRecord[];
@@ -57,36 +57,10 @@ function mergeRecord(target: PageSuccess, duplicate: PageSuccess) {
 	if (aliases.size) target.aliases = [...aliases].sort();
 	else delete target.aliases;
 	target.links = [...new Set([...target.links, ...duplicate.links])].sort();
-}
-
-function identityKeys(record: PageSuccess) {
-	return [record.finalUrl, record.url, ...(record.aliases ?? [])]
-		.flatMap((url) => [urlKey(url), routeKey(url)])
-		.filter((value): value is string => Boolean(value));
-}
-
-function urlKey(raw: string | undefined) {
-	if (!raw) return undefined;
-	const url = dropFragmentAndQuery(new URL(raw));
-	if (url.pathname !== "/") url.pathname = url.pathname.replace(/\/+$/, "");
-	return `url:${url.href}`;
-}
-
-function routeKey(raw: string | undefined) {
-	if (!raw) return undefined;
-	const url = dropFragmentAndQuery(new URL(raw));
-	let path = safeDecode(url.pathname).replace(/\/+$/, "");
-	path = path.replace(/\/index(?:\.(?:html?|mdx?|txt))?$/i, "");
-	path = path.replace(/\.(?:html?|mdx?|txt)$/i, "");
-	return `route:${url.origin}${path || "/"}`;
-}
-
-function safeDecode(value: string) {
-	try {
-		return decodeURIComponent(value);
-	} catch {
-		return value;
-	}
+	if (!target.publishedAt && duplicate.publishedAt)
+		target.publishedAt = duplicate.publishedAt;
+	if (!target.updatedAt && duplicate.updatedAt)
+		target.updatedAt = duplicate.updatedAt;
 }
 
 function betterRecord(a: PageSuccess, b: PageSuccess) {
@@ -103,9 +77,10 @@ function recordScore(record: PageSuccess) {
 }
 
 const sourceScore: Record<PageSuccess["source"], number> = {
-	llms: 6,
-	asset: 5,
-	sitemap: 4,
+	llms: 7,
+	asset: 6,
+	sitemap: 5,
+	feed: 4,
 	nav: 3,
 	crawl: 2,
 	seed: 1,

@@ -4,10 +4,15 @@ import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import type { LookupFunction } from "node:net";
 import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
 import type { Config } from "../core/types.ts";
-import { resolvePublicHttpUrl } from "../security/url.ts";
+import {
+	type PublicAddress,
+	type PublicHttpAddress,
+	resolvePublicHttpUrl,
+} from "../security/url.ts";
 
 const httpAgent = new HttpAgent({ keepAlive: true, maxSockets: 64 });
 const httpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 64 });
+let resolveForRequest = resolvePublicHttpUrl;
 
 export type HeaderMap = {
 	get(name: string): string | null;
@@ -27,12 +32,36 @@ export type FetchTransport = (
 	config: Config,
 ) => Promise<HttpResponse>;
 
+export function setResolvePublicHttpUrlForTest(
+	resolver: typeof resolvePublicHttpUrl | undefined,
+): void {
+	resolveForRequest = resolver ?? resolvePublicHttpUrl;
+}
+
 export async function requestPublicHttp(
 	raw: string,
 	headers: Record<string, string>,
 	config: Config,
 ): Promise<HttpResponse> {
-	const resolved = await resolvePublicHttpUrl(raw);
+	const resolved = await resolveForRequest(raw);
+	let lastError: unknown;
+	for (const address of resolved.addresses) {
+		try {
+			return await requestAddress(raw, headers, config, resolved, address);
+		} catch (error) {
+			lastError = error;
+		}
+	}
+	throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+function requestAddress(
+	raw: string,
+	headers: Record<string, string>,
+	config: Config,
+	resolved: PublicHttpAddress,
+	address: PublicAddress,
+): Promise<HttpResponse> {
 	const request =
 		resolved.url.protocol === "https:" ? httpsRequest : httpRequest;
 	const port =
@@ -45,7 +74,7 @@ export async function requestPublicHttp(
 		const done = typeof options === "function" ? options : callback;
 		if (typeof done !== "function") throw new Error("missing DNS callback");
 		if (typeof options === "function") {
-			done(null, resolved.address, resolved.family);
+			done(null, address.address, address.family);
 			return;
 		}
 		if (
@@ -54,10 +83,10 @@ export async function requestPublicHttp(
 			"all" in options &&
 			options.all === true
 		) {
-			done(null, [{ address: resolved.address, family: resolved.family }]);
+			done(null, [{ address: address.address, family: address.family }]);
 			return;
 		}
-		done(null, resolved.address, resolved.family);
+		done(null, address.address, address.family);
 	}) as LookupFunction;
 	return new Promise((resolve, reject) => {
 		const req = request(
@@ -67,13 +96,11 @@ export async function requestPublicHttp(
 				port,
 				path: `${resolved.url.pathname}${resolved.url.search}`,
 				method: "GET",
-				headers: { ...headers, "accept-encoding": "identity" },
+				headers: { ...headers, "accept-encoding": "gzip, deflate, br" },
 				agent: resolved.url.protocol === "https:" ? httpsAgent : httpAgent,
 				lookup,
 				servername:
-					resolved.hostname === resolved.address
-						? undefined
-						: resolved.hostname,
+					resolved.hostname === address.address ? undefined : resolved.hostname,
 				timeout: config.timeoutMs,
 			},
 			(res) => {
@@ -87,13 +114,29 @@ export async function requestPublicHttp(
 							body,
 						}),
 					)
-					.catch(reject);
+					.catch((error) => reject(deadlineHit ? deadlineError() : error))
+					.finally(() => clearTimeout(deadline));
 			},
 		);
+		// the socket timeout above is idle-based; a server trickling bytes resets
+		// it forever, so a whole-request wall-clock deadline bounds the worst case
+		let deadlineHit = false;
+		const deadline = setTimeout(() => {
+			deadlineHit = true;
+			req.destroy(deadlineError());
+		}, config.timeoutMs * 3);
 		req.on("timeout", () => req.destroy(new Error("request timed out")));
-		req.on("error", reject);
+		req.on("error", (error) => {
+			clearTimeout(deadline);
+			reject(deadlineHit ? deadlineError() : error);
+		});
 		req.end();
 	});
+}
+
+function deadlineError() {
+	// "timed out" keeps this non-retryable per retry.ts and classified as timeout
+	return new Error("request timed out: whole-request deadline exceeded");
 }
 
 function decodeContent(

@@ -1,3 +1,4 @@
+import { emptyRefreshSummary } from "../core/refresh.ts";
 import type { SnapshotStats } from "../core/snapshot.ts";
 import { SNAPSHOT_VERSION } from "../core/snapshot.ts";
 import {
@@ -6,6 +7,8 @@ import {
 	type FailureKind,
 	lowQualityConfidence,
 	type PageRecord,
+	type PageSuccess,
+	type RefreshSummary,
 	type RunSummary,
 } from "../core/types.ts";
 
@@ -16,10 +19,17 @@ export function buildSummary(
 	deduped: number,
 	snapshot: SnapshotStats,
 	elapsedMs: number,
+	refresh: RefreshSummary = emptyRefreshSummary(),
 ): RunSummary {
 	let written = 0;
 	let failed = 0;
 	let lowQuality = 0;
+	let qualityWarnings = 0;
+	let hostRedirects = 0;
+	const redirectedHosts = new Map<
+		string,
+		{ from: string; to: string; count: number }
+	>();
 	const bySource = emptyCounts(discoverySources);
 	const byFailureKind: Partial<Record<FailureKind, number>> = {};
 	const errors: RunSummary["errors"] = [];
@@ -28,7 +38,11 @@ export function buildSummary(
 		bySource[record.source]++;
 		if (record.ok) {
 			if (record.outputPath) written++;
-			if (record.confidence < lowQualityConfidence) lowQuality++;
+			if (record.outputPath && addRedirectedHosts(record, redirectedHosts)) {
+				hostRedirects++;
+			}
+			if (isLowQuality(record)) lowQuality++;
+			if (isQualityWarning(record)) qualityWarnings++;
 			continue;
 		}
 		failed++;
@@ -47,6 +61,8 @@ export function buildSummary(
 		seedUrl: config.seedUrl,
 		outDir: config.outDir,
 		dryRun: config.dryRun,
+		userAgent: config.userAgent,
+		...(config.ignoreRobots ? { ignoreRobots: true as const } : {}),
 		generatedAt: new Date().toISOString(),
 		snapshotVersion: SNAPSHOT_VERSION,
 		rootHash: snapshot.rootHash,
@@ -60,6 +76,11 @@ export function buildSummary(
 		written,
 		failed,
 		lowQuality,
+		qualityWarnings,
+		hostRedirects,
+		redirectedHosts: [...redirectedHosts.values()]
+			.sort((a, b) => b.count - a.count || a.from.localeCompare(b.from))
+			.slice(0, 10),
 		elapsedMs: Number(elapsedMs.toFixed(1)),
 		pagesPerSecond: Number(
 			(written / Math.max(elapsedMs / 1000, 0.001)).toFixed(2),
@@ -67,7 +88,46 @@ export function buildSummary(
 		bySource,
 		byFailureKind,
 		errors,
+		refresh,
 	};
+}
+
+function addRedirectedHosts(
+	record: PageRecord,
+	pairs: Map<string, { from: string; to: string; count: number }>,
+) {
+	let changed = false;
+	for (const redirect of record.redirects) {
+		const from = hostKey(redirect.from);
+		const to = hostKey(redirect.to);
+		if (!from || !to || from === to) continue;
+		changed = true;
+		const key = `${from}\0${to}`;
+		const pair = pairs.get(key) ?? { from, to, count: 0 };
+		pair.count++;
+		pairs.set(key, pair);
+	}
+	return changed;
+}
+
+function hostKey(raw: string) {
+	try {
+		return new URL(raw).hostname.toLowerCase().replace(/^www\./, "");
+	} catch {
+		return "";
+	}
+}
+
+export function isLowQuality(record: PageSuccess): boolean {
+	return record.confidence < lowQualityConfidence;
+}
+
+export function hasQualityWarning(record: PageSuccess): boolean {
+	return record.qualityReasons.length > 0;
+}
+
+export function isQualityWarning(record: PageSuccess): boolean {
+	return hasQualityWarning(record) && !isLowQuality(record);
 }
 
 function emptyCounts<T extends string>(keys: readonly T[]) {

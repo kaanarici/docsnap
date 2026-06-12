@@ -12,6 +12,7 @@ export function normalizeUrl(
 	try {
 		const url = new URL(raw, base);
 		if (!["http:", "https:"].includes(url.protocol)) return;
+		if (url.username || url.password) return;
 		dropFragmentAndQuery(url);
 		url.pathname = url.pathname.replace(/\/{2,}/g, "/");
 		collapseRepeatedBasePath(url, base);
@@ -20,6 +21,35 @@ export function normalizeUrl(
 		return url.href;
 	} catch {
 		return;
+	}
+}
+
+export function normalizeDiscoveryResourceUrl(
+	raw: string,
+	base?: string | URL,
+): string | undefined {
+	try {
+		const url = new URL(raw, base);
+		if (!["http:", "https:"].includes(url.protocol)) return;
+		if (url.username || url.password) return;
+		url.hash = "";
+		url.pathname = url.pathname.replace(/\/{2,}/g, "/");
+		if (!url.pathname) url.pathname = "/";
+		if (ignoredExtension.test(url.pathname) && !isFeedResourceUrl(url)) return;
+		return url.href;
+	} catch {
+		return;
+	}
+}
+
+export function looksLikeFeedResourceUrl(
+	raw: string,
+	base?: string | URL,
+): boolean {
+	try {
+		return isFeedResourceUrl(new URL(raw, base));
+	} catch {
+		return false;
 	}
 }
 
@@ -57,10 +87,21 @@ export function addDiscovered(
 	seed: string,
 	scope: string,
 	fetched?: DiscoveredUrl["fetched"],
+	metadata?: DiscoveredUrl["metadata"],
 ): void {
-	if (!raw || seen.has(raw) || !inScope(raw, seed, scope)) return;
+	if (!raw || !inScope(raw, seed, scope)) return;
+	if (seen.has(raw)) {
+		const existing = out.find((item) => item.url === raw);
+		if (existing) mergeDiscovered(existing, source, metadata);
+		return;
+	}
 	seen.add(raw);
-	out.push({ url: raw, source, ...(fetched ? { fetched } : {}) });
+	out.push({
+		url: raw,
+		source,
+		...(fetched ? { fetched } : {}),
+		...(metadata ? { metadata } : {}),
+	});
 }
 
 export function sameScopeLinks(markdown: string, base: string): string[] {
@@ -122,8 +163,42 @@ function isNonPageUrl(url: URL) {
 		/(?:^|\/)api\/(?:article|search)(?:\/|$)/i.test(url.pathname) ||
 		/youtube\.com\/watch/i.test(url.pathname) ||
 		/(?:^|\/)(?:rss|feed|atom)\.xml$/i.test(url.pathname) ||
+		/(?:^|\/)(?:rss|feed|atom)\/?$/i.test(url.pathname) ||
 		/(?:^|\/)(?:chat|demo|playground|repl|test)\/?$/i.test(url.pathname) ||
 		/\/chunked\/.*\.json$/i.test(url.pathname) ||
 		/(?:^|\/)(?:robots\.txt|sitemap[^/]*\.xml)$/i.test(url.pathname)
 	);
 }
+
+function isFeedResourceUrl(url: URL) {
+	const pathname = url.pathname.toLowerCase();
+	return (
+		/(?:^|\/)(?:feed|rss|atom)(?:\/|$)/i.test(pathname) ||
+		/(?:^|\/)(?:rss|feed|atom)\.xml$/i.test(pathname) ||
+		/\.(?:rss|atom)$/i.test(pathname) ||
+		url.searchParams.has("feed")
+	);
+}
+
+function mergeDiscovered(
+	target: DiscoveredUrl,
+	source: DiscoverySource,
+	metadata: DiscoveredUrl["metadata"],
+) {
+	if (sourceRank[source] > sourceRank[target.source]) target.source = source;
+	if (!metadata) return;
+	target.metadata = {
+		...metadata,
+		...target.metadata,
+	};
+}
+
+const sourceRank: Record<DiscoverySource, number> = {
+	llms: 7,
+	asset: 6,
+	sitemap: 5,
+	feed: 4,
+	nav: 3,
+	crawl: 2,
+	seed: 1,
+};

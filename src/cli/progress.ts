@@ -25,16 +25,23 @@ export function printSummary(summary: RunSummary): void {
 		const failures = failureSummary(summary);
 		if (failures) note(`docsnap: failure kinds ${failures}`);
 	}
+	if (summary.qualityWarnings) {
+		note(`docsnap: ${summary.qualityWarnings} quality warnings`);
+	}
+	if (summary.hostRedirects) {
+		const page = summary.hostRedirects === 1 ? "page" : "pages";
+		note(`docsnap: ${summary.hostRedirects} ${page} changed host via redirect`);
+	}
 	if (!summary.dryRun) {
 		note(`docsnap: summary ${summary.outDir}/${runFiles.summary}`);
 		note(`docsnap: manifest ${summary.outDir}/${runFiles.manifest}`);
-		note(`docsnap: agent handoff ${summary.outDir}/${runFiles.agentReadme}`);
+		note(`docsnap: guide ${summary.outDir}/${runFiles.agentReadme}`);
 	}
 	if (summary.agentFilesUpdated) {
 		note(
 			summary.agentFilesUpdated.length
 				? `docsnap: linked handoff from ${summary.agentFilesUpdated.join(", ")}`
-				: "docsnap: no AGENTS.md or CLAUDE.md found for --agent-files",
+				: "docsnap: no AGENTS.md, CLAUDE.md, agents.md, or claude.md found in the current directory",
 		);
 	}
 }

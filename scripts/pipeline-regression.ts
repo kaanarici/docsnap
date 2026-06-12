@@ -1,9 +1,10 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import { parseArgs } from "../src/cli/args.ts";
 import { runPipeline } from "../src/core/pipeline.ts";
 import { setFetchTransportForTest } from "../src/fetch/fetcher.ts";
+import { prepareOutput, writePages } from "../src/output/writer.ts";
 
 const outDir = await mkdtemp(join(tmpdir(), "docsnap-pipeline-"));
 const config = parseArgs([
@@ -143,6 +144,119 @@ try {
 	setFetchTransportForTest(undefined);
 }
 
+const feedOutDir = await mkdtemp(join(tmpdir(), "docsnap-pipeline-feed-"));
+const feedConfig = parseArgs([
+	"https://feedpipe.example.com/feed.atom",
+	"-m",
+	"2",
+	"-o",
+	feedOutDir,
+	"--clean",
+	"--quiet",
+]);
+assert(!("help" in feedConfig) && !("version" in feedConfig));
+
+setFetchTransportForTest(async (input) => {
+	const url = String(input);
+	if (url.endsWith("/llms.txt") || url.endsWith("/robots.txt"))
+		return response(url, 404, "not found", "text/plain");
+	if (url === "https://feedpipe.example.com/feed.atom") {
+		return response(
+			url,
+			200,
+			`<feed xmlns="http://www.w3.org/2005/Atom">
+				<entry><title>One</title><link href="/post-1"/><published>2024-05-01T00:00:00Z</published><updated>2024-05-02T00:00:00Z</updated></entry>
+				<entry><title>Two</title><link href="/post-2"/><updated>2024-05-03T00:00:00Z</updated></entry>
+			</feed>`,
+			"application/atom+xml",
+		);
+	}
+	if (url.endsWith("/post-1"))
+		return response(url, 200, page("Post One", "First feed captured page."));
+	if (url.endsWith("/post-2"))
+		return response(url, 200, page("Post Two", "Second feed captured page."));
+	return response(url, 404, "not found", "text/plain");
+});
+
+try {
+	const result = await runPipeline(feedConfig);
+	assert(result.summary.written === 2);
+	assert(result.summary.bySource.feed === 2);
+	const dated = result.records.find(
+		(record) => record.ok && record.publishedAt && record.updatedAt,
+	);
+	assert(dated?.ok && dated.outputPath);
+	const markdown = await readFile(join(feedOutDir, dated.outputPath), "utf8");
+	assert(markdown.includes('source: "feed"'));
+	assert(markdown.includes('publishedAt: "2024-05-01T00:00:00.000Z"'));
+	assert(markdown.includes('updatedAt: "2024-05-02T00:00:00.000Z"'));
+	const manifest = (await readFile(join(feedOutDir, "manifest.jsonl"), "utf8"))
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line));
+	const entry = manifest.find((item) => String(item.url).endsWith("/post-1"));
+	assert(entry.source === "feed");
+	assert(entry.publishedAt === "2024-05-01T00:00:00.000Z");
+	assert(entry.updatedAt === "2024-05-02T00:00:00.000Z");
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
+const symlinkRepo = await mkdtemp(join(tmpdir(), "docsnap-output-repo-"));
+const symlinkTarget = await mkdtemp(join(tmpdir(), "docsnap-output-target-"));
+await symlink(symlinkTarget, join(symlinkRepo, "docsnap"));
+const originalCwd = process.cwd();
+process.chdir(symlinkRepo);
+try {
+	const symlinkConfig = parseArgs([
+		"https://docs.example.com/",
+		"-o",
+		"docsnap/site",
+	]);
+	assert(!("help" in symlinkConfig) && !("version" in symlinkConfig));
+	await rejects(() => prepareOutput(symlinkConfig));
+	assert((await readdir(symlinkTarget)).length === 0);
+} finally {
+	process.chdir(originalCwd);
+}
+const rootConfig = parseArgs([
+	"https://docs.example.com/",
+	"-o",
+	parse(process.cwd()).root,
+]);
+assert(!("help" in rootConfig) && !("version" in rootConfig));
+await rejects(() => prepareOutput(rootConfig));
+
+const nestedOut = await mkdtemp(join(tmpdir(), "docsnap-nested-out-"));
+const nestedTarget = await mkdtemp(join(tmpdir(), "docsnap-nested-target-"));
+await symlink(nestedTarget, join(nestedOut, "leak"));
+await mkdir(nestedOut, { recursive: true });
+await rejects(() =>
+	writePages(
+		[
+			{
+				ok: true,
+				url: "https://docs.example.com/leak/nested/page",
+				finalUrl: "https://docs.example.com/leak/nested/page",
+				redirects: [],
+				fetchedAt: "2026-01-01T00:00:00.000Z",
+				status: 200,
+				source: "seed",
+				timings: { fetchMs: 1, extractMs: 1, writeMs: 0 },
+				markdown: "safe",
+				links: [],
+				contentHash: "safe",
+				extractor: "html",
+				confidence: 1,
+				qualityReasons: [],
+				outputPath: "leak/nested/page.md",
+			},
+		],
+		{ ...httpConfig, outDir: nestedOut, clean: false },
+	),
+);
+assert((await readdir(nestedTarget)).length === 0);
+
 function page(title: string, text: string) {
 	return `<html><head><title>${title}</title></head><body><main><h1>${title}</h1><p>${text}</p></main></body></html>`;
 }
@@ -166,4 +280,13 @@ function response(
 
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");
+}
+
+async function rejects(run: () => Promise<unknown>) {
+	try {
+		await run();
+	} catch {
+		return;
+	}
+	throw new Error("expected rejection");
 }

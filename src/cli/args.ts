@@ -18,13 +18,13 @@ const usage = `Usage:
   docsnap <url> [flags]
 
 Flags:
-  -o, --out <dir>           output directory, default docsnap/<site>
+  -o, --out <dir>           output dir; relative paths must stay under the current directory
   -m, --max <count>         max pages; default all llms.txt pages, otherwise 50
-  --concurrency <n>         fetch concurrency, default ${defaultConcurrency}
+  --concurrency <n>         fetch concurrency, CPU-scaled default up to 64
   --clean                   remove output dir before writing
   --dry-run                 run without writing files
   --page                    capture only the given page, no discovery
-  --agent-files             update existing AGENTS.md/CLAUDE.md files
+  --agent-files             add a docsnap block to AGENTS.md/CLAUDE.md in the current directory
   --json                    print one machine-readable result
   --quiet                   suppress progress logs
   --stdin                   read the URL from stdin
@@ -35,12 +35,12 @@ Flags:
   -h, --help                show help
 
 Examples:
-  docsnap https://docs.example.com -o vendor-docs --clean --json
+  docsnap https://react.dev/reference -o vendor-docs --clean --json
   docsnap https://fly.io/docs/ -m 100 --concurrency 24
-  docsnap https://docs.example.com/api/auth --page
-  echo https://docs.peel.sh | docsnap --stdin --json
-  docsnap https://example.com --dry-run --json
-  docsnap https://example.com --fail-on-low-quality`;
+  docsnap https://docs.djangoproject.com/en/stable/topics/auth/ --page
+  echo https://react.dev/reference | docsnap --stdin --json
+  docsnap https://docs.python.org/3/ --dry-run --json
+  docsnap https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API --fail-on-low-quality`;
 
 type ParsedArgs = Config | { help: string } | { version: true };
 
@@ -104,7 +104,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
 	}
 
 	if (!config.seedUrl)
-		throw new Error(`Missing URL\n\nTry: docsnap https://example.com --help`);
+		throw new Error(
+			`Missing URL\n\nTry: docsnap https://react.dev/reference --help`,
+		);
 	try {
 		config.seedUrl = parseUrl(config.seedUrl).href;
 	} catch {

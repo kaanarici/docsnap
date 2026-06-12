@@ -24,7 +24,10 @@ export async function loadRobots(
 		config,
 		"text/plain,*/*;q=0.8",
 	);
-	if (!response.ok) return openRobots();
+	if (!response.ok) {
+		if (response.status >= 400 && response.status < 500) return openRobots();
+		return closedRobots();
+	}
 	return parseRobots(response.body, origin, config.userAgent);
 }
 
@@ -40,10 +43,7 @@ export function parseRobots(
 
 	for (const raw of body.split(/\r?\n/)) {
 		const line = raw.replace(/#.*/, "").trim();
-		if (!line) {
-			flush();
-			continue;
-		}
+		if (!line) continue;
 		const [fieldRaw, ...rest] = line.split(":");
 		const field = fieldRaw?.trim().toLowerCase();
 		const value = rest.join(":").trim();
@@ -87,6 +87,15 @@ export function parseRobots(
 
 function openRobots(): Robots {
 	return { sitemaps: [], allows: [], disallows: [], allowed: () => true };
+}
+
+function closedRobots(): Robots {
+	return {
+		sitemaps: [],
+		allows: [],
+		disallows: [{ value: "/", specificity: 1, matches: () => true }],
+		allowed: () => false,
+	};
 }
 
 function newGroup() {

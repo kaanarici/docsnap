@@ -2,6 +2,7 @@ export const discoverySources = [
 	"seed",
 	"llms",
 	"sitemap",
+	"feed",
 	"nav",
 	"crawl",
 	"asset",
@@ -56,23 +57,55 @@ type FetchBase = {
 	contentType: string;
 	body: string;
 	fetchMs: number;
+	redirects?: RedirectHop[];
+	etag?: string;
+	lastModified?: string;
+	fetchedAt?: string;
+};
+
+export type RedirectHop = {
+	from: string;
+	to: string;
+	type: "http" | "refresh";
+	status?: number;
 };
 
 export type FetchResult = FetchBase &
 	(
-		| { ok: true; error?: never; failureKind?: never }
+		| { ok: true; notModified?: false; error?: never; failureKind?: never }
+		| {
+				ok: true;
+				notModified: true;
+				status: 304;
+				body: "";
+				error?: never;
+				failureKind?: never;
+		  }
 		| { ok: false; error: string; failureKind: FailureKind }
 	);
+
+export type ConditionalRequest = {
+	etag?: string;
+	lastModified?: string;
+	urls: string[];
+};
+
+export type DiscoveryMetadata = {
+	publishedAt?: string;
+	updatedAt?: string;
+};
 
 export type DiscoveredUrl = {
 	url: string;
 	source: DiscoverySource;
 	fetched?: FetchResult;
+	metadata?: DiscoveryMetadata;
 };
 
 export type FetchedUrl = {
 	source: DiscoverySource;
 	result: FetchResult;
+	metadata?: DiscoveryMetadata;
 };
 
 type PageTimings = {
@@ -87,6 +120,12 @@ type PageBase = {
 	status: number;
 	source: DiscoverySource;
 	timings: PageTimings;
+	redirects: RedirectHop[];
+	etag?: string;
+	lastModified?: string;
+	fetchedAt: string;
+	publishedAt?: string;
+	updatedAt?: string;
 };
 
 export type PageExtractor = "markdown" | "html" | "text" | "fallback";
@@ -126,6 +165,8 @@ export type RunSummary = {
 	seedUrl: string;
 	outDir: string;
 	dryRun: boolean;
+	userAgent: string;
+	ignoreRobots?: true;
 	generatedAt: string;
 	snapshotVersion: number;
 	rootHash: string;
@@ -139,12 +180,42 @@ export type RunSummary = {
 	written: number;
 	failed: number;
 	lowQuality: number;
+	qualityWarnings: number;
+	hostRedirects: number;
+	redirectedHosts: Array<{ from: string; to: string; count: number }>;
 	elapsedMs: number;
 	pagesPerSecond: number;
 	bySource: Record<DiscoverySource, number>;
 	byFailureKind: Partial<Record<FailureKind, number>>;
 	errors: Array<{ url: string; error: string; kind: FailureKind }>;
+	refresh: RefreshSummary;
 	agentFilesUpdated?: string[];
+};
+
+export type RefreshChange = "new" | "changed" | "unchanged" | "removed";
+
+export type RefreshChangedPage = {
+	change: RefreshChange;
+	url: string;
+	finalUrl?: string;
+	outputPath?: string;
+	previousOutputPath?: string;
+};
+
+export type RefreshSummary = {
+	enabled: boolean;
+	reason?: "clean" | "missing_manifest" | "invalid_manifest";
+	priorRecords: number;
+	checked: number;
+	notModified: number;
+	reused: number;
+	fallbackRefetches: number;
+	skippedWrites: number;
+	new: number;
+	changed: number;
+	unchanged: number;
+	removed: number;
+	changedPages: RefreshChangedPage[];
 };
 
 export type PipelineResult = {

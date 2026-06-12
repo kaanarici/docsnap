@@ -1,24 +1,46 @@
 import type { Config, DiscoveredUrl, FetchResult } from "../core/types.ts";
 import { fetchText } from "../fetch/fetcher.ts";
 import { discoverAssetPages, looksLikeAppShell } from "./assets.ts";
+import {
+	discoverLlmsCorpus,
+	discoverLlmsUrls,
+	type LlmsCorpusOptions,
+	robotsForOrigin,
+} from "./corpus.ts";
 import { crawlScoped } from "./crawl.ts";
-import { discoverLlms, type LlmsDiscoveryOptions } from "./llms.ts";
+import {
+	discoverFeed,
+	discoverFeedLinks,
+	discoverRelNextPages,
+	isFeedResponse,
+} from "./feed.ts";
 import { discoverNav, discoverPageLinks } from "./nav.ts";
 import { loadRobots } from "./robots.ts";
 import { discoverSitemaps } from "./sitemap.ts";
 import {
 	addDiscovered,
 	inScope,
+	looksLikeFeedResourceUrl,
+	normalizeDiscoveryResourceUrl,
 	normalizeUrl,
 	pathInScope,
 	scopeFromSeed,
 } from "./url.ts";
 
 export async function discover(config: Config): Promise<DiscoveredUrl[]> {
-	const inputSeed = normalizeUrl(config.seedUrl) ?? config.seedUrl;
-	const llmsOptions: LlmsDiscoveryOptions = { cache: new Map() };
+	const inputSeed = seedInputUrl(config.seedUrl);
 	if (config.pageOnly) return [{ url: inputSeed, source: "seed" }];
 	const inputUrl = new URL(inputSeed);
+	const seedRobots = await loadRobots(inputUrl.origin, config);
+	const robotsByOrigin: LlmsCorpusOptions["robotsByOrigin"] = new Map([
+		[inputUrl.origin, seedRobots],
+	]);
+	const llmsOptions: LlmsCorpusOptions = { cache: new Map(), robotsByOrigin };
+	if (!seedRobots.allowed(inputSeed)) {
+		return [
+			{ url: inputSeed, source: "seed", fetched: robotsBlockedUrl(inputSeed) },
+		];
+	}
 	if (inputUrl.pathname.endsWith("/llms.txt")) {
 		return discoverLlmsCorpus(inputSeed, inputSeed, "/", config, {
 			...llmsOptions,
@@ -55,9 +77,31 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 	if (!seedResponse.ok) {
 		return [{ url: inputSeed, source: "seed", fetched: seedResponse }];
 	}
+	if (isFeedResponse(seedResponse)) {
+		const feedSeed =
+			normalizeDiscoveryResourceUrl(seedResponse.finalUrl) ?? inputSeed;
+		const robots = await robotsForOrigin(
+			new URL(feedSeed).origin,
+			config,
+			robotsByOrigin,
+		);
+		const allowed = (url: string) => config.ignoreRobots || robots.allowed(url);
+		if (!allowed(feedSeed)) {
+			return [
+				{ url: feedSeed, source: "seed", fetched: robotsBlocked(seedResponse) },
+			];
+		}
+		return discoverFeed(feedSeed, feedSeed, scopeFromSeed(feedSeed), config, {
+			limit: config.max,
+			response: seedResponse,
+			accept: allowed,
+			allowResource: allowed,
+		});
+	}
 	const finalSeed = normalizeUrl(seedResponse.finalUrl);
 	const seed = finalSeed ?? inputSeed;
 	const seedLinks = discoverPageLinks(seedResponse.body, seedResponse.finalUrl);
+	const feedLinks = discoverFeedLinks(seedResponse.body, seedResponse.finalUrl);
 	const seedIsLanguageSelector = isLanguageSelector(
 		seedResponse.finalUrl,
 		seedResponse.body,
@@ -65,6 +109,17 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 	const scope = seedIsLanguageSelector
 		? "/"
 		: chooseScope(inputScope, seed, seedLinks);
+	const robots = await robotsForOrigin(
+		new URL(seed).origin,
+		config,
+		robotsByOrigin,
+	);
+	const allowed = (url: string) => config.ignoreRobots || robots.allowed(url);
+	if (!allowed(seed)) {
+		return [
+			{ url: seed, source: "seed", fetched: robotsBlocked(seedResponse) },
+		];
+	}
 	if (seed !== inputSeed || scope !== inputScope) {
 		const redirectedLlmsOut = await discoverLlmsCorpus(
 			seed,
@@ -85,28 +140,22 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 		);
 		if (rootLlmsOut.length > llmsOut.length) return rootLlmsOut;
 	}
-	const robots = await loadRobots(new URL(seed).origin, config);
 	const out: DiscoveredUrl[] = [];
 	const seen = new Set<string>(finalSeed ? [] : [inputSeed]);
 	let limitToMax = config.maxExplicit;
 	let seedIsShell = false;
 
-	const allowed = (url: string) => config.ignoreRobots || robots.allowed(url);
-	if (!allowed(seed)) {
-		return [
-			{ url: seed, source: "seed", fetched: robotsBlocked(seedResponse) },
-		];
-	}
 	const add = (
 		raw: string | undefined,
 		source: DiscoveredUrl["source"],
 		fetched?: DiscoveredUrl["fetched"],
+		metadata?: DiscoveredUrl["metadata"],
 	) => {
 		if (limitToMax && out.length >= config.max) return false;
 		const url = normalizeUrl(raw ?? "");
 		if (!url || !allowed(url)) return false;
 		const before = out.length;
-		addDiscovered(out, seen, url, source, seed, scope, fetched);
+		addDiscovered(out, seen, url, source, seed, scope, fetched, metadata);
 		return out.length > before;
 	};
 
@@ -134,6 +183,8 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 		}
 	}
 
+	const beforeSitemap = out.length;
+	const sitemapRemaining = config.max - out.length;
 	const sitemapUrls = await discoverSitemaps(seed, robots.sitemaps, config, {
 		limit: config.max - out.length,
 		scope,
@@ -143,9 +194,46 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 	for (const url of sitemapUrls) {
 		add(url, "sitemap");
 	}
+	const sitemapAdded = out.length - beforeSitemap;
+	const richSitemap =
+		sitemapRemaining > 0 &&
+		(sitemapAdded >= sitemapRemaining ||
+			sitemapAdded >= Math.min(sitemapRemaining, 5));
+
+	if (!richSitemap && out.length < Math.min(config.max, 3)) {
+		for (const feedUrl of feedLinks.slice(0, 2)) {
+			if (!allowed(feedUrl)) continue;
+			const feedPages = await discoverFeed(feedUrl, seed, scope, config, {
+				limit: config.max - out.length,
+				accept: (url) => inScope(url, seed, scope) && allowed(url),
+				allowResource: allowed,
+			});
+			for (const page of feedPages) {
+				add(page.url, "feed", page.fetched, page.metadata);
+			}
+			if (out.length >= config.max) break;
+		}
+	}
 
 	if (config.maxExplicit && out.length < config.max) {
 		await addLlms(seed, config, add, llmsOptions);
+	}
+
+	if (out.length < Math.min(config.max, 3)) {
+		for (const page of await discoverRelNextPages(
+			seedResponse.body,
+			seedResponse.finalUrl,
+			seed,
+			scope,
+			config,
+			{
+				limit: config.max - out.length,
+				accept: (url) => inScope(url, seed, scope) && allowed(url),
+				allowResource: allowed,
+			},
+		)) {
+			add(page.url, page.source, page.fetched, page.metadata);
+		}
 	}
 
 	if (!seedIsLanguageSelector && out.length < config.max) {
@@ -187,10 +275,18 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 	return out;
 }
 
+function seedInputUrl(raw: string) {
+	if (looksLikeFeedResourceUrl(raw)) {
+		return normalizeDiscoveryResourceUrl(raw) ?? raw;
+	}
+	return normalizeUrl(raw) ?? normalizeDiscoveryResourceUrl(raw) ?? raw;
+}
+
 function nonPage(result: FetchResult): FetchResult {
 	return {
 		url: result.url,
 		finalUrl: result.finalUrl,
+		redirects: result.redirects ?? [],
 		status: result.status,
 		contentType: result.contentType,
 		body: result.body,
@@ -225,9 +321,9 @@ async function addLlms(
 	seed: string,
 	config: Config,
 	add: (raw: string | undefined, source: "llms") => boolean,
-	options: LlmsDiscoveryOptions,
+	options: LlmsCorpusOptions,
 ) {
-	for (const url of await discoverLlms(seed, config, options)) {
+	for (const url of await discoverLlmsUrls(seed, config, options)) {
 		add(url, "llms");
 	}
 }
@@ -266,10 +362,26 @@ function robotsBlocked(response: FetchResult): FetchResult {
 	return {
 		url: response.url,
 		finalUrl: response.finalUrl,
+		redirects: response.redirects ?? [],
 		status: response.status,
 		contentType: response.contentType,
 		body: "",
 		fetchMs: response.fetchMs,
+		ok: false,
+		error: "blocked by robots.txt",
+		failureKind: "blocked",
+	};
+}
+
+function robotsBlockedUrl(url: string): FetchResult {
+	return {
+		url,
+		finalUrl: url,
+		redirects: [],
+		status: 0,
+		contentType: "",
+		body: "",
+		fetchMs: 0,
 		ok: false,
 		error: "blocked by robots.txt",
 		failureKind: "blocked",
@@ -282,141 +394,5 @@ function isLanguageSelector(finalUrl: string, html: string) {
 		/path-select-language|ecl-splash-page__language|currentPath":"select-language/i.test(
 			html,
 		)
-	);
-}
-
-async function discoverLlmsCorpus(
-	seed: string,
-	sourceSeed: string,
-	scope: string,
-	config: Config,
-	options: LlmsDiscoveryOptions,
-) {
-	const llmsUrls = await discoverLlms(seed, config, options);
-	const corpus = corpusTarget(seed, llmsUrls);
-	const includeRootLlms =
-		!corpus && hasScopedSameOriginLinks(llmsUrls, sourceSeed, scope);
-	const robotsByOrigin = new Map<
-		string,
-		Awaited<ReturnType<typeof loadRobots>>
-	>();
-	const out: DiscoveredUrl[] = [];
-	const seen = new Set<string>();
-	const sourceOrigin = new URL(sourceSeed).origin;
-	for (const raw of llmsUrls) {
-		const url = normalizeUrl(raw);
-		if (!url || !inCorpus(url, sourceSeed, scope, corpus)) continue;
-		const parsed = new URL(url);
-		const origin = parsed.origin;
-		let robots = robotsByOrigin.get(origin);
-		if (!robots) {
-			robots = await loadRobots(origin, config);
-			robotsByOrigin.set(origin, robots);
-		}
-		if (!config.ignoreRobots && !robots.allowed(url)) continue;
-		const rootLlms =
-			includeRootLlms &&
-			origin === sourceOrigin &&
-			parsed.pathname === "/llms.txt";
-		const corpusMatch = corpus && origin === corpus.origin;
-		const targetSeed = rootLlms
-			? `${origin}/`
-			: corpusMatch
-				? `${corpus.origin}${corpus.scope}`
-				: sourceSeed;
-		const targetScope = rootLlms ? "/" : corpusMatch ? corpus.scope : scope;
-		addDiscovered(out, seen, url, "llms", targetSeed, targetScope);
-		if (config.maxExplicit && out.length >= config.max) break;
-	}
-	return out;
-}
-
-function hasScopedSameOriginLinks(
-	urls: string[],
-	sourceSeed: string,
-	scope: string,
-) {
-	const source = new URL(sourceSeed);
-	return urls.some((raw) => {
-		const url = new URL(raw);
-		return (
-			url.origin === source.origin &&
-			url.pathname !== "/llms.txt" &&
-			pathInScope(url.pathname, scope)
-		);
-	});
-}
-
-function inCorpus(
-	url: string,
-	sourceSeed: string,
-	scope: string,
-	corpus: { origin: string; scope: string } | undefined,
-) {
-	const parsed = new URL(url);
-	const source = new URL(sourceSeed);
-	if (parsed.origin === source.origin)
-		return (
-			parsed.pathname === "/llms.txt" || pathInScope(parsed.pathname, scope)
-		);
-	return (
-		corpus !== undefined &&
-		parsed.origin === corpus.origin &&
-		pathInScope(parsed.pathname, corpus.scope)
-	);
-}
-
-function corpusTarget(seed: string, urls: string[]) {
-	const seedUrl = new URL(seed);
-	const byOrigin = new Map<string, URL[]>();
-	for (const raw of urls) {
-		const url = new URL(raw);
-		if (url.origin === seedUrl.origin) continue;
-		const group = byOrigin.get(url.origin) ?? [];
-		group.push(url);
-		byOrigin.set(url.origin, group);
-	}
-	const best = [...byOrigin.entries()].sort(
-		(a, b) => b[1].length - a[1].length,
-	)[0];
-	const fileHeavy = best ? mostlyCorpusFiles(best[1]) : false;
-	const redirectedRootLlms = best?.[1].some(
-		(url) => url.pathname === "/llms.txt",
-	);
-	if (
-		!best ||
-		(!redirectedRootLlms && best[1].length < 5) ||
-		(!redirectedRootLlms &&
-			!fileHeavy &&
-			!relatedHost(seedUrl.hostname, new URL(best[0]).hostname))
-	)
-		return undefined;
-	const scope = commonScope(best[1]);
-	if (!fileHeavy && scope === "/" && !redirectedRootLlms) return undefined;
-	return { origin: best[0], scope };
-}
-
-function relatedHost(left: string, right: string) {
-	return (
-		left === right || left.endsWith(`.${right}`) || right.endsWith(`.${left}`)
-	);
-}
-
-function commonScope(urls: URL[]) {
-	const paths = urls.map((url) => url.pathname.split("/").filter(Boolean));
-	let length = 0;
-	while (
-		paths.every((path) => path[length] && path[length] === paths[0]![length])
-	) {
-		length++;
-	}
-	return length > 0 ? `/${paths[0]!.slice(0, length).join("/")}/` : "/";
-}
-
-function mostlyCorpusFiles(urls: URL[]) {
-	return (
-		urls.filter((url) => /\.(mdx?|txt|ya?ml|json)$/i.test(url.pathname))
-			.length >=
-		urls.length * 0.8
 	);
 }

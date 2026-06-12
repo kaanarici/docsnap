@@ -1,9 +1,14 @@
 import { parseArgs } from "../src/cli/args.ts";
-import { looksLikeAppShell } from "../src/discover/assets.ts";
+import type { FetchResult } from "../src/core/types.ts";
+import {
+	discoverAssetPages,
+	looksLikeAppShell,
+} from "../src/discover/assets.ts";
+import { crawlScoped } from "../src/discover/crawl.ts";
 import { discover } from "../src/discover/index.ts";
 import { discoverLlms } from "../src/discover/llms.ts";
 import { discoverNav } from "../src/discover/nav.ts";
-import { discoverSitemaps } from "../src/discover/sitemap.ts";
+import { loadRobots, parseRobots } from "../src/discover/robots.ts";
 import { normalizeUrl, sameScopeLinks } from "../src/discover/url.ts";
 import { setFetchTransportForTest } from "../src/fetch/fetcher.ts";
 
@@ -24,6 +29,9 @@ assert(
 	normalizeUrl("/managewatches", "https://docs.example.com/") === undefined,
 );
 assert(
+	normalizeUrl("https://user:pass@docs.example.com/private") === undefined,
+);
+assert(
 	sameScopeLinks(
 		`1. PagerDuty Operations Cloud [https://www.pagerduty.example/platform/operations-cloud/]: Platform overview.`,
 		"https://www.pagerduty.example/llms.txt",
@@ -35,6 +43,185 @@ assert(
 
 const parsed = parseArgs(["https://docs.example.com/", "-m", "4"]);
 assert(!("help" in parsed) && !("version" in parsed));
+
+const seedBlockedConfig = parseArgs([
+	"https://blockedseed.example/docs/",
+	"-m",
+	"3",
+]);
+assert(!("help" in seedBlockedConfig) && !("version" in seedBlockedConfig));
+const seedBlockedFetches: string[] = [];
+setFetchTransportForTest(async (input) => {
+	const url = String(input);
+	seedBlockedFetches.push(url);
+	if (url === "https://blockedseed.example/robots.txt") {
+		return response(url, 200, "User-agent: *\nDisallow: /docs/", "text/plain");
+	}
+	if (url === "https://blockedseed.example/docs/") {
+		throw new Error("seed fetched before robots gate");
+	}
+	return response(url, 404, "not found", "text/plain");
+});
+try {
+	const urls = await discover(seedBlockedConfig);
+	assert(seedBlockedFetches.length === 1);
+	assert(seedBlockedFetches[0] === "https://blockedseed.example/robots.txt");
+	assert(urls.length === 1);
+	assert(urls[0]?.url === "https://blockedseed.example/docs/");
+	assert(urls[0]?.source === "seed");
+	assert(urls[0]?.fetched?.ok === false);
+	assert(urls[0]?.fetched?.error === "blocked by robots.txt");
+	assert(urls[0]?.fetched?.failureKind === "blocked");
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
+const llmsBlockedConfig = parseArgs([
+	"https://llmsblocked.example/docs/",
+	"-m",
+	"2",
+]);
+assert(!("help" in llmsBlockedConfig) && !("version" in llmsBlockedConfig));
+const llmsBlockedFetches: string[] = [];
+setFetchTransportForTest(async (input) => {
+	const url = String(input);
+	llmsBlockedFetches.push(url);
+	if (url === "https://llmsblocked.example/robots.txt") {
+		return response(
+			url,
+			200,
+			"User-agent: *\nDisallow: /llms.txt\nDisallow: /docs/llms.txt",
+			"text/plain",
+		);
+	}
+	if (url.endsWith("/llms.txt")) {
+		throw new Error("llms.txt fetched despite robots gate");
+	}
+	if (url === "https://llmsblocked.example/docs/") {
+		return response(
+			url,
+			200,
+			`<html><body><main><a href="/docs/guide">Guide</a></main></body></html>`,
+		);
+	}
+	return response(url, 404, "not found", "text/plain");
+});
+try {
+	const urls = await discover(llmsBlockedConfig);
+	assert(llmsBlockedFetches[0] === "https://llmsblocked.example/robots.txt");
+	assert(!llmsBlockedFetches.some((url) => url.endsWith("/llms.txt")));
+	assert(urls.some((item) => item.url === "https://llmsblocked.example/docs/"));
+	assert(
+		urls.some((item) => item.url === "https://llmsblocked.example/docs/guide"),
+	);
+	assert(!urls.some((item) => item.source === "llms"));
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
+const relNextConfig = parseArgs(["https://page.example.com/blog/", "-m", "10"]);
+assert(!("help" in relNextConfig) && !("version" in relNextConfig));
+const relNextFetches: string[] = [];
+setFetchTransportForTest(async (input) => {
+	const url = String(input);
+	if (url.endsWith("/llms.txt") || url.endsWith("/robots.txt"))
+		return response(url, 404, "not found", "text/plain");
+	if (url === "https://page.example.com/blog/") {
+		return response(
+			url,
+			200,
+			`<html><head><link rel="next" href="/blog/?page=2"></head><body><main>Blog</main></body></html>`,
+		);
+	}
+	if (url.includes("/blog/?page=")) {
+		relNextFetches.push(url);
+		const page = Number(new URL(url).searchParams.get("page"));
+		return response(
+			url,
+			200,
+			`<html><head><link rel="next" href="/blog/?page=${page + 1}"></head><body><main><a href="/blog/post-${page}">Post ${page}</a></main></body></html>`,
+		);
+	}
+	return response(url, 404, "not found", "text/plain");
+});
+try {
+	const urls = await discover(relNextConfig);
+	assert(relNextFetches.length === 3);
+	assert(relNextFetches.at(-1) === "https://page.example.com/blog/?page=4");
+	assert(
+		urls.some((item) => item.url === "https://page.example.com/blog/post-2"),
+	);
+	assert(
+		urls.some((item) => item.url === "https://page.example.com/blog/post-4"),
+	);
+	assert(
+		!urls.some((item) => item.url === "https://page.example.com/blog/post-5"),
+	);
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
+const rateLimitedConfig = { ...parsed, concurrency: 8, perOrigin: 2 };
+const crawlSeed = "https://crawl.example/docs/";
+let crawlActive = 0;
+let crawlPeak = 0;
+setFetchTransportForTest(async (input) => {
+	crawlActive++;
+	crawlPeak = Math.max(crawlPeak, crawlActive);
+	await Bun.sleep(20);
+	crawlActive--;
+	return response(String(input), 200, "<main>Child page</main>", "text/html");
+});
+try {
+	const first = okFetch(
+		crawlSeed,
+		Array.from(
+			{ length: 6 },
+			(_, index) => `<a href="/docs/${index + 1}">Page ${index + 1}</a>`,
+		).join(""),
+	);
+	const pages = await crawlScoped(
+		crawlSeed,
+		"/",
+		6,
+		{ sitemaps: [], allows: [], disallows: [], allowed: () => true },
+		rateLimitedConfig,
+		first,
+	);
+	assert(pages.length === 6);
+	assert(crawlPeak <= rateLimitedConfig.perOrigin);
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
+let assetActive = 0;
+let assetPeak = 0;
+setFetchTransportForTest(async (input) => {
+	assetActive++;
+	assetPeak = Math.max(assetPeak, assetActive);
+	await Bun.sleep(20);
+	assetActive--;
+	return response(
+		String(input),
+		200,
+		"console.log('chunk')",
+		"text/javascript",
+	);
+});
+try {
+	await discoverAssetPages(
+		"https://assets.example/docs/",
+		`<html><body><div id="app"></div>${Array.from(
+			{ length: 6 },
+			(_, index) => `<script src="/assets/${index + 1}.js"></script>`,
+		).join("")}</body></html>`,
+		rateLimitedConfig,
+		{ limit: 3, scope: "/", accept: () => true },
+	);
+	assert(assetPeak <= rateLimitedConfig.perOrigin);
+} finally {
+	setFetchTransportForTest(undefined);
+}
 
 setFetchTransportForTest(async (input) => {
 	return {
@@ -118,10 +305,10 @@ setFetchTransportForTest(async (input) => {
 			301,
 			"",
 			"text/plain",
-			"https://docs.gofiber.example/llms.txt",
+			"https://gofiber.example/docs/llms.txt",
 		);
 	}
-	if (url === "https://docs.gofiber.example/llms.txt") {
+	if (url === "https://gofiber.example/docs/llms.txt") {
 		return response(
 			url,
 			200,
@@ -136,306 +323,82 @@ try {
 		"https://gofiber.example/docs/",
 		redirectedLlmsConfig,
 	);
-	assert(urls.includes("https://docs.gofiber.example/llms.txt"));
-	assert(urls.includes("https://docs.gofiber.example/casbin/casbin"));
+	assert(urls.includes("https://gofiber.example/docs/llms.txt"));
+	assert(urls.includes("https://gofiber.example/docs/casbin/casbin"));
 	assert(!urls.includes("https://gofiber.example/casbin/casbin"));
 	const discovered = await discover(redirectedLlmsConfig);
 	assert(discovered.length === 2);
-	assert(discovered[0]?.url === "https://docs.gofiber.example/llms.txt");
-	assert(discovered[1]?.url === "https://docs.gofiber.example/casbin/casbin");
+	assert(discovered[0]?.url === "https://gofiber.example/docs/llms.txt");
+	assert(discovered[1]?.url === "https://gofiber.example/docs/casbin/casbin");
 } finally {
 	setFetchTransportForTest(undefined);
 }
 
-const sitemapFetches: string[] = [];
-setFetchTransportForTest(async (input) => {
-	const url = String(input);
-	sitemapFetches.push(url);
-	const body = url.endsWith("/sitemap.xml")
-		? `<sitemapindex><sitemap><loc>https://docs.example.com/sitemappart/1.xml</loc></sitemap><sitemap><loc>https://docs.example.com/sitemappart/2.xml</loc></sitemap></sitemapindex>`
-		: `<urlset><url><loc>https://docs.example.com/docs/intro</loc></url></urlset>`;
-	return {
-		url,
-		status: 200,
-		headers: {
-			get: (name) => (name === "content-type" ? "application/xml" : null),
-			getSetCookie: () => [],
-		},
-		body: new TextEncoder().encode(body),
-	};
-});
+const blankLineRobots = parseRobots(
+	"User-agent: docsnap\n\nDisallow: /private\n\nUser-agent: *\nAllow: /",
+	"https://robots.example",
+	parsed.userAgent,
+);
+assert(!blankLineRobots.allowed("https://robots.example/private/page"));
+assert(blankLineRobots.allowed("https://robots.example/public/page"));
+
+setFetchTransportForTest(async (input) =>
+	response(String(input), 404, "not found", "text/plain"),
+);
 try {
-	const urls = await discoverSitemaps(
-		"https://docs.example.com/docs/",
-		[],
-		parsed,
-		{
-			limit: 1,
-			scope: "/docs/",
-			accept: () => true,
-		},
-	);
-	assert(urls.length === 1);
-	assert(urls[0] === "https://docs.example.com/docs/intro");
-	assert(
-		!sitemapFetches.includes("https://docs.example.com/sitemappart/1.xml"),
-	);
+	const robots404 = await loadRobots("https://robots404.example", {
+		...parsed,
+		retryHttp: false,
+	});
+	assert(robots404.allowed("https://robots404.example/private"));
 } finally {
 	setFetchTransportForTest(undefined);
 }
 
-const scopedSitemapFetches: string[] = [];
+const robotsClosedConfig = {
+	...parsed,
+	seedUrl: "https://robotsfail.example/docs/",
+	max: 3,
+	maxExplicit: true,
+	retryHttp: false,
+};
+const robotsClosedFetches: string[] = [];
 setFetchTransportForTest(async (input) => {
 	const url = String(input);
-	scopedSitemapFetches.push(url);
-	if (url.endsWith("/us-en.sitemap.xml")) {
-		return response(
-			url,
-			200,
-			`<urlset><url><loc>https://vendor.example.com/us-en/privacy</loc></url></urlset>`,
-			"application/xml",
-		);
-	}
-	return response(url, 200, `<urlset></urlset>`, "application/xml");
-});
-try {
-	const urls = await discoverSitemaps(
-		"https://vendor.example.com/us-en",
-		["https://vendor.example.com/broad-sitemap.xml"],
-		parsed,
-		{
-			limit: 1,
-			scope: "/us-en/",
-			accept: (url) => url.includes("/us-en/"),
-		},
-	);
-	assert(urls[0] === "https://vendor.example.com/us-en/privacy");
-	assert(
-		!scopedSitemapFetches.includes(
-			"https://vendor.example.com/broad-sitemap.xml",
-		),
-	);
-} finally {
-	setFetchTransportForTest(undefined);
-}
-
-const localeSitemapFetches: string[] = [];
-setFetchTransportForTest(async (input) => {
-	const url = String(input);
-	localeSitemapFetches.push(url);
-	if (url.endsWith("/sitemap.xml")) {
-		return response(
-			url,
-			200,
-			`<sitemapindex>
-				<sitemap><loc>https://vendor.example.com/support/sitemap-1.xml</loc></sitemap>
-				<sitemap><loc>https://vendor.example.com/href-sitemap-en-us.xml</loc></sitemap>
-			</sitemapindex>`,
-			"application/xml",
-		);
-	}
-	if (url.endsWith("/href-sitemap-en-us.xml")) {
-		return response(
-			url,
-			200,
-			`<urlset><url><loc>https://vendor.example.com/us-en/docs/privacy</loc></url></urlset>`,
-			"application/xml",
-		);
-	}
-	return response(url, 200, `<urlset></urlset>`, "application/xml");
-});
-try {
-	const urls = await discoverSitemaps(
-		"https://vendor.example.com/us-en/",
-		[],
-		parsed,
-		{
-			limit: 1,
-			scope: "/us-en/",
-			accept: (url) => url.includes("/us-en/"),
-		},
-	);
-	assert(urls[0] === "https://vendor.example.com/us-en/docs/privacy");
-	assert(
-		!localeSitemapFetches.includes(
-			"https://vendor.example.com/support/sitemap-1.xml",
-		),
-	);
-} finally {
-	setFetchTransportForTest(undefined);
-}
-
-const malformedIndexFetches: string[] = [];
-setFetchTransportForTest(async (input) => {
-	const url = String(input);
-	malformedIndexFetches.push(url);
-	return response(
-		url,
-		200,
-		`<sitemapindex>
-			<sitemap><loc>https://app.example.com/route</loc></sitemap>
-			<sitemap><loc>https://app.example.com/docs/intro</loc></sitemap>
-		</sitemapindex>`,
-		"application/xml",
-	);
-});
-try {
-	const urls = await discoverSitemaps(
-		"https://app.example.com/",
-		["https://app.example.com/sitemap.xml"],
-		parsed,
-		{
-			limit: 2,
-			scope: "/",
-			accept: () => true,
-		},
-	);
-	assert(urls.includes("https://app.example.com/docs/intro"));
-	assert(!malformedIndexFetches.includes("https://app.example.com/route"));
-} finally {
-	setFetchTransportForTest(undefined);
-}
-
-const languageConfig = parseArgs(["https://eu.example/", "-m", "2"]);
-assert(!("help" in languageConfig) && !("version" in languageConfig));
-setFetchTransportForTest(async (input) => {
-	const url = String(input);
-	if (url.endsWith("/robots.txt")) {
-		return response(
-			url,
-			200,
-			"Sitemap: https://commission.example/sitemap.xml",
-			"text/plain",
-		);
-	}
-	if (url.endsWith("/sitemap.xml")) {
-		return response(
-			url,
-			200,
-			`<urlset><url><loc>https://commission.example/index_en</loc></url></urlset>`,
-			"application/xml",
-		);
-	}
-	if (url === "https://eu.example/") {
-		return response(
-			url,
-			302,
-			"",
-			"text/html",
-			"https://commission.example/select-language?destination=/node/1",
-		);
-	}
-	if (
-		url === "https://commission.example/select-language?destination=/node/1"
-	) {
-		return response(
-			url,
-			200,
-			`<html><body class="path-select-language"><main></main></body></html>`,
-		);
-	}
+	robotsClosedFetches.push(url);
+	if (url.endsWith("/robots.txt"))
+		return response(url, 503, "unavailable", "text/plain");
+	if (url === "https://robotsfail.example/docs/")
+		throw new Error("seed fetched after robots 5xx closed the origin");
 	return response(url, 404, "not found", "text/plain");
 });
 try {
-	const urls = await discover(languageConfig);
+	const urls = await discover(robotsClosedConfig);
+	assert(robotsClosedFetches.length === 1);
+	assert(robotsClosedFetches[0] === "https://robotsfail.example/robots.txt");
 	assert(urls.length === 1);
-	assert(urls[0]?.url === "https://commission.example/index_en");
-	assert(urls[0]?.source === "sitemap");
-} finally {
-	setFetchTransportForTest(undefined);
-}
-
-const urlsetSitemapFetches: string[] = [];
-setFetchTransportForTest(async (input) => {
-	const url = String(input);
-	urlsetSitemapFetches.push(url);
-	if (url.endsWith("/documentation/sitemap.xml")) {
-		return response(
-			url,
-			200,
-			`<urlset>
-				<url><loc>https://dev.example/community/api/documentation/sitemaps/fortnite/sitemap_99.xml</loc></url>
-				<url><loc>https://dev.example/community/api/documentation/sitemaps/unreal_engine/sitemap_1.xml</loc></url>
-			</urlset>`,
-			"application/xml",
-		);
-	}
-	if (url.endsWith("/sitemap_1.xml")) {
-		return response(
-			url,
-			200,
-			`<urlset><url><loc>https://dev.example/documentation/en-us/unreal-engine/installing-unreal-engine</loc></url></urlset>`,
-			"application/xml",
-		);
-	}
-	return response(url, 404, "not found", "text/plain");
-});
-try {
-	const urls = await discoverSitemaps(
-		"https://dev.example/documentation/en-us/unreal-engine/",
-		["https://dev.example/documentation/sitemap.xml"],
-		parsed,
-		{
-			limit: 1,
-			scope: "/documentation/unreal-engine/",
-			accept: () => true,
-		},
-	);
-	assert(urls.length === 1);
-	assert(
-		urls[0] ===
-			"https://dev.example/documentation/en-us/unreal-engine/installing-unreal-engine",
-	);
-	assert(
-		urlsetSitemapFetches.includes(
-			"https://dev.example/community/api/documentation/sitemaps/unreal_engine/sitemap_1.xml",
-		),
-	);
-	assert(
-		!urlsetSitemapFetches.includes(
-			"https://dev.example/community/api/documentation/sitemaps/fortnite/sitemap_99.xml",
-		),
-	);
-} finally {
-	setFetchTransportForTest(undefined);
-}
-
-let blockedSitemapChildren = 0;
-setFetchTransportForTest(async (input) => {
-	const url = String(input);
-	if (url.endsWith("/documentation/sitemap.xml")) {
-		const children = Array.from(
-			{ length: 6 },
-			(_, index) =>
-				`<sitemap><loc>https://blocked.example/documentation/sitemap_${index + 1}.xml</loc></sitemap>`,
-		).join("");
-		return response(url, 200, `<sitemapindex>${children}</sitemapindex>`);
-	}
-	if (/\/sitemap_\d+\.xml$/.test(url)) {
-		blockedSitemapChildren++;
-		return response(url, 403, "blocked", "text/html");
-	}
-	return response(url, 404, "not found", "text/plain");
-});
-try {
-	const urls = await discoverSitemaps(
-		"https://blocked.example/documentation/guide/",
-		["https://blocked.example/documentation/sitemap.xml"],
-		parsed,
-		{
-			limit: 1,
-			scope: "/documentation/",
-			accept: () => true,
-		},
-	);
-	assert(urls.length === 0);
-	assert(blockedSitemapChildren === 5);
+	assert(urls[0]?.url === "https://robotsfail.example/docs/");
+	assert(urls[0]?.fetched?.ok === false);
+	assert(urls[0]?.fetched?.error === "blocked by robots.txt");
 } finally {
 	setFetchTransportForTest(undefined);
 }
 
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");
+}
+
+function okFetch(url: string, body: string): FetchResult {
+	return {
+		url,
+		finalUrl: url,
+		redirects: [],
+		status: 200,
+		contentType: "text/html",
+		body,
+		ok: true,
+		fetchMs: 1,
+	};
 }
 
 function response(
