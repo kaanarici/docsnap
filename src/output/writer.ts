@@ -188,12 +188,12 @@ function assertSafeOutputDir(outDir: string, raw: string) {
 	}
 }
 
-function isInsideOrSame(parent: string, child: string) {
+export function isInsideOrSame(parent: string, child: string) {
 	const path = relative(parent, child);
 	return path === "" || (!path.startsWith("..") && !parse(path).root);
 }
 
-async function realPathIsInside(root: string, target: string) {
+export async function realPathIsInside(root: string, target: string) {
 	let current = resolve(target);
 	for (;;) {
 		try {
