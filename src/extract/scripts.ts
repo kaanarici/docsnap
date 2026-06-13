@@ -96,7 +96,7 @@ function readable(value: string): boolean {
 	if (/^[a-z0-9_-]{12,}$/i.test(text)) return false;
 	if ((text.match(/,/g) ?? []).length >= 5) return false;
 	if (text.includes("__")) return false;
-	if (/^(?:\d+\s*)+\d+px(?:\s+\d+)*$/i.test(text)) return false;
+	if (numericCssNoise(text)) return false;
 	if (/\.(?:css|js|mjs|woff2?|png|jpe?g|webp|svg)(?:\?|$)/i.test(text))
 		return false;
 	if (/[{};]/.test(text)) return false;
@@ -122,4 +122,32 @@ function utilityTokenCount(text: string) {
 		.filter((token) =>
 			/^[a-z][a-z0-9:#[\]/.-]*-[a-z0-9:#[\]/.-]+$/i.test(token),
 		).length;
+}
+
+export function numericCssNoise(text: string): boolean {
+	const tokens = text.split(/\s+/);
+	let pxIndex = -1;
+	let pxDigits = 0;
+	for (let index = 0; index < tokens.length; index++) {
+		const token = tokens[index]!;
+		const lower = token.toLowerCase();
+		if (lower.endsWith("px")) {
+			if (pxIndex !== -1) return false;
+			const digits = lower.slice(0, -2);
+			if (!digits || !digitsOnly(digits)) return false;
+			pxIndex = index;
+			pxDigits = digits.length;
+			continue;
+		}
+		if (!digitsOnly(token)) return false;
+	}
+	return pxIndex > 0 || pxDigits > 1;
+}
+
+function digitsOnly(value: string) {
+	for (let index = 0; index < value.length; index++) {
+		const code = value.charCodeAt(index);
+		if (code < 48 || code > 57) return false;
+	}
+	return value.length > 0;
 }
