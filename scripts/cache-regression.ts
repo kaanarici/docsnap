@@ -18,11 +18,27 @@ import { dirLockOwnerFile } from "../src/core/dir-lock.ts";
 import { runPipeline } from "../src/core/pipeline.ts";
 import type { Config } from "../src/core/types.ts";
 import { fetchText, setFetchTransportForTest } from "../src/fetch/fetcher.ts";
+import {
+	logSandboxNetworkSkip,
+	sandboxNetworkDisabled,
+	startLoopbackServer,
+} from "./local-fixture.ts";
 
 const text =
 	"Shared cache regression content has enough stable documentation prose for extraction, summary checks, and repeat fetch assertions.";
 const cacheDirEnv = "DOCSNAP_CACHE_DIR";
 const cacheMaxEnv = "DOCSNAP_CACHE_MAX_MB";
+type CliSummary = {
+	written: number;
+	failed: number;
+	cache: {
+		written: number;
+		hits: number;
+		stale: number;
+		revalidated: number;
+		bytesRead: number;
+	};
+};
 
 await withCacheEnv("cross-dir", async () => {
 	const root = await mkdtemp(join(tmpdir(), "docsnap-cache-out-"));
@@ -87,6 +103,12 @@ await withCacheEnv("stale", async () => {
 		setFetchTransportForTest(undefined);
 	}
 });
+
+if (sandboxNetworkDisabled()) {
+	logSandboxNetworkSkip("cache-regression cross-process cache smoke");
+} else {
+	await crossProcessCacheSmoke();
+}
 
 await withCacheEnv("corrupt", async (cacheDir) => {
 	const root = await mkdtemp(join(tmpdir(), "docsnap-cache-corrupt-"));
@@ -240,6 +262,121 @@ await withCacheEnv("live-lock-not-reaped", async (cacheDir) => {
 	assert(owner.token === "live-cache");
 });
 
+async function crossProcessCacheSmoke() {
+	const tmpRoot = await mkdtemp(join(tmpdir(), "docsnap-cache-process-"));
+	const cacheDir = join(tmpRoot, "cache");
+	let origin = "";
+	let freshRequests = 0;
+	let staleRequests = 0;
+	const server = await startLoopbackServer((request) => {
+		const url = new URL(request.url);
+		if (url.pathname === "/robots.txt") {
+			return webResponse("User-agent: *\nAllow: /\n", "text/plain");
+		}
+		if (url.pathname === "/llms.txt") {
+			return webResponse("not found", "text/plain", 404);
+		}
+		if (url.pathname === "/fresh") {
+			freshRequests++;
+			return webResponse(page("Fresh", `${text} Fresh cache-hit page.`), {
+				"cache-control": "max-age=60",
+			});
+		}
+		if (url.pathname === "/stale") {
+			staleRequests++;
+			if (request.headers.get("if-none-match") === '"stale-v1"') {
+				return new Response(null, {
+					status: 304,
+					headers: {
+						"cache-control": "max-age=0",
+						etag: '"stale-v1"',
+					},
+				});
+			}
+			return webResponse(page("Stale", `${text} Stale ETag page.`), {
+				"cache-control": "max-age=0",
+				etag: '"stale-v1"',
+			});
+		}
+		return webResponse(
+			page(
+				"Cache Root",
+				`${text} The root links to a fresh page and stale page for cross-process cache verification.
+				<a href="${origin}/fresh">Fresh</a>
+				<a href="${origin}/stale">Stale</a>`,
+			),
+			{ "cache-control": "max-age=60" },
+		);
+	});
+	try {
+		origin = server.origin;
+		const first = await runDocsnapProcess(
+			origin,
+			join(tmpRoot, "one"),
+			cacheDir,
+		);
+		const second = await runDocsnapProcess(
+			origin,
+			join(tmpRoot, "two"),
+			cacheDir,
+		);
+		assert(first.written >= 3);
+		assert(first.cache.written >= 3);
+		assert(second.cache.hits >= 1);
+		assert(second.cache.stale >= 1);
+		assert(second.cache.revalidated >= 1);
+		assert(second.cache.bytesRead > 0);
+		assert(freshRequests === 1);
+		assert(staleRequests === 2);
+	} finally {
+		await server.stop();
+		await rm(tmpRoot, { recursive: true, force: true });
+	}
+}
+
+async function runDocsnapProcess(
+	origin: string,
+	outDir: string,
+	cacheDir: string,
+): Promise<CliSummary> {
+	const subprocess = Bun.spawn({
+		cmd: [
+			"bun",
+			"bin/docsnap",
+			`${origin}/`,
+			"-m",
+			"3",
+			"--json",
+			"--quiet",
+			"-o",
+			outDir,
+		],
+		cwd: process.cwd(),
+		env: {
+			...cleanEnv(),
+			DOCSNAP_ALLOW_TEST_HOST: origin,
+			DOCSNAP_CACHE_DIR: cacheDir,
+		},
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [exitCode, stdout, stderr] = await Promise.all([
+		subprocess.exited,
+		new Response(subprocess.stdout).text(),
+		new Response(subprocess.stderr).text(),
+	]);
+	assert(exitCode === 0, stderr || stdout);
+	assert(stderr.trim() === "", stderr);
+	const cliJson = JSON.parse(stdout) as CliSummary;
+	const summary = JSON.parse(
+		await readFile(join(outDir, "summary.json"), "utf8"),
+	) as CliSummary;
+	assert(cliJson.cache.written === summary.cache.written);
+	assert(cliJson.cache.hits === summary.cache.hits);
+	assert(cliJson.cache.revalidated === summary.cache.revalidated);
+	return summary;
+}
+
 function config(
 	url: string,
 	root: string,
@@ -321,6 +458,26 @@ function page(title: string, body: string) {
 	return `<html><head><title>${title}</title></head><body><main><h1>${title}</h1><p>${body}</p></main></body></html>`;
 }
 
+function webResponse(
+	body: string,
+	contentTypeOrHeaders: string | Record<string, string> = "text/html",
+	status = 200,
+) {
+	const headers =
+		typeof contentTypeOrHeaders === "string"
+			? { "content-type": contentTypeOrHeaders }
+			: { "content-type": "text/html", ...contentTypeOrHeaders };
+	return new Response(body, { status, headers });
+}
+
+function cleanEnv(): Record<string, string> {
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) {
+		if (value !== undefined) env[key] = value;
+	}
+	return env;
+}
+
 function assertConfig(value: unknown): asserts value is Config {
 	assert(
 		typeof value === "object" &&
@@ -330,6 +487,9 @@ function assertConfig(value: unknown): asserts value is Config {
 	);
 }
 
-function assert(condition: unknown): asserts condition {
-	if (!condition) throw new Error("assertion failed");
+function assert(
+	condition: unknown,
+	message = "assertion failed",
+): asserts condition {
+	if (!condition) throw new Error(message);
 }

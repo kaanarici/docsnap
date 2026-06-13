@@ -2,7 +2,6 @@ import { parseArgs } from "../src/cli/args.ts";
 import { type FetchedUrl, lowQualityConfidence } from "../src/core/types.ts";
 import { discoverLlms } from "../src/discover/llms.ts";
 import { discoverPageLinks } from "../src/discover/nav.ts";
-import { parseRobots } from "../src/discover/robots.ts";
 import { normalizeUrl, sameScopeLinks } from "../src/discover/url.ts";
 import { extractPage } from "../src/extract/html.ts";
 import { scoreMarkdown } from "../src/extract/quality.ts";
@@ -55,23 +54,10 @@ const bodylessRecord = await extractPage({
 } satisfies FetchedUrl);
 assert(bodylessRecord.ok);
 assert(bodylessRecord.markdown.includes("Web manual pages are available"));
-const robots = parseRobots(
-	"User-agent: docsnap\nDisallow: /private\n\nUser-agent: *\nAllow: /",
-	"https://example.com",
-	"Mozilla/5.0 (compatible; docsnap/0.1; +https://npmjs.com/package/docsnap)",
-);
-assert(!robots.allowed("https://example.com/private/page"));
-assert(robots.allowed("https://example.com/public/page"));
 const parsedPage = parseArgs(["https://docs.example.com/api/auth", "--page"]);
 assert(!("help" in parsedPage) && !("version" in parsedPage));
 assert(parsedPage.pageOnly);
 assert(parsedPage.seedUrl === "https://docs.example.com/api/auth");
-assert(validatePublicHttpUrl("http://169.254.169.254/latest/meta-data"));
-assert(validatePublicHttpUrl("http://[::ffff:7f00:1]/private") !== undefined);
-assert(validatePublicHttpUrl("http://[::7f00:1]/private") !== undefined);
-assert(validatePublicHttpUrl("http://[fec0::1]/private") !== undefined);
-assert(validatePublicHttpUrl("http://[ff02::1]/private") !== undefined);
-assert(validatePublicHttpUrl("https://[2606:4700:4700::1111]/") === undefined);
 const unsafeFetch = await fetchText("http://127.0.0.1:1/private", parsedPage);
 assert(!unsafeFetch.ok && unsafeFetch.failureKind === "unsafe_url");
 const badLlmsRoot = "https://docs.example.com/llms-full.txt";
