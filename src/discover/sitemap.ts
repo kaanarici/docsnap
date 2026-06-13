@@ -1,6 +1,6 @@
 import { DOMParser } from "linkedom";
 import type { Config } from "../core/types.ts";
-import { fetchText } from "../fetch/fetcher.ts";
+import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
 import { runBounded } from "../fetch/rate-limit.ts";
 import { normalizeUrl, pathInScope } from "./url.ts";
 
@@ -8,6 +8,7 @@ type SitemapOptions = {
 	limit?: number;
 	accept?: (url: string) => boolean;
 	scope?: string;
+	allowResource?: FetchUrlGate | undefined;
 	// only fetch sitemaps explicitly declared in robots.txt — required when the
 	// seed path is robots-disallowed, where probing default sitemap paths would
 	// itself violate the rules while declared sitemaps are an explicit invitation
@@ -76,15 +77,25 @@ async function readSitemap(
 ): Promise<"blocked" | "empty" | "found"> {
 	const before = found.size;
 	if (depth > 3 || found.size >= options.limit) return "empty";
+	if (options.allowResource && !(await options.allowResource(url)))
+		return "blocked";
 	const response = await fetchText(
 		url,
 		config,
 		"application/xml,text/xml,*/*;q=0.8",
+		undefined,
+		options.allowResource,
 	);
 	if (!response.ok)
 		return response.status === 403 || response.failureKind === "blocked"
 			? "blocked"
 			: "empty";
+	if (
+		options.allowResource &&
+		response.finalUrl !== url &&
+		!(await options.allowResource(response.finalUrl))
+	)
+		return "blocked";
 	if (new URL(response.finalUrl).origin !== options.origin) return "empty";
 	if (!response.body.includes("<")) return "empty";
 	const document = new DOMParser().parseFromString(response.body, "text/xml");

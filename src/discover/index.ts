@@ -49,6 +49,9 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 		[inputUrl.origin, seedRobots],
 	]);
 	const llmsOptions: LlmsCorpusOptions = { cache: new Map(), robotsByOrigin };
+	const allowResource = config.ignoreRobots
+		? undefined
+		: (url: string) => resourceAllowed(url, config, robotsByOrigin);
 	if (!seedRobots.allowed(inputSeed)) {
 		if (seedRobots.unreachable) {
 			const { moved, failure } = await canonicalOriginSeed(inputSeed, config);
@@ -95,7 +98,13 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 	}
 	if (inputScope === "/" ? llmsOut.length > 0 : hasCorpus(llmsOut, config))
 		return llmsOut;
-	const seedResponse = await fetchText(inputSeed, config);
+	const seedResponse = await fetchText(
+		inputSeed,
+		config,
+		undefined,
+		undefined,
+		allowResource,
+	);
 	if (!seedResponse.ok) {
 		return [{ url: inputSeed, source: "seed", fetched: seedResponse }];
 	}
@@ -121,7 +130,7 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 			limit: config.max,
 			response: seedResponse,
 			accept: allowed,
-			allowResource: allowed,
+			allowResource,
 		});
 	}
 	const finalSeed = normalizeUrl(seedResponse.finalUrl);
@@ -220,6 +229,7 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 		scope,
 		accept: (url) =>
 			!seen.has(url) && inScope(url, seed, scope) && allowed(url),
+		allowResource: sitemapResourceGate(robots.sitemaps, allowResource),
 	});
 	for (const url of sitemapUrls) {
 		add(url, "sitemap");
@@ -232,19 +242,11 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 
 	if (!richSitemap && out.length < Math.min(config.max, 3)) {
 		for (const feedUrl of feedLinks.slice(0, 2)) {
-			const feedOrigin = new URL(feedUrl).origin;
-			const feedRobots = await robotsForOrigin(
-				feedOrigin,
-				config,
-				robotsByOrigin,
-			);
-			const feedAllowed = (url: string) =>
-				config.ignoreRobots || feedRobots.allowed(url);
-			if (!feedAllowed(feedUrl)) continue;
+			if (allowResource && !(await allowResource(feedUrl))) continue;
 			const feedPages = await discoverFeed(feedUrl, seed, scope, config, {
 				limit: config.max - out.length,
 				accept: (url) => inScope(url, seed, scope) && allowed(url),
-				allowResource: feedAllowed,
+				allowResource,
 			});
 			for (const page of feedPages) {
 				add(page.url, "feed", page.fetched, page.metadata);
@@ -267,7 +269,7 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 			{
 				limit: config.max - out.length,
 				accept: (url) => inScope(url, seed, scope) && allowed(url),
-				allowResource: allowed,
+				allowResource,
 			},
 		)) {
 			add(page.url, page.source, page.fetched, page.metadata);
@@ -282,6 +284,7 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 			robots,
 			config,
 			seedResponse,
+			allowResource,
 		)) {
 			add(page.url, "crawl", page.fetched);
 		}
@@ -297,6 +300,7 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 				scope,
 				accept: (url) =>
 					!seen.has(url) && inScope(url, seed, scope) && allowed(url),
+				allowResource,
 			},
 		);
 		if (assetPages.length > 0) return assetPages;
@@ -365,6 +369,28 @@ async function addLlms(
 	}
 }
 
+async function resourceAllowed(
+	url: string,
+	config: Config,
+	robotsByOrigin: LlmsCorpusOptions["robotsByOrigin"],
+) {
+	if (config.ignoreRobots) return true;
+	const robots = await robotsForOrigin(
+		new URL(url).origin,
+		config,
+		robotsByOrigin,
+	);
+	return robots.allowed(url);
+}
+function sitemapResourceGate(
+	declared: string[],
+	allowResource: ((url: string) => Promise<boolean>) | undefined,
+) {
+	if (!allowResource) return undefined;
+	const declaredSet = new Set(declared);
+	return (url: string) => declaredSet.has(url) || allowResource(url);
+}
+
 function chooseScope(inputScope: string, seed: string, links: string[]) {
 	if (inputScope === "/" || !pathInScope(new URL(seed).pathname, inputScope))
 		return scopeFromSeed(seed);
@@ -412,6 +438,9 @@ async function disallowedSeedDiscovery(
 		llmsOptions,
 	);
 	const seen = new Set(out.map((item) => item.url));
+	const allowResource = config.ignoreRobots
+		? undefined
+		: (url: string) => resourceAllowed(url, config, llmsOptions.robotsByOrigin);
 	if (robots.sitemaps.length > 0 && out.length < config.max) {
 		const sitemapUrls = await discoverSitemaps(
 			inputSeed,
@@ -422,6 +451,7 @@ async function disallowedSeedDiscovery(
 				scope: "/",
 				declaredOnly: true,
 				accept: (url) => !seen.has(url) && robots.allowed(url),
+				allowResource: sitemapResourceGate(robots.sitemaps, allowResource),
 			},
 		);
 		for (const url of sitemapUrls) {

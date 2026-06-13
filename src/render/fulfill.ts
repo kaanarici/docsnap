@@ -1,11 +1,11 @@
-import type { Config } from "../core/types.ts";
+import type { Config, RedirectHop } from "../core/types.ts";
 import { type Cookie, cookieHeader, storeCookies } from "../fetch/cookies.ts";
 import {
 	type FetchTransport,
 	type HttpResponse,
 	requestPublicHttp,
 } from "../fetch/transport.ts";
-import type { RenderPagePolicy } from "./policy.ts";
+import type { RenderPagePolicy, RenderRequest } from "./policy.ts";
 
 export type PausedRenderRequest = {
 	requestId: string;
@@ -41,6 +41,9 @@ export type FetchCommandSender = (
 export type RenderFulfillmentOptions = {
 	transport?: FetchTransport;
 	maxRedirects?: number;
+	pagePolicy?: RenderPagePolicy;
+	resourceType?: string;
+	isNavigationRequest?: boolean;
 };
 
 const defaultMaxRedirects = 8;
@@ -67,7 +70,14 @@ export async function handlePausedRenderRequest(
 		return "failed";
 	}
 	try {
-		const response = await fetchRenderResponse(params.request, config, options);
+		const response = await fetchRenderResponse(params.request, config, {
+			...options,
+			pagePolicy,
+			...(params.resourceType ? { resourceType: params.resourceType } : {}),
+			...(params.isNavigationRequest !== undefined
+				? { isNavigationRequest: params.isNavigationRequest }
+				: {}),
+		});
 		await send("Fetch.fulfillRequest", {
 			requestId: params.requestId,
 			responseCode: response.status,
@@ -92,6 +102,7 @@ export async function fetchRenderResponse(
 	const transport = options.transport ?? requestPublicHttp;
 	const maxRedirects = options.maxRedirects ?? defaultMaxRedirects;
 	const cookies: Cookie[] = [];
+	const redirects: RedirectHop[] = [];
 	const seen = new Set<string>();
 	let current = request.url;
 	for (let redirectCount = 0; ; redirectCount++) {
@@ -102,10 +113,17 @@ export async function fetchRenderResponse(
 		);
 		storeCookies(cookies, current, response);
 		const next = redirectTarget(response, current);
-		if (!next) return fulfillmentFrom(response);
+		if (!next)
+			return fulfillmentFrom(response, current, request.url, redirects);
 		if (redirectCount >= maxRedirects || seen.has(next)) {
 			throw new Error("too many redirects");
 		}
+		const decision = await options.pagePolicy?.decide(
+			policyRequest(request, next, options),
+		);
+		if (decision && !decision.allow) throw new Error(decision.reason);
+		const hop = redirectHop(current, next, response.status);
+		if (hop) redirects.push(hop);
 		seen.add(next);
 		current = next;
 	}
@@ -119,7 +137,7 @@ function requestHeaders(
 ): Record<string, string> {
 	const accept = headerValue(request.headers, "accept") ?? "*/*";
 	const cookie =
-		cookieHeader(cookies, currentUrl) || headerValue(request.headers, "cookie");
+		cookieHeader(cookies, currentUrl) || browserCookie(request, currentUrl);
 	const referer = safeHttpHeaderUrl(headerValue(request.headers, "referer"));
 	return {
 		accept,
@@ -129,23 +147,67 @@ function requestHeaders(
 	};
 }
 
-function fulfillmentFrom(response: HttpResponse) {
+function browserCookie(
+	request: PausedRenderRequest["request"],
+	currentUrl: string,
+): string | undefined {
+	if (currentUrl !== request.url || !sameOrigin(currentUrl, request.url))
+		return;
+	return headerValue(request.headers, "cookie");
+}
+
+function fulfillmentFrom(
+	response: HttpResponse,
+	finalUrl: string,
+	requestUrl: string,
+	redirects: RedirectHop[],
+) {
 	return {
 		status:
 			response.status >= 100 && response.status <= 599 ? response.status : 502,
-		headers: responseHeaders(response),
+		headers: responseHeaders(response, sameOrigin(finalUrl, requestUrl)),
 		body: Buffer.from(response.body).toString("base64"),
+		finalUrl: cleanHttpUrl(finalUrl) ?? requestUrl,
+		redirects,
 	};
 }
 
-function responseHeaders(response: HttpResponse) {
+function responseHeaders(response: HttpResponse, includeSetCookie: boolean) {
 	const headers: Array<{ name: string; value: string }> = [];
 	const contentType = response.headers.get("content-type");
 	if (contentType) headers.push({ name: "content-type", value: contentType });
-	for (const cookie of response.headers.getSetCookie?.() ?? []) {
-		headers.push({ name: "set-cookie", value: cookie });
+	if (includeSetCookie) {
+		for (const cookie of response.headers.getSetCookie?.() ?? []) {
+			headers.push({ name: "set-cookie", value: cookie });
+		}
 	}
 	return headers;
+}
+
+function policyRequest(
+	request: PausedRenderRequest["request"],
+	url: string,
+	options: RenderFulfillmentOptions,
+): RenderRequest {
+	return {
+		url,
+		...(request.method !== undefined ? { method: request.method } : {}),
+		...(options.resourceType ? { resourceType: options.resourceType } : {}),
+		...(options.isNavigationRequest !== undefined
+			? { isNavigationRequest: options.isNavigationRequest }
+			: {}),
+	};
+}
+
+function redirectHop(
+	from: string,
+	to: string,
+	status: number,
+): RedirectHop | undefined {
+	const cleanFrom = cleanHttpUrl(from);
+	const cleanTo = cleanHttpUrl(to);
+	if (!cleanFrom || !cleanTo) return;
+	return { from: cleanFrom, to: cleanTo, type: "http", status };
 }
 
 function redirectTarget(
@@ -161,6 +223,27 @@ function redirectTarget(
 	}
 	next.hash = "";
 	return next.href;
+}
+
+function cleanHttpUrl(raw: string): string | undefined {
+	try {
+		const url = new URL(raw);
+		if (url.protocol !== "http:" && url.protocol !== "https:") return;
+		url.username = "";
+		url.password = "";
+		url.hash = "";
+		return url.href;
+	} catch {
+		return;
+	}
+}
+
+function sameOrigin(left: string, right: string) {
+	try {
+		return new URL(left).origin === new URL(right).origin;
+	} catch {
+		return false;
+	}
 }
 
 async function failRequest(send: FetchCommandSender, requestId: string) {

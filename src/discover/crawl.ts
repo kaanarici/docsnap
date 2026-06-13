@@ -1,5 +1,5 @@
 import type { Config, DiscoveredUrl, FetchResult } from "../core/types.ts";
-import { fetchText } from "../fetch/fetcher.ts";
+import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
 import { runBounded } from "../fetch/rate-limit.ts";
 import { discoverPageLinks } from "./nav.ts";
 import type { Robots } from "./robots.ts";
@@ -12,6 +12,7 @@ export async function crawlScoped(
 	robots: Robots,
 	config: Config,
 	first?: FetchResult,
+	allowResource?: FetchUrlGate,
 ): Promise<DiscoveredUrl[]> {
 	const seen = new Set<string>();
 	const queued = new Set<string>([seed]);
@@ -30,10 +31,18 @@ export async function crawlScoped(
 				key: (url) => new URL(url).origin,
 			},
 			(url) =>
-				url === seed && first ? Promise.resolve(first) : fetchText(url, config),
+				url === seed && first
+					? Promise.resolve(first)
+					: fetchText(url, config, undefined, undefined, allowResource),
 		);
 		for (const response of responses) {
 			if (!response.ok || !response.contentType.toLowerCase().includes("html"))
+				continue;
+			if (
+				allowResource &&
+				response.finalUrl !== response.url &&
+				!(await allowResource(response.finalUrl))
+			)
 				continue;
 			if (response.finalUrl !== seed) {
 				found.push({
