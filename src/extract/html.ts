@@ -92,9 +92,7 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 		};
 	}
 
-	const cleaned = result.body
-		.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-		.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "");
+	const cleaned = stripScriptStyleTags(result.body);
 	const { document } = parseHTML(cleaned);
 	const canonical = resolveCanonical(
 		document.querySelector('link[rel="canonical"]')?.getAttribute("href"),
@@ -269,6 +267,43 @@ function renderTextAsset(title: string, body: string, url: string) {
 	const language = languageFromUrl(url);
 	const fence = body.includes("```") ? "````" : "```";
 	return `# ${title}\n\n${fence}${language}\n${body.trim()}\n${fence}`;
+}
+
+export function stripScriptStyleTags(html: string): string {
+	return stripCompleteHtmlElement(
+		stripCompleteHtmlElement(html, "script"),
+		"style",
+	);
+}
+
+function stripCompleteHtmlElement(html: string, tagName: string): string {
+	const lower = html.toLowerCase();
+	const openToken = `<${tagName}`;
+	const closeToken = `</${tagName}>`;
+	let out = "";
+	let cursor = 0;
+	let index = 0;
+	while (index < html.length) {
+		const start = lower.indexOf(openToken, index);
+		if (start === -1) break;
+		const afterName = start + openToken.length;
+		if (!tagNameBoundary(lower[afterName])) {
+			index = afterName;
+			continue;
+		}
+		const openEnd = html.indexOf(">", afterName);
+		if (openEnd === -1) break;
+		const end = lower.indexOf(closeToken, openEnd + 1);
+		if (end === -1) break;
+		out += html.slice(cursor, start);
+		cursor = end + closeToken.length;
+		index = cursor;
+	}
+	return cursor === 0 ? html : out + html.slice(cursor);
+}
+
+function tagNameBoundary(char: string | undefined) {
+	return char === undefined || /[\s>/]/.test(char);
 }
 
 async function parseWithDefuddle(document: Document, url: string) {
