@@ -1,6 +1,6 @@
 import { DOMParser, parseHTML } from "linkedom";
 import type { Config, DiscoveredUrl, FetchResult } from "../core/types.ts";
-import { fetchText } from "../fetch/fetcher.ts";
+import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
 import { discoverPageLinks } from "./nav.ts";
 import {
 	addDiscovered,
@@ -19,14 +19,14 @@ export type FeedEntry = {
 type FeedDiscoveryOptions = {
 	limit?: number;
 	accept?: (url: string) => boolean;
-	allowResource?: (url: string) => boolean;
+	allowResource?: FetchUrlGate | undefined;
 	response?: FetchResult;
 };
 
 type RelNextOptions = {
 	limit?: number;
 	accept?: (url: string) => boolean;
-	allowResource?: (url: string) => boolean;
+	allowResource?: FetchUrlGate | undefined;
 };
 
 const FEED_ACCEPT =
@@ -78,10 +78,24 @@ export async function discoverFeed(
 	const limit = options.limit ?? Number.POSITIVE_INFINITY;
 	if (limit <= 0) return [];
 	const resourceUrl = normalizeDiscoveryResourceUrl(feedUrl) ?? feedUrl;
-	if (options.allowResource && !options.allowResource(resourceUrl)) return [];
+	if (options.allowResource && !(await options.allowResource(resourceUrl)))
+		return [];
 	const response =
-		options.response ?? (await fetchText(resourceUrl, config, FEED_ACCEPT));
+		options.response ??
+		(await fetchText(
+			resourceUrl,
+			config,
+			FEED_ACCEPT,
+			undefined,
+			options.allowResource,
+		));
 	if (!response.ok || !isFeedResponse(response)) return [];
+	if (
+		options.allowResource &&
+		response.finalUrl !== resourceUrl &&
+		!(await options.allowResource(response.finalUrl))
+	)
+		return [];
 	return feedEntriesToDiscovered(
 		parseFeedEntries(response.body, response.finalUrl),
 		seed,
@@ -111,10 +125,22 @@ export async function discoverRelNextPages(
 		page++
 	) {
 		if (fetched.has(next) || !resourceInScope(next, seed, scope)) break;
-		if (options.allowResource && !options.allowResource(next)) break;
+		if (options.allowResource && !(await options.allowResource(next))) break;
 		fetched.add(next);
-		const response = await fetchText(next, config);
+		const response = await fetchText(
+			next,
+			config,
+			undefined,
+			undefined,
+			options.allowResource,
+		);
 		if (!response.ok || !resourceInScope(response.finalUrl, seed, scope)) break;
+		if (
+			options.allowResource &&
+			response.finalUrl !== next &&
+			!(await options.allowResource(response.finalUrl))
+		)
+			break;
 		for (const link of discoverPageLinks(response.body, response.finalUrl)) {
 			if (!options.accept || options.accept(link)) {
 				addDiscovered(out, seen, link, "crawl", seed, scope);

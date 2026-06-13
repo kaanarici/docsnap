@@ -22,29 +22,36 @@ import { withWritersideTopic } from "./writerside.ts";
 
 const cacheDirEnv = "DOCSNAP_CACHE_DIR";
 let fetchTransport: FetchTransport = requestPublicHttp;
+export type FetchUrlGate = (url: string) => boolean | Promise<boolean>;
 export function setFetchTransportForTest(
 	transport: FetchTransport | undefined,
 ) {
 	fetchTransport = transport ?? requestPublicHttp;
 }
-
 export async function fetchText(
 	url: string,
 	config: Config,
 	accept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 	conditional?: ConditionalRequest,
+	allowUrl?: FetchUrlGate,
 ): Promise<FetchResult> {
-	if (fetchTransport !== requestPublicHttp && !process.env[cacheDirEnv]) {
-		return fetchTextUncached(url, config, accept, conditional);
-	}
-	return fetchWithCache(url, config, accept, conditional, fetchTextUncached);
+	if (fetchTransport !== requestPublicHttp && !process.env[cacheDirEnv])
+		return fetchTextUncached(url, config, accept, conditional, allowUrl);
+	return fetchWithCache(
+		url,
+		config,
+		accept,
+		conditional,
+		fetchTextUncached,
+		allowUrl,
+	);
 }
-
 export async function fetchTextUncached(
 	url: string,
 	config: Config,
 	accept: string,
 	conditional?: ConditionalRequest,
+	allowUrl?: FetchUrlGate,
 ): Promise<FetchResult> {
 	const started = performance.now();
 	let currentUrl = url;
@@ -60,10 +67,21 @@ export async function fetchTextUncached(
 			conditional,
 			started,
 			redirects,
+			allowUrl,
 		);
 		const fallback = routeFallback(result, currentUrl);
 		if (fallback && !triedRouteFallbacks.has(fallback)) {
 			redirects = result.redirects ?? redirects;
+			if (!(await urlAllowed(fallback, allowUrl))) {
+				return fail(
+					url,
+					fallback,
+					result.status,
+					started,
+					"blocked by robots.txt",
+					redirects,
+				);
+			}
 			triedRouteFallbacks.add(fallback);
 			currentUrl = fallback;
 			continue;
@@ -73,6 +91,16 @@ export async function fetchTextUncached(
 		redirects = [...(result.redirects ?? [])];
 		const hop = redirectHop(result.finalUrl, next, "refresh", result.status);
 		if (hop) redirects.push(hop);
+		if (!(await urlAllowed(next, allowUrl))) {
+			return fail(
+				url,
+				next,
+				result.status,
+				started,
+				"blocked by robots.txt",
+				redirects,
+			);
+		}
 		seenRefreshes.add(next);
 		currentUrl = next;
 	}
@@ -94,6 +122,7 @@ async function fetchOnce(
 	conditional: ConditionalRequest | undefined,
 	started: number,
 	redirectsSoFar: RedirectHop[],
+	allowUrl: FetchUrlGate | undefined,
 ): Promise<FetchResult> {
 	let requestUrl = currentUrl;
 	const redirects = [...redirectsSoFar];
@@ -135,6 +164,16 @@ async function fetchOnce(
 				}
 				const hop = redirectHop(requestUrl, redirect, "http", response.status);
 				if (hop) redirects.push(hop);
+				if (!(await urlAllowed(redirect, allowUrl))) {
+					return fail(
+						url,
+						redirect,
+						response.status,
+						started,
+						"blocked by robots.txt",
+						redirects,
+					);
+				}
 				seenRedirects.add(redirect);
 				requestUrl = redirect;
 				attempt = -1;
@@ -218,6 +257,21 @@ async function fetchOnce(
 	return fail(url, currentUrl, 0, started, "fetch failed", redirects);
 }
 
+async function urlAllowed(url: string, allowUrl: FetchUrlGate | undefined) {
+	if (!allowUrl) return true;
+	try {
+		const parsed = new URL(url);
+		if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+			return true;
+	} catch {
+		return true;
+	}
+	try {
+		return await allowUrl(url);
+	} catch {
+		return false;
+	}
+}
 function redirectUrl(
 	response: HttpResponse,
 	base: string,
@@ -419,6 +473,7 @@ export function fetchMany(
 	urls: DiscoveredUrl[],
 	config: Config,
 	conditionalFor?: (item: DiscoveredUrl) => ConditionalRequest | undefined,
+	allowUrl?: FetchUrlGate,
 ): Promise<FetchedUrl[]> {
 	return runBounded(
 		[...urls],
@@ -432,7 +487,13 @@ export function fetchMany(
 			...(item.metadata ? { metadata: item.metadata } : {}),
 			result:
 				item.fetched ??
-				(await fetchText(item.url, config, undefined, conditionalFor?.(item))),
+				(await fetchText(
+					item.url,
+					config,
+					undefined,
+					conditionalFor?.(item),
+					allowUrl,
+				)),
 		}),
 	);
 }

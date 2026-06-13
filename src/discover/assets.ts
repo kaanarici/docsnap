@@ -1,7 +1,7 @@
 import { parseHTML } from "linkedom";
 import { uniqueByWhitespace, whitespaceKey } from "../core/text.ts";
 import type { Config, DiscoveredUrl, FetchResult } from "../core/types.ts";
-import { fetchText } from "../fetch/fetcher.ts";
+import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
 import { runBounded } from "../fetch/rate-limit.ts";
 import { inScope, normalizeUrl } from "./url.ts";
 
@@ -9,6 +9,7 @@ type AssetOptions = {
 	limit: number;
 	scope: string;
 	accept: (url: string) => boolean;
+	allowResource?: FetchUrlGate | undefined;
 };
 
 type AssetRef = {
@@ -19,6 +20,7 @@ type AssetRef = {
 type TextAsset = {
 	url: string;
 	body: string;
+	prefixes: Set<string>;
 };
 
 type RouteEntry = {
@@ -93,16 +95,35 @@ export async function discoverAssetPages(
 			},
 			async (item) => ({
 				item,
-				response: await fetchText(item.url, config, jsAccept),
+				response:
+					options.allowResource && !(await options.allowResource(item.url))
+						? undefined
+						: await fetchText(
+								item.url,
+								config,
+								jsAccept,
+								undefined,
+								options.allowResource,
+							),
 			}),
 		);
 
 		for (const { item, response } of responses) {
-			if (!response.ok) continue;
-			assets.push({ url: item.url, body: response.body });
+			if (!response?.ok) continue;
+			if (
+				options.allowResource &&
+				response.finalUrl !== item.url &&
+				!(await options.allowResource(response.finalUrl))
+			)
+				continue;
+			assets.push({
+				url: response.finalUrl,
+				body: response.body,
+				prefixes: item.prefixes,
+			});
 			for (const entry of importedAssets(
 				response.body,
-				item.url,
+				response.finalUrl,
 				item.prefixes,
 			)) {
 				if (fetched.has(entry.url)) continue;
@@ -113,8 +134,7 @@ export async function discoverAssetPages(
 
 	const pages = new Map<string, DiscoveredUrl>();
 	for (const asset of assets) {
-		const prefixes = prefixesByAsset.get(asset.url) ?? new Set([""]);
-		for (const page of textPages(seed, asset.body, prefixes)) {
+		for (const page of textPages(seed, asset.body, asset.prefixes)) {
 			if (pages.size >= options.limit) break;
 			if (!inScope(page.url, seed, options.scope) || !options.accept(page.url))
 				continue;

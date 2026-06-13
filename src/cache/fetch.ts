@@ -11,11 +11,14 @@ import {
 	writeCacheResult,
 } from "./store.ts";
 
+type UrlGate = (url: string) => boolean | Promise<boolean>;
+
 export type UncachedFetch = (
 	url: string,
 	config: Config,
 	accept: string,
 	conditional?: ConditionalRequest,
+	allowUrl?: UrlGate,
 ) => Promise<FetchResult>;
 
 export async function fetchWithCache(
@@ -24,9 +27,10 @@ export async function fetchWithCache(
 	accept: string,
 	conditional: ConditionalRequest | undefined,
 	uncached: UncachedFetch,
+	allowUrl?: UrlGate,
 ): Promise<FetchResult> {
 	if (conditional || validatePublicHttpUrl(url)) {
-		const result = await uncached(url, config, accept, conditional);
+		const result = await uncached(url, config, accept, conditional, allowUrl);
 		if (
 			!conditional ||
 			!result.ok ||
@@ -42,37 +46,41 @@ export async function fetchWithCache(
 	const request = cacheRequest(url, config, accept);
 	const first = await readCache(config, request);
 	if (first.state === "fresh") {
-		return cachedFetchResult(
+		const result = cachedFetchResult(
 			url,
 			first.entry,
 			first.body,
 			performance.now() - started,
 		);
+		if (await cachedAllowed(result, allowUrl)) return result;
 	}
-	if (first.state === "disabled") return uncached(url, config, accept);
+	if (first.state === "disabled")
+		return uncached(url, config, accept, undefined, allowUrl);
 
 	const lock = await acquireCacheLock(config, first.key);
 	if (!lock) {
 		const afterWait = await readCache(config, request);
 		if (afterWait.state === "fresh") {
-			return cachedFetchResult(
+			const result = cachedFetchResult(
 				url,
 				afterWait.entry,
 				afterWait.body,
 				performance.now() - started,
 			);
+			if (await cachedAllowed(result, allowUrl)) return result;
 		}
-		return uncached(url, config, accept);
+		return uncached(url, config, accept, undefined, allowUrl);
 	}
 	try {
 		const latest = await readCache(config, request, { count: false });
 		if (latest.state === "fresh") {
-			return cachedFetchResult(
+			const result = cachedFetchResult(
 				url,
 				latest.entry,
 				latest.body,
 				performance.now() - started,
 			);
+			if (await cachedAllowed(result, allowUrl)) return result;
 		}
 		const stale =
 			latest.state === "stale"
@@ -85,6 +93,7 @@ export async function fetchWithCache(
 			config,
 			accept,
 			stale ? cacheConditional(stale.entry) : undefined,
+			allowUrl,
 		);
 		if (isNotModifiedResult(result) && stale) {
 			const entry = await refreshCacheEntry(
@@ -104,6 +113,20 @@ export async function fetchWithCache(
 		return result;
 	} finally {
 		await releaseDirLock(lock);
+	}
+}
+
+async function cachedAllowed(
+	result: FetchResult,
+	allowUrl: UrlGate | undefined,
+) {
+	if (!allowUrl) return true;
+	if (result.url === result.finalUrl && (result.redirects?.length ?? 0) === 0)
+		return true;
+	try {
+		return await allowUrl(result.finalUrl);
+	} catch {
+		return false;
 	}
 }
 

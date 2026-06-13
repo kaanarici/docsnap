@@ -56,7 +56,6 @@ import { urlWithoutFragmentAndQuery } from "./url.ts";
 
 type Progress = (message: string) => void;
 const backfillExtraLimit = 8;
-
 export async function runPipeline(
 	config: Config,
 	progress?: Progress,
@@ -161,13 +160,11 @@ export async function runPipeline(
 			cacheSummary(config),
 		);
 		await writeRunFiles(finalRecords, summary, config);
-
 		return { records: finalRecords, summary };
 	} finally {
 		await closeRenderState(renderState);
 	}
 }
-
 async function fetchAndExtract(
 	discovered: DiscoveredUrl[],
 	config: Config,
@@ -175,13 +172,26 @@ async function fetchAndExtract(
 	refresh: RefreshCounters,
 	renderState: RenderState,
 ): Promise<{ records: PageRecord[]; rendered: FetchResult[] }> {
-	const fetched = await fetchMany(discovered, config, (item) =>
-		conditionalForPrior(prior, item),
+	const robotsByOrigin = new Map<string, Robots>();
+	const allowUrl = config.ignoreRobots
+		? undefined
+		: (url: string) => allowedByRobots(url, config, robotsByOrigin);
+	const fetched = await fetchMany(
+		discovered,
+		config,
+		(item) => conditionalForPrior(prior, item),
+		allowUrl,
 	);
 	const reused: PageRecord[] = [];
 	const extractable: FetchedUrl[] = [];
 	for (const item of fetched) {
-		const recovered = await recoverNotModified(item, config, prior, refresh);
+		const recovered = await recoverNotModified(
+			item,
+			config,
+			prior,
+			refresh,
+			allowUrl,
+		);
 		if (recovered) reused.push(recovered);
 		else extractable.push(rejectNonPageFinal(item));
 	}
@@ -201,12 +211,12 @@ async function fetchAndExtract(
 		rendered: rendered.results,
 	};
 }
-
 async function recoverNotModified(
 	item: FetchedUrl,
 	config: Config,
 	prior: PriorState,
 	refresh: RefreshCounters,
+	allowUrl: ((url: string) => Promise<boolean>) | undefined,
 ): Promise<PageRecord | undefined> {
 	const result = item.result;
 	if (!result.ok || !result.notModified) return undefined;
@@ -225,10 +235,15 @@ async function recoverNotModified(
 		return mergeRecoveredDiscovery(recovered, item);
 	}
 	refresh.fallbackRefetches++;
-	item.result = await fetchText(result.url, config);
+	item.result = await fetchText(
+		result.url,
+		config,
+		undefined,
+		undefined,
+		allowUrl,
+	);
 	return undefined;
 }
-
 async function applyRendering(
 	inputs: FetchedUrl[],
 	staticRecords: PageRecord[],
@@ -281,7 +296,6 @@ async function applyRendering(
 	}
 	return { records: output, results: renderedResults };
 }
-
 function renderReason(
 	input: FetchedUrl,
 	record: PageRecord,
@@ -300,7 +314,6 @@ function renderReason(
 	}
 	return staticShellReason(input, record);
 }
-
 function staticShellReason(
 	input: FetchedUrl,
 	record: PageRecord,
@@ -318,7 +331,6 @@ function staticShellReason(
 	if (lowConfidenceShell) return "low-confidence-shell";
 	return staticAppShell ? "app-shell" : undefined;
 }
-
 function isHtmlResult(result: FetchResult) {
 	return (
 		result.ok &&
@@ -327,7 +339,6 @@ function isHtmlResult(result: FetchResult) {
 			/<(?:html|body|script)\b/i.test(result.body))
 	);
 }
-
 function shouldUseRenderedRecord(
 	staticRecord: PageRecord,
 	renderedRecord: PageRecord,
@@ -366,7 +377,7 @@ async function renderedLinkBackfill(
 				seen.has(candidateKey(url)) ||
 				!inScope(url, seed, scope) ||
 				validatePublicHttpUrl(url) ||
-				!(await allowedRenderedBackfill(url, config, robotsByOrigin))
+				!(await allowedByRobots(url, config, robotsByOrigin))
 			) {
 				continue;
 			}
@@ -376,8 +387,7 @@ async function renderedLinkBackfill(
 	}
 	return out;
 }
-
-async function allowedRenderedBackfill(
+async function allowedByRobots(
 	url: string,
 	config: Config,
 	robotsByOrigin: Map<string, Robots>,
@@ -389,7 +399,6 @@ async function allowedRenderedBackfill(
 	robotsByOrigin.set(origin, robots);
 	return robots.allowed(url);
 }
-
 function mergeRecoveredDiscovery(
 	recovered: PageSuccess,
 	item: FetchedUrl,
@@ -399,10 +408,8 @@ function mergeRecoveredDiscovery(
 		...(item.metadata ?? {}),
 		source: item.source,
 	};
-	// reuse the prior record byte-for-byte only when nothing rendered changed
 	return renderPage(current) === renderPage(recovered) ? recovered : current;
 }
-
 function shouldBackfill(
 	config: Config,
 	records: PageRecord[],
@@ -416,7 +423,6 @@ function shouldBackfill(
 		records.some((record) => !record.ok && record.failureKind === "empty")
 	);
 }
-
 async function backfillCandidates(config: Config, seen: Set<string>) {
 	const discovered = await discover({
 		...config,
@@ -432,12 +438,10 @@ async function backfillCandidates(config: Config, seen: Set<string>) {
 	}
 	return out;
 }
-
 function outputCandidates(records: PageRecord[], config: Config) {
 	const ok = records.filter(isPageSuccess);
 	return config.maxExplicit ? ok.slice(0, config.max) : ok;
 }
-
 async function preserveFetchedAtForUnchangedOutput(
 	records: PageRecord[],
 	prior: PriorState,
@@ -465,14 +469,12 @@ async function preserveFetchedAtForUnchangedOutput(
 		}),
 	);
 }
-
 function candidateKey(raw: string) {
 	const url = new URL(urlWithoutFragmentAndQuery(raw));
 	if (url.pathname !== "/") url.pathname = url.pathname.replace(/\/+$/, "");
 	url.pathname = url.pathname.replace(/\.(?:html?|mdx?|txt)$/i, "");
 	return url.href;
 }
-
 function rejectNonPageFinal(input: FetchedUrl): FetchedUrl {
 	const { result } = input;
 	if (!result.ok || normalizeUrl(result.finalUrl)) return input;
