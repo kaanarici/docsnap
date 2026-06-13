@@ -96,12 +96,7 @@ function runOk(summary: RunSummary, config: Config) {
 function jsonResult(summary: RunSummary, config: Config, ok: boolean) {
 	return {
 		ok,
-		status: summary.status,
-		seedUrl: summary.seedUrl,
-		outDir: summary.outDir,
-		dryRun: summary.dryRun,
-		userAgent: summary.userAgent,
-		...(summary.ignoreRobots ? { ignoreRobots: true } : {}),
+		...summary,
 		paths: config.dryRun
 			? undefined
 			: {
@@ -110,34 +105,9 @@ function jsonResult(summary: RunSummary, config: Config, ok: boolean) {
 					agentReadme: `${summary.outDir}/${runFiles.agentReadme}`,
 					tree: `${summary.outDir}/${runFiles.tree}`,
 				},
-		written: summary.written,
-		failed: summary.failed,
-		lowQuality: summary.lowQuality,
-		qualityWarnings: summary.qualityWarnings,
-		injectionSignalPages: summary.injectionSignalPages,
-		byInjectionSignal: summary.byInjectionSignal,
-		hostRedirects: summary.hostRedirects,
-		redirectedHosts: summary.redirectedHosts,
-		max: summary.max,
-		maxAppliesTo: summary.maxAppliesTo,
-		maxReached: summary.maxReached,
-		discovered: summary.discovered,
-		deduped: summary.deduped,
-		elapsedMs: summary.elapsedMs,
-		firstPageMs: summary.firstPageMs,
-		pagesPerSecond: summary.pagesPerSecond,
-		bySource: summary.bySource,
-		byFailureKind: summary.byFailureKind,
-		errors: summary.errors,
-		render: summary.render,
-		refresh: summary.refresh,
-		cache: summary.cache,
 		...(config.agentFiles
 			? { agentFilesUpdated: summary.agentFilesUpdated ?? [] }
 			: {}),
-		rootHash: summary.rootHash,
-		renderedFiles: summary.renderedFiles,
-		renderedBytes: summary.renderedBytes,
 	};
 }
 
