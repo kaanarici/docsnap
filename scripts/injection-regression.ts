@@ -18,6 +18,13 @@ import {
 	scanMarkdownForInjectionSignals,
 	scanRawHtmlForInjectionSignals,
 } from "../src/security/injection.ts";
+import { captureOutput } from "./capture-output.ts";
+import {
+	assertFramedUntrustedWebContent,
+	assertSignalsInclude,
+	frontmatterFields,
+	parseSignalField,
+} from "./injection-assertions.ts";
 
 const tagText = String.fromCodePoint(0xe0069, 0xe0067, 0xe006e);
 const bidi = "\u202e";
@@ -256,22 +263,36 @@ const manifest = (await readFile(join(outDir, "manifest.jsonl"), "utf8"))
 const entry = manifest.find((record) => record.ok);
 assert(entry);
 assert(summary.injectionSignalPages === 1);
-assert(
-	JSON.stringify(entry.injectionSignals) ===
-		JSON.stringify([
-			"unicode-tag-text",
-			"bidi-control",
-			"ai-directed-instruction",
-		]),
-);
-for (const signal of entry.injectionSignals) {
+const expectedCliSignals: InjectionSignal[] = [
+	"unicode-tag-text",
+	"bidi-control",
+	"ai-directed-instruction",
+];
+assertSignalsInclude(entry.injectionSignals, expectedCliSignals);
+for (const signal of expectedCliSignals) {
 	assert(summary.byInjectionSignal[signal] === 1);
 	assert(cliJson.byInjectionSignal[signal] === 1);
 }
 const page = await readFile(join(outDir, entry.outputPath), "utf8");
-assert(page.includes("fetchedAt: "));
+const frontmatter = frontmatterFields(page);
+const fetchedAtField = "fetchedAt";
+const signalsField = "injectionSignals";
 assert(
-	page.includes(`injectionSignals: ${JSON.stringify(entry.injectionSignals)}`),
+	typeof frontmatter[fetchedAtField] === "string" &&
+		frontmatter[fetchedAtField],
+);
+assertSignalsInclude(
+	parseSignalField(frontmatter[signalsField]),
+	expectedCliSignals,
+);
+assertFramedUntrustedWebContent(
+	{
+		sourceUrl: entry.url,
+		corpusPath: join(outDir, entry.outputPath),
+		injectionSignals: entry.injectionSignals,
+		body: page,
+	},
+	expectedCliSignals,
 );
 assert(page.includes(tagText));
 assert(page.includes(bidi));
@@ -460,31 +481,6 @@ async function manifestEntries(outDir: string): Promise<ManifestEntry[]> {
 		.trim()
 		.split("\n")
 		.map((line) => JSON.parse(line) as ManifestEntry);
-}
-
-async function captureOutput(run: () => Promise<void>) {
-	const originalStdout = process.stdout.write;
-	const originalStderr = process.stderr.write;
-	const originalExitCode = process.exitCode;
-	let stdout = "";
-	let stderr = "";
-	process.stdout.write = ((chunk: string | Uint8Array) => {
-		stdout += chunk.toString();
-		return true;
-	}) as typeof process.stdout.write;
-	process.stderr.write = ((chunk: string | Uint8Array) => {
-		stderr += chunk.toString();
-		return true;
-	}) as typeof process.stderr.write;
-	process.exitCode = undefined;
-	try {
-		await run();
-		return { stdout, stderr, exitCode: process.exitCode };
-	} finally {
-		process.stdout.write = originalStdout;
-		process.stderr.write = originalStderr;
-		process.exitCode = originalExitCode ?? 0;
-	}
 }
 
 function assert(

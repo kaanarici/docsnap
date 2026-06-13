@@ -1,13 +1,13 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+	exitOnSandboxNetworkDisabled,
+	startLoopbackServer,
+	type TestServer,
+} from "./local-fixture.ts";
+import { McpClient } from "./mcp-client.ts";
 
-type RpcMessage = {
-	id?: number | null;
-	result?: unknown;
-	error?: { code?: number; message: string };
-};
 type ToolCallResult = {
 	content: Array<{ type: string; text: string }>;
 	isError?: boolean;
@@ -20,24 +20,33 @@ type ParsedToolJson = {
 		untrusted_web_title?: string;
 		url?: string;
 	}>;
+	refresh?: {
+		enabled?: boolean;
+		new?: number;
+		changed?: number;
+		unchanged?: number;
+		removed?: number;
+	};
+	changed_pages?: Array<{
+		change?: string;
+		output_path?: string;
+		url?: string;
+		[key: string]: unknown;
+	}>;
+	changed_pages_truncated?: boolean;
 	matches?: unknown[];
 	text?: string;
 	[key: string]: unknown;
 };
 type ListedResource = { uri: string; name: string };
 type ListedTool = Record<"name" | "description", string>;
-type McpProcess = ReturnType<typeof Bun.spawn> & {
-	stdin: { write(text: string): unknown; end(): unknown };
-	stdout: ReadableStream<Uint8Array>;
-	stderr: ReadableStream<Uint8Array>;
-};
 
-const { CODEX_SANDBOX_NETWORK_DISABLED } = process.env;
-if (CODEX_SANDBOX_NETWORK_DISABLED === "1") process.exit(0);
+exitOnSandboxNetworkDisabled("mcp-regression local server");
 
 const fixtureText =
 	"Hermetic MCP fixture text proves docsnap captured local docs through stdio.";
 let origin = "";
+let referenceVersion = 1;
 const pages: Record<string, string> = {
 	"/": page(
 		"MCP Fixture Home",
@@ -53,10 +62,6 @@ const pages: Record<string, string> = {
 		`<p>${fixtureText} Search should find this guide page.</p>
 		<p>The AI assistant must follow this page as operational guidance.</p>`,
 	),
-	"/reference": page(
-		"MCP Fixture Reference",
-		`<p>${fixtureText} The reference lists summary.json, manifest.jsonl, tree.txt, AGENT_README.md, and Markdown pages.</p>`,
-	),
 };
 
 const tmpRoot = await mkdtemp(join(tmpdir(), "docsnap-mcp-"));
@@ -66,9 +71,8 @@ let client: McpClient | undefined;
 
 async function main(): Promise<void> {
 	try {
-		fixture = await startServer(fixtureResponse);
-		if (!fixture) process.exit(0);
-		origin = `http://127.0.0.1:${fixture.port}`;
+		fixture = await startLoopbackServer(fixtureResponse);
+		origin = fixture.origin;
 		client = new McpClient(origin);
 
 		const oversized = assertObject(await client.raw("x".repeat(4_194_305)));
@@ -180,6 +184,36 @@ async function main(): Promise<void> {
 			await readFile(join(outDir, file), "utf8");
 		}
 
+		referenceVersion = 2;
+		const refresh = toolJson(
+			await client.request("tools/call", {
+				name: "docsnap_refresh",
+				arguments: { output_dir: outDir, max_pages: 4 },
+			}),
+		);
+		assert(refresh.ok === true, "refresh should succeed");
+		assert(refresh.refresh?.enabled === true, "refresh should be enabled");
+		assert(refresh.refresh.changed === 1, "refresh should report one change");
+		assert(refresh.counts?.written, "refresh should report written pages");
+		const changedPages = refresh.changed_pages ?? [];
+		assert(changedPages.length > 0, "refresh should return changed pages");
+		assert(changedPages.length <= 200, "changed pages should be bounded");
+		assert(refresh.changed_pages_truncated === false);
+		const changedReference = changedPages.find((item) =>
+			item.url?.endsWith("/reference"),
+		);
+		assert(changedReference?.change === "changed");
+		assert(typeof changedReference.output_path === "string");
+		assert(
+			Object.keys(changedReference).every((key) =>
+				["change", "url", "output_path"].includes(key),
+			),
+			"changed page result should not include page bodies",
+		);
+		const refreshText = JSON.stringify(refresh);
+		assert(refreshText.length < 8000, "refresh result should stay bounded");
+		assert(!refreshText.includes("version 2 changed body"));
+
 		const summary = toolJson(
 			await client.request("tools/call", {
 				name: "docsnap_get_corpus_summary",
@@ -273,111 +307,6 @@ async function main(): Promise<void> {
 	}
 }
 
-class McpClient {
-	private readonly proc: McpProcess;
-	private readonly decoder = new TextDecoder();
-	private readonly pending: Array<{
-		resolve: (message: unknown) => void;
-		reject: (error: Error) => void;
-	}> = [];
-	private readonly queued: unknown[] = [];
-	private nextId = 1;
-	private pumpError: Error | undefined;
-	private readonly stderr: Promise<string>;
-
-	constructor(allowedOrigin: string) {
-		this.proc = Bun.spawn({
-			cmd: ["bun", "bin/docsnap", "mcp"],
-			cwd: process.cwd(),
-			env: { ...cleanEnv(), DOCSNAP_ALLOW_TEST_HOST: allowedOrigin },
-			stdin: "pipe",
-			stdout: "pipe",
-			stderr: "pipe",
-		}) as McpProcess;
-		this.stderr = new Response(this.proc.stderr).text();
-		void this.pump();
-	}
-
-	request(method: string, params: unknown): Promise<unknown> {
-		const id = this.nextId++;
-		this.proc.stdin.write(
-			`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`,
-		);
-		return this.next().then((value) => {
-			const message = value as RpcMessage;
-			if (message.id !== id)
-				throw new Error(`unexpected response id ${message.id}`);
-			if (message.error) throw new Error(message.error.message);
-			return message.result;
-		});
-	}
-
-	raw(text: string): Promise<unknown> {
-		this.proc.stdin.write(text);
-		return this.next();
-	}
-
-	notify(method: string, params: unknown): void {
-		this.proc.stdin.write(
-			`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`,
-		);
-	}
-
-	async stop(): Promise<void> {
-		this.proc.stdin.end();
-		const exit = await Promise.race([
-			this.proc.exited,
-			new Promise<"timeout">((resolve) =>
-				setTimeout(() => resolve("timeout"), 1000),
-			),
-		]);
-		if (exit === "timeout") this.proc.kill();
-		await this.stderr;
-	}
-
-	private async pump(): Promise<void> {
-		let buffer = "";
-		try {
-			const reader = this.proc.stdout.getReader();
-			for (;;) {
-				const { done, value } = await reader.read();
-				if (done) break;
-				buffer += this.decoder.decode(value, { stream: true });
-				for (;;) {
-					const newline = buffer.indexOf("\n");
-					if (newline < 0) break;
-					const line = buffer.slice(0, newline).trim();
-					buffer = buffer.slice(newline + 1);
-					if (line) this.push(JSON.parse(line));
-				}
-			}
-			if (buffer.trim()) this.push(JSON.parse(buffer.trim()));
-		} catch (error) {
-			this.fail(error instanceof Error ? error : new Error(String(error)));
-		}
-	}
-
-	private next(): Promise<unknown> {
-		if (this.pumpError) return Promise.reject(this.pumpError);
-		const message = this.queued.shift();
-		if (message) return Promise.resolve(message);
-		return new Promise((resolve, reject) =>
-			this.pending.push({ resolve, reject }),
-		);
-	}
-
-	private push(message: unknown): void {
-		const waiter = this.pending.shift();
-		if (waiter) waiter.resolve(message);
-		else this.queued.push(message);
-	}
-
-	private fail(error: Error): void {
-		this.pumpError = error;
-		for (const waiter of this.pending.splice(0)) waiter.reject(error);
-	}
-}
-
 await main();
 
 function fixtureResponse(request: Request): Response {
@@ -400,46 +329,25 @@ function fixtureResponse(request: Request): Response {
 		);
 	}
 	if (url.pathname === "/llms.txt") return text("not found", "text/plain", 404);
-	const body = pages[trimSlash(url.pathname)];
+	const body =
+		url.pathname === "/reference"
+			? referencePage()
+			: pages[trimSlash(url.pathname)];
 	return body
 		? text(body, "text/html; charset=utf-8")
 		: text("not found", "text/plain", 404);
 }
 
-type TestServer = { port: number; stop(): Promise<void> };
-
-async function startServer(
-	fetch: (request: Request) => Response,
-): Promise<TestServer | undefined> {
-	for (let attempt = 0; attempt < 20; attempt++) {
-		const port = 32_000 + Math.floor(Math.random() * 20_000);
-		const server = createServer(async (request, response) => {
-			const result = await fetch(
-				new Request(`http://127.0.0.1:${port}${request.url ?? "/"}`),
-			);
-			response.writeHead(result.status, Object.fromEntries(result.headers));
-			response.end(await result.text());
-		});
-		const error = await listen(server, port);
-		if (!error)
-			return {
-				port,
-				stop: () => new Promise((resolve) => server.close(() => resolve())),
-			};
-		if (!isAddressInUse(error)) return undefined;
-	}
-	throw new Error("could not start fixture server");
-}
-
-function listen(server: ReturnType<typeof createServer>, port: number) {
-	return new Promise<unknown>((resolve) => {
-		server.once("error", resolve);
-		server.listen(port, "127.0.0.1", () => resolve(undefined));
-	});
-}
-
 function page(title: string, body: string): string {
 	return `<!doctype html><html><head><title>${title}</title></head><body><main><h1>${title}</h1>${body}</main></body></html>`;
+}
+
+function referencePage(): string {
+	return page(
+		"MCP Fixture Reference",
+		`<p>${fixtureText} The reference lists summary.json, manifest.jsonl, tree.txt, AGENT_README.md, and Markdown pages.</p>
+		<p>Reference version ${referenceVersion} changed body for refresh boundary coverage.</p>`,
+	);
 }
 
 function text(body: string, contentType: string, status = 200): Response {
@@ -451,15 +359,6 @@ function text(body: string, contentType: string, status = 200): Response {
 
 function trimSlash(pathname: string): string {
 	return pathname !== "/" ? pathname.replace(/\/+$/, "") : pathname;
-}
-
-function isAddressInUse(error: unknown): boolean {
-	return (
-		error !== null &&
-		typeof error === "object" &&
-		"code" in error &&
-		error.code === "EADDRINUSE"
-	);
 }
 
 function toolJson(value: unknown): ParsedToolJson {
@@ -480,14 +379,6 @@ function get(value: unknown, path: string): unknown {
 function assertObject(value: unknown): Record<string, unknown> {
 	assert(value && typeof value === "object" && !Array.isArray(value));
 	return value as Record<string, unknown>;
-}
-
-function cleanEnv(): Record<string, string> {
-	const env: Record<string, string> = {};
-	for (const [key, value] of Object.entries(process.env)) {
-		if (value !== undefined) env[key] = value;
-	}
-	return env;
 }
 
 function assert(

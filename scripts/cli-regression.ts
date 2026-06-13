@@ -1,8 +1,12 @@
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
-import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { parseArgs } from "../src/cli/args.ts";
+import {
+	exitOnSandboxNetworkDisabled,
+	startLoopbackServer,
+	type TestServer,
+} from "./local-fixture.ts";
 
 type CliResult = Summary & {
 	ok: boolean;
@@ -33,8 +37,7 @@ type ManifestRecord = {
 
 const fixtureText =
 	"Hermetic CLI fixture text proves the real docsnap binary fetched local docs.";
-const { CODEX_SANDBOX_NETWORK_DISABLED } = process.env;
-if (CODEX_SANDBOX_NETWORK_DISABLED === "1") process.exit(0);
+exitOnSandboxNetworkDisabled("cli-regression local server");
 
 const pages: Record<string, string> = {
 	"/": page(
@@ -72,66 +75,64 @@ try {
 	const help = parseArgs([]);
 	assert("help" in help);
 	assert(readmeUsage(await readFile("README.md", "utf8")) === help.help);
-	server = await startServer((request) => fixtureResponse(request));
-	if (server) {
-		origin = `http://127.0.0.1:${server.port}`;
-		const result = await runCli(origin, outDir);
-		assert(result.ok);
-		assert(result.written > 0);
-		assert(result.outDir === outDir);
-		assert(Boolean(result.paths));
+	server = await startLoopbackServer(fixtureResponse);
+	origin = server.origin;
+	const result = await runCli(origin, outDir);
+	assert(result.ok);
+	assert(result.written > 0);
+	assert(result.outDir === outDir);
+	assert(Boolean(result.paths));
 
-		const [summaryText, manifestText] = await Promise.all([
-			readFile(join(outDir, "summary.json"), "utf8"),
-			readFile(join(outDir, "manifest.jsonl"), "utf8"),
-			readFile(join(outDir, "tree.txt"), "utf8"),
-			readFile(join(outDir, "AGENT_README.md"), "utf8"),
-		]);
-		const summary = JSON.parse(summaryText) as Summary;
-		const manifest = manifestText
-			.trim()
-			.split("\n")
-			.filter(Boolean)
-			.map((line) => JSON.parse(line) as ManifestRecord);
+	const [summaryText, manifestText] = await Promise.all([
+		readFile(join(outDir, "summary.json"), "utf8"),
+		readFile(join(outDir, "manifest.jsonl"), "utf8"),
+		readFile(join(outDir, "tree.txt"), "utf8"),
+		readFile(join(outDir, "AGENT_README.md"), "utf8"),
+	]);
+	const summary = JSON.parse(summaryText) as Summary;
+	const manifest = manifestText
+		.trim()
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line) as ManifestRecord);
 
-		assert(
-			summary.written === manifest.filter((record) => record.outputPath).length,
-		);
-		assert(summary.failed === manifest.filter((record) => !record.ok).length);
-		assert(summary.written + summary.failed === manifest.length);
-		assert(result.written === summary.written);
-		assert(result.failed === summary.failed);
-		assert(result.byExtractor.html === summary.byExtractor.html);
-		assert("byInlineStateSource" in result);
-		assert(
-			JSON.stringify(result.byInlineStateSource) ===
-				JSON.stringify(summary.byInlineStateSource),
-		);
+	assert(
+		summary.written === manifest.filter((record) => record.outputPath).length,
+	);
+	assert(summary.failed === manifest.filter((record) => !record.ok).length);
+	assert(summary.written + summary.failed === manifest.length);
+	assert(result.written === summary.written);
+	assert(result.failed === summary.failed);
+	assert(result.byExtractor.html === summary.byExtractor.html);
+	assert("byInlineStateSource" in result);
+	assert(
+		JSON.stringify(result.byInlineStateSource) ===
+			JSON.stringify(summary.byInlineStateSource),
+	);
 
-		const missing = manifest.find((record) => record.url.endsWith("/missing"));
-		assert(missing?.ok === false);
-		assert(missing.failureKind === "not_found");
-		assert(summary.byFailureKind.not_found === 1);
-		assert(summary.errors.some((error) => error.url.endsWith("/missing")));
+	const missing = manifest.find((record) => record.url.endsWith("/missing"));
+	assert(missing?.ok === false);
+	assert(missing.failureKind === "not_found");
+	assert(summary.byFailureKind.not_found === 1);
+	assert(summary.errors.some((error) => error.url.endsWith("/missing")));
 
-		const files = await listFiles(outDir);
-		for (const file of [
-			"summary.json",
-			"manifest.jsonl",
-			"tree.txt",
-			"AGENT_README.md",
-		]) {
-			assert(files.includes(file));
-		}
-		const pageFiles = files.filter(
-			(file) => file.endsWith(".md") && file !== "AGENT_README.md",
-		);
-		assert(pageFiles.length > 0);
-		const capturedPage = await readFile(join(outDir, pageFiles[0]!), "utf8");
-		assert(capturedPage.includes(fixtureText));
+	const files = await listFiles(outDir);
+	for (const file of [
+		"summary.json",
+		"manifest.jsonl",
+		"tree.txt",
+		"AGENT_README.md",
+	]) {
+		assert(files.includes(file));
 	}
+	const pageFiles = files.filter(
+		(file) => file.endsWith(".md") && file !== "AGENT_README.md",
+	);
+	assert(pageFiles.length > 0);
+	const capturedPage = await readFile(join(outDir, pageFiles[0]!), "utf8");
+	assert(capturedPage.includes(fixtureText));
 } finally {
-	await server?.stop(true);
+	await server?.stop();
 	await rm(tmpRoot, { recursive: true, force: true });
 }
 
@@ -196,58 +197,6 @@ function fixtureResponse(request: Request): Response {
 	const body = pages[trimSlash(url.pathname)];
 	if (!body) return text("not found", "text/plain", 404);
 	return text(body, "text/html; charset=utf-8");
-}
-
-type TestServer = {
-	port: number;
-	stop(force?: boolean): Promise<void>;
-};
-
-async function startServer(
-	fetch: (request: Request) => Response,
-): Promise<TestServer | undefined> {
-	let lastError: unknown;
-	for (let attempt = 0; attempt < 20; attempt++) {
-		const port = 32_000 + Math.floor(Math.random() * 20_000);
-		const server = createServer(async (request, response) => {
-			const result = await fetch(
-				new Request(`http://127.0.0.1:${port}${request.url ?? "/"}`),
-			);
-			response.writeHead(result.status, Object.fromEntries(result.headers));
-			response.end(await result.text());
-		});
-		const error = await listen(server, port);
-		if (!error) {
-			return {
-				port,
-				stop: () => new Promise((resolve) => server.close(() => resolve())),
-			};
-		}
-		lastError = error;
-		if (!isAddressInUse(error)) return undefined;
-	}
-	throw lastError instanceof Error ? lastError : new Error(String(lastError));
-}
-
-function listen(server: ReturnType<typeof createServer>, port: number) {
-	return new Promise<unknown>((resolve) => {
-		server.once("error", resolve);
-		try {
-			server.listen(port, "127.0.0.1", () => resolve(undefined));
-		} catch (error) {
-			resolve(error);
-		}
-	});
-}
-
-function isAddressInUse(error: unknown): boolean {
-	return (
-		(error !== null &&
-			typeof error === "object" &&
-			"code" in error &&
-			error.code === "EADDRINUSE") ||
-		/port .+ in use|EADDRINUSE/i.test(String(error))
-	);
 }
 
 function page(title: string, body: string): string {
