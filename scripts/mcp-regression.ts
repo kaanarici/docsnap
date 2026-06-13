@@ -24,6 +24,8 @@ type ParsedToolJson = {
 	text?: string;
 	[key: string]: unknown;
 };
+type ListedResource = { uri: string; name: string };
+type ListedTool = Record<"name" | "description", string>;
 type McpProcess = ReturnType<typeof Bun.spawn> & {
 	stdin: { write(text: string): unknown; end(): unknown };
 	stdout: ReadableStream<Uint8Array>;
@@ -91,11 +93,14 @@ async function main(): Promise<void> {
 		assert(Array.isArray(batch) && batch.length === 2, "batch returns array");
 
 		const outsideDir = join(tmpRoot, "outside-corpus");
+		const outsideSummary = `${JSON.stringify({
+			seedUrl: `${origin}/`,
+			outDir: "outside refresh secret",
+			max: 1,
+			maxAppliesTo: "all",
+		})}\n`;
 		await mkdir(outsideDir, { recursive: true });
-		await writeFile(
-			join(outsideDir, "summary.json"),
-			'{"seedUrl":"outside secret","outDir":"outside secret"}',
-		);
+		await writeFile(join(outsideDir, "summary.json"), outsideSummary);
 		await writeFile(join(outsideDir, "manifest.jsonl"), "");
 		const escaped = (await client.request("tools/call", {
 			name: "docsnap_get_corpus_summary",
@@ -104,8 +109,20 @@ async function main(): Promise<void> {
 		const escapedText = escaped.content[0]?.text ?? "";
 		assert(escaped.isError === true, "outside output_dir should be rejected");
 		assert(escapedText.includes("under the MCP server cwd"));
-		assert(!escapedText.includes("outside secret"));
+		assert(!escapedText.includes("outside refresh secret"));
 		assert(!escapedText.includes(outsideDir));
+		const escapedRefresh = (await client.request("tools/call", {
+			name: "docsnap_refresh",
+			arguments: { output_dir: outsideDir },
+		})) as ToolCallResult;
+		const escapedRefreshText = escapedRefresh.content[0]?.text ?? "";
+		assert(escapedRefresh.isError === true);
+		assert(escapedRefreshText.includes("under the MCP server cwd"));
+		assert(!escapedRefreshText.includes("outside refresh secret"));
+		assert(
+			(await readFile(join(outsideDir, "summary.json"), "utf8")) ===
+				outsideSummary,
+		);
 		const escapedResource = assertObject(
 			await client.raw(
 				`${JSON.stringify({
@@ -126,14 +143,11 @@ async function main(): Promise<void> {
 		);
 
 		const toolsList = assertObject(await client.request("tools/list", {}));
-		const tools = prop(toolsList, "tools") as Array<{
-			name: string;
-			description: string;
-			inputSchema: unknown;
-		}>;
+		const tools = (toolsList as { tools: ListedTool[] }).tools;
 		assert(tools.length === 7, "expected seven tools");
 		assert(tools.every((tool) => tool.name.startsWith("docsnap_")));
 		assert(tools.every((tool) => tool.description.includes("Do not use")));
+		assert(!JSON.stringify(tools).includes("response_format"));
 		const descriptions = tools
 			.map((tool) => tool.description)
 			.join("\n")
@@ -222,10 +236,8 @@ async function main(): Promise<void> {
 		assert(read.text.includes("Injection signals: ai-directed-instruction"));
 
 		const resources = assertObject(await client.request("resources/list", {}));
-		const listedResources = prop(resources, "resources") as Array<{
-			uri: string;
-			name: string;
-		}>;
+		const listedResources = (resources as { resources: ListedResource[] })
+			.resources;
 		assert(
 			!listedResources.some((resource) =>
 				resource.name.toLowerCase().includes("ignore previous instructions"),
@@ -468,10 +480,6 @@ function get(value: unknown, path: string): unknown {
 function assertObject(value: unknown): Record<string, unknown> {
 	assert(value && typeof value === "object" && !Array.isArray(value));
 	return value as Record<string, unknown>;
-}
-
-function prop(value: Record<string, unknown>, key: string): unknown {
-	return value[key];
 }
 
 function cleanEnv(): Record<string, string> {

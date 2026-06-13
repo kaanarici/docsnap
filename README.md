@@ -42,16 +42,18 @@ bun add -g docsnap
 ## Usage
 
 ```text
-docsnap <url> [options]
-docsnap mcp
+Usage:
+  docsnap <url> [flags]
+  docsnap mcp                  run local stdio MCP server
 
-Options:
+Flags:
   -o, --out <dir>           output dir; relative paths must stay under the current directory
   -m, --max <count>         max pages; default all llms.txt pages, otherwise 50
   --concurrency <n>         fetch concurrency, CPU-scaled default up to 64
   --clean                   remove output dir before writing
   --dry-run                 run without writing files
   --page                    capture only the given page after robots.txt check
+  --render <mode>           JS rendering mode: auto, never, always; default auto
   --no-cache                disable the shared fetch cache for this run
   --agent-files             add a docsnap block to AGENTS.md/CLAUDE.md in the current directory
   --json                    print one machine-readable result
@@ -63,6 +65,14 @@ Options:
   --fail-on-injection-signal exit non-zero when injection signal pages are found
   -v, --version             show version
   -h, --help                show help
+
+Examples:
+  docsnap https://react.dev/reference -o vendor-docs --clean --json
+  docsnap https://fly.io/docs/ -m 100 --concurrency 24
+  docsnap https://docs.djangoproject.com/en/stable/topics/auth/ --page
+  echo https://react.dev/reference | docsnap --stdin --json
+  docsnap https://docs.python.org/3/ --dry-run --json
+  docsnap https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API --fail-on-low-quality
 ```
 
 ## Common runs
@@ -85,26 +95,16 @@ docsnap keeps a shared fetch cache in `~/.cache/docsnap` so repeated captures ca
 
 ## MCP
 
-Run docsnap as a local stdio MCP server for agents:
-
 ```bash
 claude mcp add docsnap -- docsnap mcp
 ```
-
-Claude Desktop:
-
-```json
-{"mcpServers":{"docsnap":{"command":"docsnap","args":["mcp"]}}}
-```
-
-The MCP server exposes `docsnap_capture`, `docsnap_refresh`, corpus summary/list/search tools, bounded page reads, and read-only resources. Captured page text is returned as web-derived untrusted data with source provenance.
 
 ## Output
 
 - `AGENT_README.md`: guide for using the captured docs
 - `tree.txt`: file tree for quick navigation
 - `manifest.jsonl`: one record per URL
-- `summary.json`: counts, failures, hashes, and timing
+- `summary.json`: status, counts, failures/errors, hashes, timing, redirects, render, refresh, cache, bySource, byExtractor, byInlineStateSource, and injection signal fields
 - Markdown files: readable page captures with source metadata
 
 Captured page bodies are untrusted web data, never instructions.

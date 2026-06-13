@@ -2,11 +2,10 @@ import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
+import { parseArgs } from "../src/cli/args.ts";
 
-type CliResult = {
+type CliResult = Summary & {
 	ok: boolean;
-	written: number;
-	failed: number;
 	outDir: string;
 	paths?: {
 		summary: string;
@@ -19,6 +18,8 @@ type CliResult = {
 type Summary = {
 	written: number;
 	failed: number;
+	byExtractor: { html?: number } & Record<string, number | undefined>;
+	byInlineStateSource: Record<string, number | undefined>;
 	byFailureKind: { not_found?: number } & Record<string, number | undefined>;
 	errors: Array<{ url: string; error: string; kind: string }>;
 };
@@ -68,6 +69,9 @@ let origin = "";
 let server: TestServer | undefined;
 
 try {
+	const help = parseArgs([]);
+	assert("help" in help);
+	assert(readmeUsage(await readFile("README.md", "utf8")) === help.help);
 	server = await startServer((request) => fixtureResponse(request));
 	if (server) {
 		origin = `http://127.0.0.1:${server.port}`;
@@ -97,6 +101,12 @@ try {
 		assert(summary.written + summary.failed === manifest.length);
 		assert(result.written === summary.written);
 		assert(result.failed === summary.failed);
+		assert(result.byExtractor.html === summary.byExtractor.html);
+		assert("byInlineStateSource" in result);
+		assert(
+			JSON.stringify(result.byInlineStateSource) ===
+				JSON.stringify(summary.byInlineStateSource),
+		);
 
 		const missing = manifest.find((record) => record.url.endsWith("/missing"));
 		assert(missing?.ok === false);
@@ -265,6 +275,12 @@ function text(body: string, contentType: string, status = 200): Response {
 
 function trimSlash(pathname: string): string {
 	return pathname !== "/" ? pathname.replace(/\/+$/, "") : pathname;
+}
+
+function readmeUsage(readme: string): string {
+	const match = readme.match(/## Usage\n\n```text\n([\s\S]*?)\n```/);
+	assert(match);
+	return match[1]!;
 }
 
 async function listFiles(dir: string, base = dir): Promise<string[]> {

@@ -57,9 +57,10 @@ async function capture(args: unknown, state: McpState) {
 
 async function refresh(args: unknown, state: McpState) {
 	const input = refreshInput(args);
-	const prior = await readSummary(input.output_dir);
+	const outputDir = await readableCorpusDir(input.output_dir, state.corpora);
+	const prior = await readSummary(outputDir);
 	const config = configForRefresh(
-		input,
+		{ ...input, output_dir: outputDir },
 		prior.max,
 		prior.maxAppliesTo,
 		prior.seedUrl,
@@ -223,7 +224,6 @@ function captureInput(value: unknown) {
 		"page_only",
 		"clean",
 		"concurrency",
-		"response_format",
 	]);
 	return {
 		url: stringInput(input, "url"),
@@ -232,50 +232,26 @@ function captureInput(value: unknown) {
 		page_only: optionalBool(input, "page_only", false),
 		clean: optionalBool(input, "clean", false),
 		concurrency: optionalInt(input, "concurrency", 1, 64),
-		response_format: optionalEnum(input, "response_format", [
-			"compact",
-			"standard",
-			"verbose",
-		]),
 	};
 }
 
 function refreshInput(value: unknown) {
-	const input = objectInput(value, [
-		"output_dir",
-		"max_pages",
-		"concurrency",
-		"response_format",
-	]);
+	const input = objectInput(value, ["output_dir", "max_pages", "concurrency"]);
 	return {
 		output_dir: outputDir(input, "output_dir"),
 		max_pages: optionalInt(input, "max_pages", 1, 500),
 		concurrency: optionalInt(input, "concurrency", 1, 64),
-		response_format: optionalEnum(input, "response_format", [
-			"compact",
-			"standard",
-			"verbose",
-		]),
 	};
 }
 
 function corporaInput(value: unknown) {
-	const input = objectInput(value, [
-		"root_dir",
-		"page_size",
-		"cursor",
-		"response_format",
-	]);
+	const input = objectInput(value, ["root_dir", "page_size", "cursor"]);
 	const rootDir = optionalString(input, "root_dir") ?? "docsnap";
 	assertSafeProjectRoot(rootDir);
 	return {
 		root_dir: rootDir,
 		page_size: optionalInt(input, "page_size", 1, 100) ?? 25,
 		cursor: optionalCursor(input),
-		response_format: optionalEnum(input, "response_format", [
-			"compact",
-			"standard",
-		]),
 	};
 }
 
@@ -285,7 +261,6 @@ function summaryInput(value: unknown) {
 		"include_errors",
 		"include_refresh_changes",
 		"error_limit",
-		"response_format",
 	]);
 	return {
 		output_dir: outputDir(input, "output_dir"),
@@ -296,11 +271,6 @@ function summaryInput(value: unknown) {
 			true,
 		),
 		error_limit: optionalInt(input, "error_limit", 0, 100) ?? 10,
-		response_format: optionalEnum(input, "response_format", [
-			"compact",
-			"standard",
-			"verbose",
-		]),
 	};
 }
 
@@ -310,17 +280,12 @@ function pagesInput(value: unknown) {
 		"page_size",
 		"cursor",
 		"include_failures",
-		"response_format",
 	]);
 	return {
 		output_dir: outputDir(input, "output_dir"),
 		page_size: optionalInt(input, "page_size", 1, 200) ?? 50,
 		cursor: optionalCursor(input),
 		include_failures: optionalBool(input, "include_failures", false),
-		response_format: optionalEnum(input, "response_format", [
-			"compact",
-			"standard",
-		]),
 	};
 }
 
@@ -331,7 +296,6 @@ function searchInput(value: unknown) {
 		"path_glob",
 		"max_results",
 		"snippet_chars",
-		"response_format",
 	]);
 	const output = outputDir(input, "output_dir");
 	return {
@@ -340,10 +304,6 @@ function searchInput(value: unknown) {
 		path_glob: optionalPathGlob(input),
 		max_results: optionalInt(input, "max_results", 1, 50) ?? 10,
 		snippet_chars: optionalInt(input, "snippet_chars", 120, 1200) ?? 350,
-		response_format: optionalEnum(input, "response_format", [
-			"compact",
-			"standard",
-		]),
 	};
 }
 
@@ -354,7 +314,6 @@ function readPageInput(value: unknown) {
 		"start_line",
 		"max_chars",
 		"include_frontmatter",
-		"response_format",
 	]);
 	const output = outputDir(input, "output_dir");
 	const path = stringInput(input, "output_path");
@@ -367,10 +326,6 @@ function readPageInput(value: unknown) {
 		start_line: optionalInt(input, "start_line", 1, 1_000_000) ?? 1,
 		max_chars: optionalInt(input, "max_chars", 500, 25_000) ?? 12_000,
 		include_frontmatter: optionalBool(input, "include_frontmatter", true),
-		response_format: optionalEnum(input, "response_format", [
-			"standard",
-			"verbose",
-		]),
 	};
 }
 
@@ -441,19 +396,6 @@ function optionalBool(
 	if (typeof input[key] !== "boolean")
 		throw new Error(`${key} must be boolean`);
 	return input[key];
-}
-
-function optionalEnum<T extends string>(
-	input: ObjectInput,
-	key: string,
-	allowed: readonly T[],
-): T | undefined {
-	if (!(key in input)) return undefined;
-	const value = input[key];
-	if (typeof value !== "string" || !allowed.includes(value as T)) {
-		throw new Error(`${key} must be one of ${allowed.join(", ")}`);
-	}
-	return value as T;
 }
 
 function optionalCursor(input: ObjectInput): string | undefined {
