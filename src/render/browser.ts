@@ -30,7 +30,7 @@ export type BrowserSession = {
 	close: () => Promise<void>;
 };
 
-export type HeadlessMode = "old" | "new";
+export type HeadlessMode = "new";
 
 export type BrowserLaunchAttempt = (
 	binary: BrowserBinary,
@@ -59,8 +59,7 @@ type VersionResult = {
 	product?: string;
 };
 
-const defaultLaunchRetries = 2;
-const headlessModeByBinary = new Map<string, HeadlessMode>();
+const defaultLaunchRetries = 1;
 const renderLaunchWaitDelaysMs = [0, 25, 50, 100, 150, 250] as const;
 
 const pathCommands = [
@@ -115,17 +114,20 @@ export async function launchBrowser(
 				options.spawnProcess ?? spawn,
 			));
 	let lastError: unknown;
+	let launchFailures = 0;
 	for (let attempt = 0; attempt <= maxRetries; attempt++) {
 		const profile = await mkdtemp(join(profileRoot, "docsnap-render-"));
 		try {
-			const session = await launchWithHeadlessPreference(
+			const session = await launchWithLock(
 				binary,
 				profile,
+				"new",
 				launch,
 				options,
 			);
 			return withProfileCleanup(session, profile);
 		} catch (error) {
+			launchFailures++;
 			lastError = error;
 			await rm(profile, { recursive: true, force: true });
 			if (attempt < maxRetries) {
@@ -133,7 +135,7 @@ export async function launchBrowser(
 			}
 		}
 	}
-	throw errorFrom(lastError);
+	throw withLaunchFailureCount(lastError, launchFailures);
 }
 
 async function launchBrowserAttempt(
@@ -202,45 +204,6 @@ export function browserLaunchArgs(
 	];
 }
 
-async function launchWithHeadlessPreference(
-	binary: BrowserBinary,
-	profile: string,
-	launch: BrowserLaunchAttempt,
-	options: BrowserLaunchOptions,
-): Promise<BrowserSession> {
-	const key = headlessCacheKey(binary);
-	const cached = headlessModeByBinary.get(key);
-	if (cached) return launchWithLock(binary, profile, cached, launch, options);
-	try {
-		const session = await launchWithLock(
-			binary,
-			profile,
-			"old",
-			launch,
-			options,
-		);
-		headlessModeByBinary.set(key, "old");
-		return session;
-	} catch (oldError) {
-		if (!shouldTryNewHeadless(oldError)) throw oldError;
-		try {
-			const session = await launchWithLock(
-				binary,
-				profile,
-				"new",
-				launch,
-				options,
-			);
-			headlessModeByBinary.set(key, "new");
-			return session;
-		} catch (newError) {
-			throw new Error(
-				`old headless failed: ${errorMessage(oldError)}; new headless failed: ${errorMessage(newError)}`,
-			);
-		}
-	}
-}
-
 async function launchWithLock(
 	binary: BrowserBinary,
 	profile: string,
@@ -266,17 +229,6 @@ async function launchWithLock(
 
 function defaultRenderLaunchLockPath() {
 	return join(tmpdir(), "docsnap-render.lock");
-}
-
-function shouldTryNewHeadless(error: unknown) {
-	const message = errorMessage(error);
-	return /headless|flag|option|invalid|unsupported|removed|CDP timeout: Browser\.getVersion|CDP connection closed|browser exited|EPIPE|ECONNRESET|pipe/i.test(
-		message,
-	);
-}
-
-function headlessCacheKey(binary: BrowserBinary) {
-	return `${binary.name}\0${binary.path}`;
 }
 
 function withProfileCleanup(
@@ -312,8 +264,21 @@ function errorFrom(error: unknown) {
 	return error instanceof Error ? error : new Error(String(error));
 }
 
-function errorMessage(error: unknown) {
-	return error instanceof Error ? error.message : String(error);
+export function browserLaunchFailureCount(error: unknown) {
+	const count = (error as { launchFailures?: unknown } | undefined)
+		?.launchFailures;
+	return typeof count === "number" && Number.isFinite(count)
+		? Math.max(1, Math.floor(count))
+		: 1;
+}
+
+function withLaunchFailureCount(error: unknown, launchFailures: number) {
+	const launchError = errorFrom(error) as Error & { launchFailures?: number };
+	Object.defineProperty(launchError, "launchFailures", {
+		value: Math.max(1, launchFailures),
+		configurable: true,
+	});
+	return launchError;
 }
 
 function commandForPlatform(command: string, platform: NodeJS.Platform) {

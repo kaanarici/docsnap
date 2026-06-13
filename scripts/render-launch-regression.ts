@@ -19,24 +19,22 @@ import {
 import {
 	type BrowserProcessSpawner,
 	type BrowserSession,
-	type HeadlessMode,
 	launchBrowser,
 } from "../src/render/browser.ts";
 import { CdpConnection } from "../src/render/cdp.ts";
 
-await oldHeadlessPreferenceRegression();
-await newHeadlessFallbackRegression();
+await singleHeadlessModeRegression();
 await launchLockSerializationRegression();
 await staleLaunchLockRegression();
 await livePidStaleLaunchLockRegression();
 await deadPidStaleLaunchLockRegression();
 await launchLockReleaseOnFailureRegression();
 
-async function oldHeadlessPreferenceRegression() {
-	const root = await mkdtemp(join(tmpdir(), "docsnap-headless-old-"));
+async function singleHeadlessModeRegression() {
+	const root = await mkdtemp(join(tmpdir(), "docsnap-headless-new-"));
 	const args: string[][] = [];
 	const session = await launchBrowser(
-		{ path: "/mock/chrome-old-preferred", name: "chrome" },
+		{ path: "/mock/chrome-new-headless", name: "chrome" },
 		{
 			profileRoot: root,
 			retries: 0,
@@ -45,30 +43,9 @@ async function oldHeadlessPreferenceRegression() {
 		},
 	);
 	assert(args.length === 1);
-	assert(args[0]?.includes("--headless=old"));
+	assert(args[0]?.includes("--headless=new"));
+	assert(!args[0]?.includes("--headless=old"));
 	assert(args[0]?.includes("--disable-gpu"));
-	await session.close();
-	await assertNoEntries(root);
-}
-
-async function newHeadlessFallbackRegression() {
-	const root = await mkdtemp(join(tmpdir(), "docsnap-headless-new-"));
-	const modes: HeadlessMode[] = [];
-	const session = await launchBrowser(
-		{ path: "/mock/chrome-old-unsupported", name: "chrome" },
-		{
-			profileRoot: root,
-			retries: 0,
-			launchLockPath: join(root, "launch.lock"),
-			launchAttempt: async (_binary, _profile, headless) => {
-				modes.push(headless);
-				if (headless === "old")
-					throw new Error("Old Headless mode has been removed");
-				return fakeBrowserSession();
-			},
-		},
-	);
-	assert(modes.join(",") === "old,new");
 	await session.close();
 	await assertNoEntries(root);
 }
