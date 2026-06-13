@@ -1,7 +1,20 @@
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	mkdtemp,
+	readdir,
+	readFile,
+	rm,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+	acquireCacheLock,
+	cacheKey,
+	cacheRequest,
+} from "../src/cache/store.ts";
 import { parseArgs } from "../src/cli/args.ts";
+import { dirLockOwnerFile } from "../src/core/dir-lock.ts";
 import { runPipeline } from "../src/core/pipeline.ts";
 import type { Config } from "../src/core/types.ts";
 import { fetchText, setFetchTransportForTest } from "../src/fetch/fetcher.ts";
@@ -202,6 +215,29 @@ await withCacheEnv("lock", async () => {
 	} finally {
 		setFetchTransportForTest(undefined);
 	}
+});
+
+await withCacheEnv("live-lock-not-reaped", async (cacheDir) => {
+	const url = "https://live-lock.example.com/page";
+	const parsed = parseArgs([url, "--page"]);
+	assertConfig(parsed);
+	const key = cacheKey(cacheRequest(url, parsed, "text/html"));
+	const lockDir = join(cacheDir, "locks", `${key}.lock`);
+	await mkdir(lockDir, { recursive: true });
+	await writeFile(
+		join(lockDir, dirLockOwnerFile),
+		`${JSON.stringify({
+			pid: process.pid,
+			token: "live-cache",
+			createdAt: new Date(Date.now() - 120_000).toISOString(),
+		})}\n`,
+	);
+	const lock = await acquireCacheLock(parsed, key);
+	assert(lock === undefined);
+	const owner = JSON.parse(
+		await readFile(join(lockDir, dirLockOwnerFile), "utf8"),
+	) as { token?: string };
+	assert(owner.token === "live-cache");
 });
 
 function config(

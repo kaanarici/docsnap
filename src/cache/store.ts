@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { acquireDirLock, type DirLock } from "../core/dir-lock.ts";
 import type {
 	CacheSummary,
 	Config,
@@ -17,12 +18,7 @@ import type {
 	RedirectHop,
 } from "../core/types.ts";
 import { validatePublicHttpUrl } from "../security/url.ts";
-import {
-	acquireCacheLockForContext,
-	type CacheLock,
-	releaseCacheLock,
-} from "./lock.ts";
-import { blobPath, entryPath, isCacheHex, pathFor } from "./paths.ts";
+import { blobPath, entryPath, isCacheHex, lockPath, pathFor } from "./paths.ts";
 import { freshUntilFor } from "./policy.ts";
 
 const schemaVersion = "docsnap-cache-v1";
@@ -68,9 +64,6 @@ export type CacheLookup =
 	| { state: "disabled"; key: string }
 	| { state: "miss"; key: string }
 	| { state: "fresh" | "stale"; key: string; entry: CacheEntry; body: string };
-
-export type { CacheLock };
-export { releaseCacheLock };
 
 export function cacheRequest(
 	url: string,
@@ -224,11 +217,16 @@ export async function refreshCacheEntry(
 export async function acquireCacheLock(
 	config: Config,
 	key: string,
-): Promise<CacheLock | undefined> {
+): Promise<DirLock | undefined> {
 	const context = cacheContext(config);
-	return acquireCacheLockForContext(context, key, (error) =>
-		disableOnAccessError(context, error),
-	);
+	if (!context.enabled) return undefined;
+	return acquireDirLock({
+		path: lockPath(context, key),
+		mode: "soft",
+		delaysMs: [0, 25, 50, 100, 150],
+		staleMs: 60_000,
+		onAccessError: (error) => disableOnAccessError(context, error),
+	});
 }
 
 export function cachedFetchResult(

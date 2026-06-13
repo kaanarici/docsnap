@@ -12,17 +12,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import {
+	acquireDirLock,
+	dirLockOwnerFile,
+	releaseDirLock,
+} from "../src/core/dir-lock.ts";
+import {
 	type BrowserProcessSpawner,
 	type BrowserSession,
 	type HeadlessMode,
 	launchBrowser,
 } from "../src/render/browser.ts";
 import { CdpConnection } from "../src/render/cdp.ts";
-import {
-	acquireRenderLaunchLock,
-	releaseRenderLaunchLock,
-	renderLaunchLockOwnerFile,
-} from "../src/render/launch-lock.ts";
 
 await oldHeadlessPreferenceRegression();
 await newHeadlessFallbackRegression();
@@ -131,7 +131,7 @@ async function staleLaunchLockRegression() {
 	const lockPath = join(root, "launch.lock");
 	await mkdir(lockPath);
 	await writeFile(
-		join(lockPath, renderLaunchLockOwnerFile),
+		join(lockPath, dirLockOwnerFile),
 		`${JSON.stringify({
 			pid: 999_999,
 			token: "stale",
@@ -162,7 +162,7 @@ async function livePidStaleLaunchLockRegression() {
 	const lockPath = join(root, "launch.lock");
 	await mkdir(lockPath);
 	await writeFile(
-		join(lockPath, renderLaunchLockOwnerFile),
+		join(lockPath, dirLockOwnerFile),
 		`${JSON.stringify({
 			pid: process.pid,
 			token: "live",
@@ -171,15 +171,18 @@ async function livePidStaleLaunchLockRegression() {
 	);
 	try {
 		await assertRejects(
-			acquireRenderLaunchLock({
+			acquireDirLock({
 				path: lockPath,
+				mode: "hard",
 				staleMs: 1,
 				waitTimeoutMs: 80,
+				timeoutMessage: (path) =>
+					`timed out waiting for render launch lock: ${path}`,
 			}),
 			/timed out waiting for render launch lock/,
 		);
 		const owner = JSON.parse(
-			await readFile(join(lockPath, renderLaunchLockOwnerFile), "utf8"),
+			await readFile(join(lockPath, dirLockOwnerFile), "utf8"),
 		) as { token?: string };
 		assert(owner.token === "live");
 	} finally {
@@ -192,19 +195,20 @@ async function deadPidStaleLaunchLockRegression() {
 	const lockPath = join(root, "launch.lock");
 	await mkdir(lockPath);
 	await writeFile(
-		join(lockPath, renderLaunchLockOwnerFile),
+		join(lockPath, dirLockOwnerFile),
 		`${JSON.stringify({
 			pid: 999_999,
 			token: "dead",
 			createdAt: new Date(Date.now() - 120_000).toISOString(),
 		})}\n`,
 	);
-	const lock = await acquireRenderLaunchLock({
+	const lock = await acquireDirLock({
 		path: lockPath,
+		mode: "hard",
 		staleMs: 1,
 		waitTimeoutMs: 500,
 	});
-	await releaseRenderLaunchLock(lock);
+	await releaseDirLock(lock);
 	await assertNoEntries(root);
 }
 

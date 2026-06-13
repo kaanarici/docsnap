@@ -1,5 +1,6 @@
-import type { Config, DiscoveredUrl, FetchResult } from "../core/types.ts";
+import type { Config, DiscoveredUrl } from "../core/types.ts";
 import { fetchText } from "../fetch/fetcher.ts";
+import { filteredNonPageResult, robotsBlockedResult } from "../fetch/result.ts";
 import { discoverAssetPages, looksLikeAppShell } from "./assets.ts";
 import { canonicalOriginSeed, literalAllowPrefix } from "./blocked-seed.ts";
 import {
@@ -38,7 +39,7 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 				{
 					url: inputSeed,
 					source: "seed",
-					fetched: robotsBlockedUrl(inputSeed),
+					fetched: robotsBlockedResult(inputSeed),
 				},
 			];
 		}
@@ -56,7 +57,7 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 				{
 					url: inputSeed,
 					source: "seed",
-					fetched: failure ?? robotsBlockedUrl(inputSeed),
+					fetched: failure ?? robotsBlockedResult(inputSeed),
 				},
 			];
 		}
@@ -109,7 +110,11 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 		const allowed = (url: string) => config.ignoreRobots || robots.allowed(url);
 		if (!allowed(feedSeed)) {
 			return [
-				{ url: feedSeed, source: "seed", fetched: robotsBlocked(seedResponse) },
+				{
+					url: feedSeed,
+					source: "seed",
+					fetched: robotsBlockedResult(seedResponse),
+				},
 			];
 		}
 		return discoverFeed(feedSeed, feedSeed, scopeFromSeed(feedSeed), config, {
@@ -138,7 +143,11 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 	const allowed = (url: string) => config.ignoreRobots || robots.allowed(url);
 	if (!allowed(seed)) {
 		return [
-			{ url: seed, source: "seed", fetched: robotsBlocked(seedResponse) },
+			{
+				url: seed,
+				source: "seed",
+				fetched: robotsBlockedResult(seedResponse),
+			},
 		];
 	}
 	if (seed !== inputSeed || scope !== inputScope) {
@@ -295,7 +304,21 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 	if (out.length === 0) {
 		if (!finalSeed) {
 			return [
-				{ url: inputSeed, source: "seed", fetched: nonPage(seedResponse) },
+				{
+					url: inputSeed,
+					source: "seed",
+					fetched: filteredNonPageResult(
+						seedResponse.url,
+						seedResponse.finalUrl,
+						{
+							redirects: seedResponse.redirects ?? [],
+							status: seedResponse.status,
+							contentType: seedResponse.contentType,
+							body: seedResponse.body,
+							fetchMs: seedResponse.fetchMs,
+						},
+					),
+				},
 			];
 		}
 		add(seed, "seed", seedResponse);
@@ -309,21 +332,6 @@ function seedInputUrl(raw: string) {
 		return normalizeDiscoveryResourceUrl(raw) ?? raw;
 	}
 	return normalizeUrl(raw) ?? normalizeDiscoveryResourceUrl(raw) ?? raw;
-}
-
-function nonPage(result: FetchResult): FetchResult {
-	return {
-		url: result.url,
-		finalUrl: result.finalUrl,
-		redirects: result.redirects ?? [],
-		status: result.status,
-		contentType: result.contentType,
-		body: result.body,
-		fetchMs: result.fetchMs,
-		ok: false,
-		error: "redirected to a filtered non-page URL",
-		failureKind: "blocked",
-	};
 }
 
 function hasCorpus(out: DiscoveredUrl[], config: Config) {
@@ -387,36 +395,6 @@ function parentScopes(scope: string) {
 	return scopes;
 }
 
-function robotsBlocked(response: FetchResult): FetchResult {
-	return {
-		url: response.url,
-		finalUrl: response.finalUrl,
-		redirects: response.redirects ?? [],
-		status: response.status,
-		contentType: response.contentType,
-		body: "",
-		fetchMs: response.fetchMs,
-		ok: false,
-		error: "blocked by robots.txt",
-		failureKind: "blocked",
-	};
-}
-
-function robotsBlockedUrl(url: string): FetchResult {
-	return {
-		url,
-		finalUrl: url,
-		redirects: [],
-		status: 0,
-		contentType: "",
-		body: "",
-		fetchMs: 0,
-		ok: false,
-		error: "blocked by robots.txt",
-		failureKind: "blocked",
-	};
-}
-
 // a robots-disallowed seed often sits on a site that carves out Allow:
 // subtrees and declares sitemaps; honor those explicit signals without ever
 // fetching the seed itself or probing undeclared sitemap paths
@@ -458,7 +436,7 @@ async function disallowedSeedDiscovery(
 	const prefix = literalAllowPrefix(robots, inputSeed);
 	if (prefix) return discover({ ...config, seedUrl: prefix });
 	return [
-		{ url: inputSeed, source: "seed", fetched: robotsBlockedUrl(inputSeed) },
+		{ url: inputSeed, source: "seed", fetched: robotsBlockedResult(inputSeed) },
 	];
 }
 

@@ -4,6 +4,7 @@ import {
 	sameSharedHostPlatform,
 	sameSiteLabel,
 } from "../core/url.ts";
+import { robotsBlockedResult } from "../fetch/result.ts";
 import { discoverLlms, type LlmsDiscoveryOptions } from "./llms.ts";
 import { loadRobots, type Robots } from "./robots.ts";
 import { addDiscovered, normalizeUrl, pathInScope } from "./url.ts";
@@ -100,7 +101,7 @@ async function blockDisallowedLlmsCandidates(
 			options.robotsByOrigin,
 		);
 		if (!robots.allowed(url)) {
-			cache.set(url, Promise.resolve(robotsBlockedUrl(url)));
+			cache.set(url, Promise.resolve(robotsBlockedResult(url)));
 		}
 	}
 }
@@ -117,20 +118,6 @@ function llmsCandidateUrls(seed: string) {
 	paths.add(`${dir}llms.txt`);
 	paths.add("/llms.txt");
 	return [...paths].map((path) => `${base.origin}${path}`);
-}
-
-function robotsBlockedUrl(url: string): FetchResult {
-	return {
-		url,
-		finalUrl: url,
-		status: 0,
-		contentType: "",
-		body: "",
-		fetchMs: 0,
-		ok: false,
-		error: "blocked by robots.txt",
-		failureKind: "blocked",
-	};
 }
 
 function hasScopedSameOriginLinks(

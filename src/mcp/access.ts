@@ -1,7 +1,6 @@
 import { readFile, realpath, stat } from "node:fs/promises";
-import type { Config } from "../core/types.ts";
+import { isInsideOrSame } from "../core/fs-safety.ts";
 import { resolvePriorOutputPath } from "../output/prior.ts";
-import { isInsideOrSame } from "../output/writer.ts";
 
 export type McpState = {
 	corpora: Set<string>;
@@ -48,7 +47,7 @@ export async function readBoundedCorpusFile(
 	outputPath: string,
 	maxBytes: number,
 ): Promise<string> {
-	const target = resolvePriorOutputPath(configFor(outputDir), outputPath);
+	const target = resolvePriorOutputPath({ outDir: outputDir }, outputPath);
 	if (!target)
 		throw new Error(`Corpus file is not a safe relative path: ${outputPath}`);
 	const [base, file] = await Promise.all([
@@ -125,10 +124,6 @@ async function realpathOrUndefined(path: string): Promise<string | undefined> {
 	} catch {
 		return undefined;
 	}
-}
-
-function configFor(outDir: string): Config {
-	return { outDir } as Config;
 }
 
 function logDiagnostic(error: unknown): void {

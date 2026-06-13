@@ -34,3 +34,68 @@ export function failureKind(status: number, error: string): FailureKind {
 	if (status > 0) return "http";
 	return "fetch";
 }
+
+export function robotsBlockedResult(input: string | FetchResult): FetchResult {
+	if (typeof input === "string") {
+		return {
+			url: input,
+			finalUrl: input,
+			redirects: [],
+			status: 0,
+			contentType: "",
+			body: "",
+			fetchMs: 0,
+			ok: false,
+			error: "blocked by robots.txt",
+			failureKind: "blocked",
+		};
+	}
+	return {
+		url: input.url,
+		finalUrl: input.finalUrl,
+		redirects: input.redirects ?? [],
+		status: input.status,
+		contentType: input.contentType,
+		body: "",
+		fetchMs: input.fetchMs,
+		ok: false,
+		error: "blocked by robots.txt",
+		failureKind: "blocked",
+	};
+}
+
+type FilteredNonPageOptions = {
+	redirects?: RedirectHop[];
+	status: number;
+	contentType: string;
+	body: string;
+	fetchMs: number;
+	etag?: string;
+	lastModified?: string;
+	fetchedAt?: string;
+	defaultFetchedAt?: boolean;
+};
+
+export function filteredNonPageResult(
+	url: string,
+	finalUrl: string,
+	options: FilteredNonPageOptions,
+): FetchResult {
+	return {
+		url,
+		finalUrl,
+		redirects: options.redirects ?? [],
+		status: options.status,
+		contentType: options.contentType,
+		body: options.body,
+		fetchMs: options.fetchMs,
+		...(options.etag ? { etag: options.etag } : {}),
+		...(options.lastModified ? { lastModified: options.lastModified } : {}),
+		...(options.fetchedAt || options.defaultFetchedAt
+			? { fetchedAt: options.fetchedAt ?? new Date().toISOString() }
+			: {}),
+		ok: false,
+		error: "redirected to a filtered non-page URL",
+		failureKind: "blocked",
+	};
+}

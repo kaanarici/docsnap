@@ -7,6 +7,7 @@ import { loadRobots, type Robots } from "../discover/robots.ts";
 import { inScope, normalizeUrl, scopeFromSeed } from "../discover/url.ts";
 import { extractMany } from "../extract/pool.ts";
 import { fetchMany, fetchText } from "../fetch/fetcher.ts";
+import { filteredNonPageResult } from "../fetch/result.ts";
 import { rewriteLocalLinks } from "../output/links.ts";
 import { renderPage } from "../output/page.ts";
 import { assignOutputPaths, pathMap } from "../output/paths.ts";
@@ -477,9 +478,7 @@ function rejectNonPageFinal(input: FetchedUrl): FetchedUrl {
 	if (!result.ok || normalizeUrl(result.finalUrl)) return input;
 	return {
 		...input,
-		result: {
-			url: result.url,
-			finalUrl: result.finalUrl,
+		result: filteredNonPageResult(result.url, result.finalUrl, {
 			redirects: result.redirects ?? [],
 			status: result.status,
 			contentType: result.contentType,
@@ -487,10 +486,8 @@ function rejectNonPageFinal(input: FetchedUrl): FetchedUrl {
 			fetchMs: result.fetchMs,
 			...(result.etag ? { etag: result.etag } : {}),
 			...(result.lastModified ? { lastModified: result.lastModified } : {}),
-			fetchedAt: result.fetchedAt ?? new Date().toISOString(),
-			ok: false,
-			error: "redirected to a filtered non-page URL",
-			failureKind: "blocked",
-		},
+			...(result.fetchedAt ? { fetchedAt: result.fetchedAt } : {}),
+			defaultFetchedAt: true,
+		}),
 	};
 }

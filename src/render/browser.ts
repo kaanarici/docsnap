@@ -8,11 +8,8 @@ import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import type { Readable, Writable } from "node:stream";
+import { acquireDirLock, releaseDirLock } from "../core/dir-lock.ts";
 import { CdpConnection } from "./cdp.ts";
-import {
-	acquireRenderLaunchLock,
-	releaseRenderLaunchLock,
-} from "./launch-lock.ts";
 
 export type BrowserBinary = {
 	path: string;
@@ -64,6 +61,7 @@ type VersionResult = {
 
 const defaultLaunchRetries = 2;
 const headlessModeByBinary = new Map<string, HeadlessMode>();
+const renderLaunchWaitDelaysMs = [0, 25, 50, 100, 150, 250] as const;
 
 const pathCommands = [
 	["google-chrome", "chrome"],
@@ -250,20 +248,24 @@ async function launchWithLock(
 	launch: BrowserLaunchAttempt,
 	options: BrowserLaunchOptions,
 ): Promise<BrowserSession> {
-	const lock = await acquireRenderLaunchLock({
-		...(options.launchLockPath ? { path: options.launchLockPath } : {}),
-		...(options.launchLockStaleMs !== undefined
-			? { staleMs: options.launchLockStaleMs }
-			: {}),
-		...(options.launchLockTimeoutMs !== undefined
-			? { waitTimeoutMs: options.launchLockTimeoutMs }
-			: {}),
+	const lock = await acquireDirLock({
+		path: options.launchLockPath ?? defaultRenderLaunchLockPath(),
+		mode: "hard",
+		staleMs: options.launchLockStaleMs ?? 60_000,
+		waitTimeoutMs: options.launchLockTimeoutMs ?? 65_000,
+		delaysMs: renderLaunchWaitDelaysMs,
+		timeoutMessage: (path) =>
+			`timed out waiting for render launch lock: ${path}`,
 	});
 	try {
 		return await launch(binary, profile, headless);
 	} finally {
-		await releaseRenderLaunchLock(lock);
+		await releaseDirLock(lock);
 	}
+}
+
+function defaultRenderLaunchLockPath() {
+	return join(tmpdir(), "docsnap-render.lock");
 }
 
 function shouldTryNewHeadless(error: unknown) {

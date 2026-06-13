@@ -8,15 +8,13 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, parse, resolve } from "node:path";
 import {
-	basename,
-	dirname,
-	isAbsolute,
-	join,
-	parse,
-	relative,
-	resolve,
-} from "node:path";
+	assertInsideRoot,
+	assertRealPathInside,
+	isInsideOrSame,
+	realPathIsInside,
+} from "../core/fs-safety.ts";
 import { hasOutputPath } from "../core/records.ts";
 import type {
 	Config,
@@ -140,9 +138,11 @@ async function existingBody(path: string) {
 async function atomicWrite(path: string, body: string, root: string) {
 	const target = resolve(path);
 	const base = resolve(root);
-	if (!isInsideOrSame(base, target)) {
-		throw new Error(`Refusing to write outside output directory: ${path}`);
-	}
+	assertInsideRoot(
+		base,
+		target,
+		`Refusing to write outside output directory: ${path}`,
+	);
 	await assertSafeParent(dirname(target), base, path);
 	await mkdir(dirname(target), { recursive: true });
 	const [realBase, realParent] = await Promise.all([
@@ -167,9 +167,11 @@ async function assertSafeOutputRoot(outDir: string, raw: string) {
 
 async function assertSafeParent(parent: string, root: string, raw: string) {
 	const base = await realpath(root);
-	if (!(await realPathIsInside(base, parent))) {
-		throw new Error(`Refusing to write outside output directory: ${raw}`);
-	}
+	await assertRealPathInside(
+		base,
+		parent,
+		`Refusing to write outside output directory: ${raw}`,
+	);
 }
 
 function assertSafeCleanDir(outDir: string, raw: string) {
@@ -187,25 +189,5 @@ function assertSafeOutputDir(outDir: string, raw: string) {
 		dirname(outDir) === home && protectedHomeDirs.has(basename(outDir));
 	if (outDir === root || outDir === home || isProtectedHomeDir) {
 		throw new Error(`Refusing to use unsafe output directory: ${raw}`);
-	}
-}
-
-export function isInsideOrSame(parent: string, child: string) {
-	const path = relative(parent, child);
-	return path === "" || (!path.startsWith("..") && !parse(path).root);
-}
-
-export async function realPathIsInside(root: string, target: string) {
-	let current = resolve(target);
-	for (;;) {
-		try {
-			return isInsideOrSame(root, await realpath(current));
-		} catch (error) {
-			if (!(error instanceof Error) || !("code" in error)) throw error;
-			if (error.code !== "ENOENT") throw error;
-			const next = dirname(current);
-			if (next === current) return false;
-			current = next;
-		}
 	}
 }

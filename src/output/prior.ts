@@ -1,5 +1,6 @@
 import { readFile, realpath } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { join } from "node:path";
+import { isInsideOrSame, resolveSafeRelativePath } from "../core/fs-safety.ts";
 import {
 	identityKeyGroups,
 	type identityKeys,
@@ -16,7 +17,6 @@ import type {
 import { injectionSignals } from "../core/types.ts";
 import { scanMarkdownForInjectionSignals } from "../security/injection.ts";
 import { runFiles } from "./files.ts";
-import { isInsideOrSame } from "./writer.ts";
 
 export type PriorPage = Omit<PageSuccess, "markdown"> & {
 	outputPath: string;
@@ -31,6 +31,8 @@ export type PriorState = {
 	records: PriorPage[];
 	find(input: Parameters<typeof identityKeys>[0]): PriorPage | undefined;
 };
+
+type OutputRoot = { outDir: string };
 
 export async function loadPrior(config: Config): Promise<PriorState> {
 	if (config.clean) return disabled("clean");
@@ -107,17 +109,14 @@ export async function recoverPriorPage(
 }
 
 export function resolvePriorOutputPath(
-	config: Config,
+	config: OutputRoot,
 	outputPath: string,
 ): string | undefined {
-	if (!isSafeRelativeOutputPath(outputPath)) return undefined;
-	const base = resolve(config.outDir);
-	const target = resolve(base, outputPath);
-	return isInsideOrSame(base, target) ? target : undefined;
+	return resolveSafeRelativePath(config.outDir, outputPath);
 }
 
 export async function readPriorOutput(
-	config: Config,
+	config: OutputRoot,
 	outputPath: string,
 ): Promise<string | undefined> {
 	const priorPath = resolvePriorOutputPath(config, outputPath);
@@ -202,19 +201,6 @@ function cleanInjectionSignals(value: unknown) {
 				allowed.has(item),
 			)
 		: [];
-}
-
-function isSafeRelativeOutputPath(outputPath: string) {
-	return (
-		outputPath.trim() !== "" &&
-		!isAbsolute(outputPath) &&
-		!isWindowsAbsolute(outputPath) &&
-		!outputPath.split(/[\\/]+/).includes("..")
-	);
-}
-
-function isWindowsAbsolute(outputPath: string) {
-	return /^[a-zA-Z]:[\\/]/.test(outputPath) || outputPath.startsWith("\\\\");
 }
 
 function isSource(value: unknown): value is DiscoverySource {

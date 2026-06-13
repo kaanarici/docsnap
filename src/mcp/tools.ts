@@ -358,7 +358,7 @@ function readPageInput(value: unknown) {
 	]);
 	const output = outputDir(input, "output_dir");
 	const path = stringInput(input, "output_path");
-	if (!resolvePriorOutputPath({ outDir: output } as Config, path)) {
+	if (!resolvePriorOutputPath({ outDir: output }, path)) {
 		throw new Error("output_path must be a safe relative manifest path");
 	}
 	return {

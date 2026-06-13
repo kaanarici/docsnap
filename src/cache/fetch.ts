@@ -1,3 +1,4 @@
+import { releaseDirLock } from "../core/dir-lock.ts";
 import type { ConditionalRequest, Config, FetchResult } from "../core/types.ts";
 import { validatePublicHttpUrl } from "../security/url.ts";
 import {
@@ -7,7 +8,6 @@ import {
 	cacheRequest,
 	readCache,
 	refreshCacheEntry,
-	releaseCacheLock,
 	writeCacheResult,
 } from "./store.ts";
 
@@ -103,7 +103,7 @@ export async function fetchWithCache(
 		await writeCacheResult(config, first.key, request, result);
 		return result;
 	} finally {
-		await releaseCacheLock(lock);
+		await releaseDirLock(lock);
 	}
 }
 
@@ -120,7 +120,7 @@ async function writeThroughCache(
 	try {
 		await writeCacheResult(config, key, request, result);
 	} finally {
-		await releaseCacheLock(lock);
+		await releaseDirLock(lock);
 	}
 }
 

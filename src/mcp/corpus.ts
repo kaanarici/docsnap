@@ -1,7 +1,7 @@
 import { readdir } from "node:fs/promises";
 import { isAbsolute, join, parse, relative, resolve } from "node:path";
+import { isInsideOrSame, isWindowsAbsolute } from "../core/fs-safety.ts";
 import {
-	type Config,
 	type FailureKind,
 	type InjectionSignal,
 	injectionSignals,
@@ -9,7 +9,6 @@ import {
 } from "../core/types.ts";
 import { runFiles } from "../output/files.ts";
 import { resolvePriorOutputPath } from "../output/prior.ts";
-import { isInsideOrSame } from "../output/writer.ts";
 import {
 	corpusLimits,
 	McpReadLimitError,
@@ -270,7 +269,7 @@ export async function readPageSlice(
 	if (!record) {
 		throw new Error(`Output path is not in manifest: ${outputPath}`);
 	}
-	if (!resolvePriorOutputPath(configFor(outputDir), outputPath)) {
+	if (!resolvePriorOutputPath({ outDir: outputDir }, outputPath)) {
 		throw new Error(`Unsafe output path: ${outputPath}`);
 	}
 	const source = includeFrontmatter
@@ -407,10 +406,6 @@ async function readCorpusOutput(
 	);
 }
 
-function configFor(outDir: string): Config {
-	return { outDir } as Config;
-}
-
 function displayPath(path: string) {
 	const rel = relative(process.cwd(), path);
 	return rel && !rel.startsWith("..") && !parse(rel).root ? rel : path;
@@ -485,8 +480,4 @@ function logDiagnostic(error: unknown): void {
 	const message =
 		error instanceof Error ? (error.stack ?? error.message) : String(error);
 	process.stderr.write(`${message}\n`);
-}
-
-function isWindowsAbsolute(path: string) {
-	return /^[a-zA-Z]:[\\/]/.test(path) || path.startsWith("\\\\");
 }

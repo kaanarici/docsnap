@@ -1,4 +1,5 @@
-import { parse, relative, resolve } from "node:path";
+import { resolve } from "node:path";
+import { assertInsideRoot } from "../core/fs-safety.ts";
 
 type CachePathContext = { dir: string | null };
 
@@ -35,15 +36,5 @@ export function pathFor(context: CachePathContext, ...parts: string[]): string {
 }
 
 export function assertInsideCache(root: string, target: string): string {
-	const base = resolve(root);
-	const next = resolve(target);
-	if (!isInsideOrSame(base, next)) {
-		throw new Error(`cache path escapes root: ${target}`);
-	}
-	return next;
-}
-
-function isInsideOrSame(parent: string, child: string) {
-	const path = relative(parent, child);
-	return path === "" || (!path.startsWith("..") && !parse(path).root);
+	return assertInsideRoot(root, target, `cache path escapes root: ${target}`);
 }
