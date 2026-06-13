@@ -9,12 +9,16 @@ import type {
 import {
 	type BrowserBinary,
 	type BrowserSession,
+	browserLaunchFailureCount,
 	findBrowserBinary,
 	launchBrowser,
 } from "./browser.ts";
 import { ChromeRenderer } from "./page.ts";
 
 type Progress = (message: string) => void;
+export const BROWSER_LAUNCH_FAILURE_LIMIT = 2;
+const browserLaunchUnavailableReason =
+	"browser launch failed repeatedly; using static capture";
 
 export type RenderCandidate = {
 	input: FetchedUrl;
@@ -51,6 +55,7 @@ export type BrowserLauncherForTest = (
 
 export type RenderState = {
 	summary: RenderSummary;
+	launchFailures: number;
 };
 
 let rendererForTest: RenderFunctionForTest | undefined;
@@ -73,6 +78,7 @@ export function createRenderState(
 	progress?: Progress,
 ): RenderState & { progress?: Progress } {
 	return {
+		launchFailures: 0,
 		summary: {
 			mode: config.render,
 			renderer: "chrome-cdp",
@@ -197,7 +203,15 @@ async function ensureRenderer(
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		const reason = `browser launch failed: ${message}`;
-		markUnavailable(config, state, reason, reason);
+		state.launchFailures += browserLaunchFailureCount(error);
+		if (state.launchFailures >= BROWSER_LAUNCH_FAILURE_LIMIT) {
+			markUnavailable(
+				config,
+				state,
+				browserLaunchUnavailableReason,
+				"browser launch failed repeatedly",
+			);
+		}
 		return failLaunch(candidates, state, reason);
 	}
 }

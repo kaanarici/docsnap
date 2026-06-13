@@ -1,19 +1,25 @@
-import { mkdtemp, readdir } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { parseArgs } from "../src/cli/args.ts";
 import { runPipeline } from "../src/core/pipeline.ts";
-import type { Config, PageRecord } from "../src/core/types.ts";
+import type { Config, FetchedUrl, PageRecord } from "../src/core/types.ts";
 import { setFetchTransportForTest } from "../src/fetch/fetcher.ts";
 import { type BrowserSession, launchBrowser } from "../src/render/browser.ts";
 import { CdpConnection } from "../src/render/cdp.ts";
-import { setBrowserLauncherForTest } from "../src/render/index.ts";
+import {
+	BROWSER_LAUNCH_FAILURE_LIMIT,
+	createRenderState,
+	renderCandidates,
+	setBrowserLauncherForTest,
+} from "../src/render/index.ts";
 
 const testOrigin = "http://127.0.0.1:17777";
 
 await import("./render-launch-regression.ts");
 await launchFailureFallbackRegression();
+await launchCircuitBreakerRegression();
 await transientLaunchRetryRegression();
 await midRenderCrashFallbackRegression();
 
@@ -39,18 +45,80 @@ async function launchFailureFallbackRegression() {
 	assert(result.summary.render.renderedPages === 0);
 	assert(
 		result.summary.render.unavailableReason ===
-			"browser launch failed: launch race",
+			"browser launch failed repeatedly; using static capture",
 	);
 	assert(
 		result.summary.render.pages[0]?.error ===
 			"browser_crash: browser launch failed: launch race",
 	);
 	assert(result.summary.written > 0);
-	assert(attempts === 3);
+	assert(attempts === BROWSER_LAUNCH_FAILURE_LIMIT);
 	assert(
 		messages.filter((item) => item.includes("render unavailable")).length === 1,
 	);
 	await assertNoEntries(root);
+}
+
+async function launchCircuitBreakerRegression() {
+	const outDir = await mkdtemp(join(tmpdir(), "docsnap-circuit-out-"));
+	let launches = 0;
+	try {
+		await withEnv(
+			{
+				DOCSNAP_ALLOW_TEST_HOST: testOrigin,
+				DOCSNAP_CHROME_PATH: process.execPath,
+			},
+			() => {
+				const config = shellConfig(outDir, 20);
+				const state = createRenderState(config);
+				return withHooks(
+					{
+						launcher: async () => {
+							launches++;
+							throw new Error(`launch failed ${launches}`);
+						},
+					},
+					async () => {
+						const first = await renderCandidates(
+							renderBatch("first", 3),
+							config,
+							state,
+						);
+						assert(Number(launches) === 1);
+						assert(first.length === 0);
+						assert(Number(state.summary.attempted) === 3);
+						assert(Number(state.summary.failedPages) === 3);
+						assert(state.summary.unavailableReason === null);
+
+						const second = await renderCandidates(
+							renderBatch("second", 3),
+							config,
+							state,
+						);
+						assert(Number(launches) === BROWSER_LAUNCH_FAILURE_LIMIT);
+						assert(second.length === 0);
+						assert(Number(state.summary.attempted) === 6);
+						assert(Number(state.summary.failedPages) === 6);
+						assert(
+							state.summary.unavailableReason ===
+								"browser launch failed repeatedly; using static capture",
+						);
+
+						const third = await renderCandidates(
+							renderBatch("third", 3),
+							config,
+							state,
+						);
+						assert(Number(launches) === BROWSER_LAUNCH_FAILURE_LIMIT);
+						assert(third.length === 0);
+						assert(Number(state.summary.failedPages) === 6);
+					},
+				);
+			},
+		);
+	} finally {
+		await rm(outDir, { recursive: true, force: true });
+	}
 }
 
 async function transientLaunchRetryRegression() {
@@ -245,11 +313,11 @@ async function withEnv<T>(
 	}
 }
 
-function shellConfig(outDir: string): Config {
+function shellConfig(outDir: string, max = 1): Config {
 	const config = parseArgs([
 		`${testOrigin}/`,
 		"-m",
-		"1",
+		String(max),
 		"-o",
 		outDir,
 		"--clean",
@@ -259,6 +327,29 @@ function shellConfig(outDir: string): Config {
 	]);
 	assert(!("help" in config) && !("version" in config));
 	return config;
+}
+
+function renderBatch(prefix: string, count: number) {
+	return Array.from({ length: count }, (_, index) => ({
+		input: fetchedShell(`${prefix}-${index}`),
+		reason: "app-shell" as const,
+	}));
+}
+
+function fetchedShell(path: string): FetchedUrl {
+	const url = `${testOrigin}/${path}`;
+	return {
+		source: "seed",
+		result: {
+			ok: true,
+			url,
+			finalUrl: url,
+			status: 200,
+			contentType: "text/html",
+			body: staticShellHtml(),
+			fetchMs: 1,
+		},
+	};
 }
 
 async function shellTransport(input: string | URL | Request) {
