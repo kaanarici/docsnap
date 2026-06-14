@@ -17,6 +17,7 @@ import {
 	emptyContentError,
 	isBlockedChallenge,
 	isLanguageSelector,
+	isLoadingShellPlaceholder,
 } from "./app-shell.ts";
 import { cleanMarkdown, linksFromMarkdown } from "./markdown.ts";
 import { scoreMarkdown } from "./quality.ts";
@@ -46,6 +47,16 @@ export function recordFromExtracted(
 			"empty",
 			rawInjectionSignals,
 		);
+	if (isLoadingShellPlaceholder(markdown, result.body)) {
+		return failedRecord(
+			result,
+			source,
+			metadata,
+			"app shell without static text",
+			"empty",
+			rawInjectionSignals,
+		);
+	}
 	if (isBlockedChallenge(markdown, extracted.title)) {
 		return failedRecord(
 			result,

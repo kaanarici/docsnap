@@ -92,6 +92,8 @@ function fetchLlmsText(
 			retryHttp: options.retryHttp ?? false,
 		},
 		"text/markdown,text/plain,*/*;q=0.8",
+		undefined,
+		options.allowResource,
 	).then((response) => {
 		if (response.finalUrl !== url) {
 			options.cache?.set(response.finalUrl, Promise.resolve(response));

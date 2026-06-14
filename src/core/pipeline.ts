@@ -3,7 +3,6 @@ import { cacheSummary } from "../cache/store.ts";
 import { discover } from "../discover/index.ts";
 import { loadRobots, type Robots } from "../discover/robots.ts";
 import { normalizeUrl } from "../discover/url.ts";
-import { looksLikeAppShell } from "../extract/app-shell.ts";
 import { extractMany } from "../extract/pool.ts";
 import { fetchMany, fetchText } from "../fetch/fetcher.ts";
 import { filteredNonPageResult } from "../fetch/result.ts";
@@ -23,12 +22,6 @@ import {
 	writePages,
 	writeRunFiles,
 } from "../output/writer.ts";
-import {
-	closeRenderState,
-	createRenderState,
-	type RenderState,
-	renderCandidates,
-} from "../render/index.ts";
 import { buildSummary } from "../report/summary.ts";
 import { dedupeRecords } from "./dedupe.ts";
 import { applyInlineState } from "./inline-state.ts";
@@ -43,13 +36,10 @@ import type {
 	Config,
 	DiscoveredUrl,
 	FetchedUrl,
-	FetchResult,
 	PageRecord,
 	PageSuccess,
 	PipelineResult,
-	RenderReason,
 } from "./types.ts";
-import { lowQualityConfidence } from "./types.ts";
 import { urlWithoutFragmentAndQuery } from "./url.ts";
 
 type Progress = (message: string) => void;
@@ -60,97 +50,76 @@ export async function runPipeline(
 ): Promise<PipelineResult> {
 	const started = performance.now();
 	let firstPageMs: number | null = null;
-	const renderState = createRenderState(config, progress);
 	assertOutputRootSafe(config);
-	try {
-		const prior = await loadPrior(config);
-		const refresh = refreshCounters();
-		await prepareOutput(config);
-		progress?.("docsnap: discovering");
-		const discovered = await discover(config);
-		progress?.(`docsnap: fetching ${discovered.length} pages`);
-		const attempted = [...discovered];
-		const seen = new Set(discovered.map((item) => candidateKey(item.url)));
-		const records = await fetchAndExtract(
-			discovered,
-			config,
-			prior,
-			refresh,
-			renderState,
-		);
-		progress?.(`docsnap: extracting ${records.length} pages`);
-		let dedupe = dedupeRecords(records);
-		if (shouldBackfill(config, dedupe.records, discovered)) {
-			progress?.("docsnap: backfilling failed pages");
-			const extra = await backfillCandidates(config, seen);
-			if (extra.length > 0) {
-				attempted.push(...extra);
-				const extraRecords = await fetchAndExtract(
-					extra,
-					config,
-					prior,
-					refresh,
-					renderState,
-				);
-				dedupe = dedupeRecords([...dedupe.records, ...extraRecords]);
-			}
+	const prior = await loadPrior(config);
+	const refresh = refreshCounters();
+	await prepareOutput(config);
+	progress?.("docsnap: discovering");
+	const discovered = await discover(config);
+	progress?.(`docsnap: fetching ${discovered.length} pages`);
+	const attempted = [...discovered];
+	const seen = new Set(discovered.map((item) => candidateKey(item.url)));
+	const records = await fetchAndExtract(discovered, config, prior, refresh);
+	progress?.(`docsnap: extracting ${records.length} pages`);
+	let dedupe = dedupeRecords(records);
+	if (shouldBackfill(config, dedupe.records, discovered)) {
+		progress?.("docsnap: backfilling failed pages");
+		const extra = await backfillCandidates(config, seen);
+		if (extra.length > 0) {
+			attempted.push(...extra);
+			const extraRecords = await fetchAndExtract(extra, config, prior, refresh);
+			dedupe = dedupeRecords([...dedupe.records, ...extraRecords]);
 		}
-		const finalRecords = dedupe.records;
-
-		assignOutputPaths(outputCandidates(finalRecords, config));
-		const links = pathMap(finalRecords);
-		for (const record of finalRecords) {
-			if (!record.ok) continue;
-			record.markdown = rewriteLocalLinks(record, links).trim();
-			record.contentHash = hashContent(record.markdown);
-		}
-		await preserveFetchedAtForUnchangedOutput(finalRecords, prior, config);
-		const snapshot = snapshotStats(
-			finalRecords.filter(hasOutputPath).map((record) => ({
-				path: record.outputPath,
-				body: renderPage(record),
-			})),
-		);
-		const refreshReport = await refreshSummary(
-			prior,
-			finalRecords,
-			attempted,
-			config,
-			refresh,
-		);
-
-		progress?.(
-			config.dryRun ? "docsnap: finalizing" : "docsnap: writing output",
-		);
-		const writeStats = await writePages(finalRecords, config, () => {
-			firstPageMs ??= performance.now() - started;
-		});
-		refreshReport.skippedWrites = writeStats.skippedWrites;
-		await pruneCache(config);
-		const summary = buildSummary(
-			finalRecords,
-			config,
-			attempted.length,
-			dedupe.deduped,
-			snapshot,
-			performance.now() - started,
-			firstPageMs,
-			refreshReport,
-			renderState.summary,
-			cacheSummary(config),
-		);
-		await writeRunFiles(finalRecords, summary, config);
-		return { records: finalRecords, summary };
-	} finally {
-		await closeRenderState(renderState);
 	}
+	const finalRecords = dedupe.records;
+
+	assignOutputPaths(outputCandidates(finalRecords, config));
+	const links = pathMap(finalRecords);
+	for (const record of finalRecords) {
+		if (!record.ok) continue;
+		record.markdown = rewriteLocalLinks(record, links).trim();
+		record.contentHash = hashContent(record.markdown);
+	}
+	await preserveFetchedAtForUnchangedOutput(finalRecords, prior, config);
+	const snapshot = snapshotStats(
+		finalRecords.filter(hasOutputPath).map((record) => ({
+			path: record.outputPath,
+			body: renderPage(record),
+		})),
+	);
+	const refreshReport = await refreshSummary(
+		prior,
+		finalRecords,
+		attempted,
+		config,
+		refresh,
+	);
+
+	progress?.(config.dryRun ? "docsnap: finalizing" : "docsnap: writing output");
+	const writeStats = await writePages(finalRecords, config, () => {
+		firstPageMs ??= performance.now() - started;
+	});
+	refreshReport.skippedWrites = writeStats.skippedWrites;
+	await pruneCache(config);
+	const summary = buildSummary(
+		finalRecords,
+		config,
+		attempted.length,
+		dedupe.deduped,
+		snapshot,
+		performance.now() - started,
+		firstPageMs,
+		refreshReport,
+		cacheSummary(config),
+	);
+	await writeRunFiles(finalRecords, summary, config);
+	return { records: finalRecords, summary };
 }
 async function fetchAndExtract(
 	discovered: DiscoveredUrl[],
 	config: Config,
 	prior: PriorState,
 	refresh: RefreshCounters,
-	renderState: RenderState,
 ): Promise<PageRecord[]> {
 	const robotsByOrigin = new Map<string, Robots>();
 	const allowUrl = config.ignoreRobots
@@ -178,15 +147,8 @@ async function fetchAndExtract(
 	const staticRecords = applyInlineState(
 		extractable,
 		await extractMany(extractable),
-		staticShellReason,
 	);
-	const rendered = await applyRendering(
-		extractable,
-		staticRecords,
-		config,
-		renderState,
-	);
-	return [...reused, ...rendered];
+	return [...reused, ...staticRecords];
 }
 async function recoverNotModified(
 	item: FetchedUrl,
@@ -220,85 +182,6 @@ async function recoverNotModified(
 		allowUrl,
 	);
 	return undefined;
-}
-async function applyRendering(
-	inputs: FetchedUrl[],
-	staticRecords: PageRecord[],
-	config: Config,
-	renderState: RenderState,
-): Promise<PageRecord[]> {
-	const candidates = inputs
-		.map((input, index) => ({
-			input,
-			index,
-			reason: renderReason(input, staticRecords[index]!, config),
-		}))
-		.filter(
-			(
-				item,
-			): item is { input: FetchedUrl; index: number; reason: RenderReason } =>
-				item.reason !== undefined,
-		);
-	if (candidates.length === 0) return staticRecords;
-	const attempts = await renderCandidates(candidates, config, renderState);
-	if (attempts.length === 0) return staticRecords;
-	const output = [...staticRecords];
-	const indexByInput = new Map(
-		candidates.map((item) => [item.input, item.index]),
-	);
-	for (const attempt of attempts) {
-		const index = indexByInput.get(attempt.input);
-		if (index === undefined) continue;
-		const staticRecord = output[index]!;
-		if (attempt.render) {
-			staticRecord.render = attempt.render;
-			staticRecord.timings.renderMs = attempt.page.renderMs;
-		}
-	}
-	return output;
-}
-function renderReason(
-	input: FetchedUrl,
-	record: PageRecord,
-	config: Config,
-): RenderReason | undefined {
-	const result = input.result;
-	if (config.render === "never") return undefined;
-	if (input.source === "asset" || !isHtmlResult(result)) return undefined;
-	if (config.render === "always") return "always";
-	if (
-		record.ok &&
-		record.extractor === "inline-state" &&
-		record.confidence >= lowQualityConfidence
-	) {
-		return undefined;
-	}
-	return staticShellReason(input, record);
-}
-function staticShellReason(
-	input: FetchedUrl,
-	record: PageRecord,
-): RenderReason | undefined {
-	const result = input.result;
-	if (input.source === "asset" || !isHtmlResult(result)) return undefined;
-	const staticAppShell = looksLikeAppShell(result.body);
-	const emptyAppShell =
-		!record.ok &&
-		record.failureKind === "empty" &&
-		record.error === "app shell without static text";
-	const lowConfidenceShell =
-		record.ok && record.confidence < lowQualityConfidence && staticAppShell;
-	if (emptyAppShell) return "empty-app-shell";
-	if (lowConfidenceShell) return "low-confidence-shell";
-	return staticAppShell ? "app-shell" : undefined;
-}
-function isHtmlResult(result: FetchResult) {
-	return (
-		result.ok &&
-		!("notModified" in result && result.notModified) &&
-		(/html|xhtml/i.test(result.contentType) ||
-			/<(?:html|body|script)\b/i.test(result.body))
-	);
 }
 async function allowedByRobots(
 	url: string,

@@ -53,6 +53,37 @@ for (const body of [
 	assert(appShell.error === "app shell without static text");
 }
 
+const loadingShell = await extractPage({
+	source: "seed",
+	result: {
+		ok: true,
+		url: "https://docs.example.com/loading",
+		finalUrl: "https://docs.example.com/loading",
+		status: 200,
+		contentType: "text/html",
+		body: `<html><head><title>Docs</title><link rel="stylesheet" href="/app.css"></head><body><main>Loading documentation, please wait...</main><script src="/app.js"></script></body></html>`,
+		fetchMs: 1,
+	},
+} satisfies FetchedUrl);
+assert(!loadingShell.ok);
+assert(loadingShell.failureKind === "empty");
+assert(loadingShell.error === "app shell without static text");
+
+const shortStaticPage = await extractPage({
+	source: "seed",
+	result: {
+		ok: true,
+		url: "https://docs.example.com/install",
+		finalUrl: "https://docs.example.com/install",
+		status: 200,
+		contentType: "text/html",
+		body: `<html><head><title>Install</title><link rel="stylesheet" href="/site.css"></head><body><main><h1>Install</h1><p>Install docsnap with Bun.</p></main><script src="/app.js"></script></body></html>`,
+		fetchMs: 1,
+	},
+} satisfies FetchedUrl);
+assert(shortStaticPage.ok);
+assert(shortStaticPage.markdown.includes("Install docsnap with Bun."));
+
 // rss/atom feeds are discovery sources, not content pages: a feed reached as a
 // crawl link must be excluded, not captured as raw fenced XML
 const atomFeed = await extractPage({
@@ -72,6 +103,36 @@ assert(atomFeed.failureKind === "empty");
 assert(
 	atomFeed.error === "feed resource used for discovery, not a content page",
 );
+
+const textPlainRssFeed = await extractPage({
+	source: "crawl",
+	result: {
+		ok: true,
+		url: "https://example.com/feed.txt",
+		finalUrl: "https://example.com/feed.txt",
+		status: 200,
+		contentType: "text/plain",
+		body: `<?xml version="1.0"?><rss version="2.0"><channel><title>Example</title><item><title>One</title><link>https://example.com/one</link></item></channel></rss>`,
+		fetchMs: 1,
+	},
+} satisfies FetchedUrl);
+assert(!textPlainRssFeed.ok);
+assert(textPlainRssFeed.failureKind === "empty");
+
+const plainMarkdown = await extractPage({
+	source: "seed",
+	result: {
+		ok: true,
+		url: "https://example.com/readme.txt",
+		finalUrl: "https://example.com/readme.txt",
+		status: 200,
+		contentType: "text/plain",
+		body: "# Plain docs\n\nInstall the command line tool, configure the output directory, and inspect the generated Markdown corpus.",
+		fetchMs: 1,
+	},
+} satisfies FetchedUrl);
+assert(plainMarkdown.ok);
+assert(plainMarkdown.extractor === "markdown");
 
 // an rss feed served as application/xml (caught via the feed-root parse)
 const rssFeed = await extractPage({

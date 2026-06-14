@@ -40,7 +40,7 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 		);
 	// rss/atom feeds are discovery sources, not content pages; exclude them from
 	// the corpus instead of capturing the raw feed XML as a page
-	if (feedLikeContentType(result.contentType) && isFeedResponse(result))
+	if (shouldCheckFeedResponse(result) && isFeedResponse(result))
 		return failedRecord(
 			result,
 			source,
@@ -66,8 +66,28 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 }
 
 // cheap guard so the feed-root DOM parse only runs for xml-ish responses
+// or text/plain bodies that start like feed XML
+function shouldCheckFeedResponse(result: FetchResult): boolean {
+	return (
+		feedLikeContentType(result.contentType) || feedLikeBodyPrefix(result.body)
+	);
+}
+
 function feedLikeContentType(contentType: string): boolean {
 	return /(?:rss|atom)\+xml|\bxml\b/i.test(contentType);
+}
+
+function feedLikeBodyPrefix(body: string): boolean {
+	const prefix = body
+		.slice(0, 2048)
+		.replace(/^\uFEFF/, "")
+		.trimStart();
+	if (/^<(?:rss|feed)\b/i.test(prefix) || /^<rdf:RDF\b/i.test(prefix)) {
+		return true;
+	}
+	return (
+		/^<\?xml\b/i.test(prefix) && /<\s*(?:rss|feed|rdf:RDF)\b/i.test(prefix)
+	);
 }
 
 async function extractBody(result: FetchResult): Promise<ExtractedBody> {

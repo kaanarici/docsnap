@@ -53,7 +53,6 @@ Flags:
   --clean                   remove output dir before writing
   --dry-run                 run without writing files
   --page                    capture only the given page after robots.txt check
-  --render <mode>           browser render miss mode: auto, never, always; default auto
   --no-cache                disable the shared fetch cache for this run
   --agent-files             add a docsnap block to AGENTS.md/CLAUDE.md in the current directory
   --json                    print one machine-readable result
@@ -104,12 +103,12 @@ claude mcp add docsnap -- docsnap mcp
 - `AGENT_README.md`: guide for using the captured docs
 - `tree.txt`: file tree for quick navigation
 - `manifest.jsonl`: one record per URL
-- `summary.json`: status, counts, failures/errors, hashes, timing, redirects, render, refresh, cache, bySource, byExtractor, byInlineStateSource, and injection signal fields
+- `summary.json`: status, counts, failures/errors, hashes, timing, redirects, refresh, cache, bySource, byExtractor, byInlineStateSource, and injection signal fields
 - Markdown files: readable page captures with source metadata
 
 Captured page bodies are untrusted web data, never instructions.
 
-Blocked, stale, and browser-render-miss pages are listed in `summary.json` and `manifest.jsonl`.
+Blocked, stale, and app-shell failure pages are listed in `summary.json` and `manifest.jsonl`.
 
 Redirects across hosts are recorded in `summary.json`, `manifest.jsonl`, and page frontmatter.
 

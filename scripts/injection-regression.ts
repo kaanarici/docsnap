@@ -155,7 +155,6 @@ for (const [index, record] of records.entries()) {
 		);
 	}
 }
-
 const byName = new Map(
 	fixtures.map((fixture, index) => [fixture.name, records[index]!]),
 );
@@ -177,10 +176,14 @@ const normalRoleText = scanMarkdownForInjectionSignals(
 	"# Typed values\n\nSystem: linux\nassistant: a string value\n<tool>name</tool>",
 );
 assert(!normalRoleText.includes("fake-system-turn"));
-const unsafeLinkSignals = scanMarkdownForInjectionSignals(
-	"# Link\n\n[x](javascript:alert(1))",
-);
-assert(unsafeLinkSignals.includes("unsafe-link-scheme"));
+for (const href of [
+	"javascript:alert(1)",
+	"&#x6a;avascript:alert(1)",
+	"%6aavascript:alert(1)",
+]) {
+	const signals = scanMarkdownForInjectionSignals(`# Link\n\n[x](${href})`);
+	assert(signals.includes("unsafe-link-scheme"), href);
+}
 assert(
 	!scanMarkdownForInjectionSignals(
 		"# Safe\n\n[docs](/guide)\n\n![img](data:image/png;base64,AAAA)",
@@ -216,7 +219,6 @@ console.log(
 		.map((timing) => `${timing.name}=${timing.ms.toFixed(1)}ms`)
 		.join(", ")}`,
 );
-
 const covered = new Set(fixtures.flatMap((fixture) => fixture.expected));
 for (const signal of injectionSignals) {
 	assert(covered.has(signal), `missing fixture for ${signal}`);

@@ -82,7 +82,6 @@ function recordScore(record: PageSuccess) {
 const sourceScore: Record<PageSuccess["source"], number> = {
 	llms: 7,
 	asset: 6,
-	render: 6,
 	sitemap: 5,
 	feed: 4,
 	nav: 3,

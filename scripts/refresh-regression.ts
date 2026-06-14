@@ -268,6 +268,71 @@ try {
 } finally {
 	setFetchTransportForTest(undefined);
 }
+const oldRenderRoot = await mkdtemp(join(tmpdir(), "docsnap-old-render-"));
+const oldRenderOutDir = join(oldRenderRoot, "out");
+await mkdir(oldRenderOutDir);
+const oldRenderMarkdown = "Stale browser-rendered corpus page.";
+await writeFile(
+	join(oldRenderOutDir, "stale.md"),
+	priorPage(oldRenderMarkdown),
+);
+await writeFile(
+	join(oldRenderOutDir, "manifest.jsonl"),
+	`${JSON.stringify({
+		ok: true,
+		url: "https://oldrender.example.com/docs/page",
+		finalUrl: "https://oldrender.example.com/docs/page",
+		outputPath: "stale.md",
+		contentHash: hashContent(oldRenderMarkdown),
+		status: 200,
+		source: "render",
+		extractor: "html",
+		confidence: 1,
+		links: [],
+		qualityReasons: [],
+		redirects: [],
+		etag: '"render-v1"',
+		fetchedAt: "2024-01-01T00:00:00.000Z",
+		timings: { fetchMs: 1, extractMs: 1, writeMs: 1 },
+	})}\n`,
+);
+const oldRenderConfig = parseArgs([
+	"https://oldrender.example.com/docs/page",
+	"--page",
+	"-o",
+	oldRenderOutDir,
+	"--quiet",
+]);
+assert(!("help" in oldRenderConfig) && !("version" in oldRenderConfig));
+setFetchTransportForTest(async (input, headers) => {
+	const url = String(input);
+	if (url.endsWith("/robots.txt"))
+		return response(url, 404, "not found", "text/plain");
+	if (headers["if-none-match"] === '"render-v1"') {
+		throw new Error("old render source was reused for conditional refresh");
+	}
+	return refreshResponse(
+		url,
+		200,
+		page("Fresh", "Fresh static page fetched instead of old render source."),
+		{ etag: '"static-v1"' },
+	);
+});
+
+try {
+	const result = await runPipeline(oldRenderConfig);
+	const pageOutput = outputFor(result.records, "/docs/page");
+	assert(result.summary.refresh.priorRecords === 0);
+	assert(result.summary.refresh.reused === 0);
+	const markdown = await readFile(
+		join(oldRenderOutDir, pageOutput.outputPath),
+		"utf8",
+	);
+	assert(markdown.includes("Fresh static page fetched"));
+	assert(!markdown.includes(oldRenderMarkdown));
+} finally {
+	setFetchTransportForTest(undefined);
+}
 
 const unsafeRootConfig = parseArgs([
 	"https://unsafe-root.example.com/docs/",

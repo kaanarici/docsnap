@@ -11,7 +11,6 @@ const valueFlags = new Set([
 	"-m",
 	"--max",
 	"--concurrency",
-	"--render",
 	"--user-agent",
 ]);
 
@@ -26,7 +25,6 @@ Flags:
   --clean                   remove output dir before writing
   --dry-run                 run without writing files
   --page                    capture only the given page after robots.txt check
-  --render <mode>           browser render miss mode: auto, never, always; default auto
   --no-cache                disable the shared fetch cache for this run
   --agent-files             add a docsnap block to AGENTS.md/CLAUDE.md in the current directory
   --json                    print one machine-readable result
@@ -72,7 +70,6 @@ export function parseArgs(argv: string[]): ParsedArgs {
 		pageOnly: false,
 		ignoreRobots: false,
 		cache: true,
-		render: "auto",
 		userAgent:
 			"Mozilla/5.0 (compatible; docsnap; +https://npmjs.com/package/docsnap)",
 		timeoutMs: 10_000,
@@ -98,8 +95,6 @@ export function parseArgs(argv: string[]): ParsedArgs {
 			config.maxExplicit = true;
 		} else if (arg === "--concurrency") {
 			config.concurrency = readInt(argv, ++i, arg);
-		} else if (arg === "--render") {
-			config.render = readRenderMode(argv, ++i, arg);
 		} else if (arg === "--clean") config.clean = true;
 		else if (arg === "--dry-run") config.dryRun = true;
 		else if (arg === "--page") config.pageOnly = true;
@@ -166,10 +161,4 @@ function readInt(argv: string[], index: number, flag: string) {
 	if (!Number.isInteger(value) || value < 1)
 		throw new Error(`${flag} requires a positive integer`);
 	return value;
-}
-
-function readRenderMode(argv: string[], index: number, flag: string) {
-	const value = readValue(argv, index, flag);
-	if (value === "auto" || value === "never" || value === "always") return value;
-	throw new Error(`${flag} must be auto, never, or always`);
 }
