@@ -179,10 +179,36 @@ function unsafeLinkSchemeSignals(markdown: string): InjectionSignal[] {
 }
 
 function hrefScheme(href: string) {
-	const trimmed = trimLeadingSpacesAndControls(href);
+	const trimmed = normalizeSchemePrefix(trimLeadingSpacesAndControls(href));
 	const colon = trimmed.indexOf(":");
 	if (colon <= 0) return undefined;
 	return trimmed.slice(0, colon).toLowerCase();
+}
+
+function normalizeSchemePrefix(value: string) {
+	const prefix = value.slice(0, 64);
+	return decodeHtmlCharRefs(decodePercentBytes(prefix)) + value.slice(64);
+}
+
+function decodeHtmlCharRefs(value: string) {
+	return value.replace(
+		/&#(?:x([0-9a-f]{1,6})|([0-9]{1,7}));?/gi,
+		(_match, hex: string | undefined, decimal: string | undefined) => {
+			const codePoint = Number.parseInt(hex ?? decimal ?? "", hex ? 16 : 10);
+			if (!Number.isFinite(codePoint) || codePoint > 0x10ffff) return "";
+			try {
+				return String.fromCodePoint(codePoint);
+			} catch {
+				return "";
+			}
+		},
+	);
+}
+
+function decodePercentBytes(value: string) {
+	return value.replace(/%([0-9a-f]{2})/gi, (_match, hex: string) =>
+		String.fromCharCode(Number.parseInt(hex, 16)),
+	);
 }
 
 function trimLeadingSpacesAndControls(value: string) {

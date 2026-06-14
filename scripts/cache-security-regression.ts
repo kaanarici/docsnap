@@ -297,16 +297,7 @@ function config(
 	extra: string[] = [],
 	pageOnly = true,
 ): Config {
-	const args = [
-		url,
-		"-o",
-		join(root, name),
-		"--clean",
-		"--quiet",
-		"--render",
-		"never",
-		...extra,
-	];
+	const args = [url, "-o", join(root, name), "--clean", "--quiet", ...extra];
 	if (pageOnly) args.push("--page");
 	const parsed = parseArgs(args);
 	assertConfig(parsed);

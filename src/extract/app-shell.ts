@@ -50,6 +50,28 @@ export function isShellPlaceholder(
 	);
 }
 
+export function isLoadingShellPlaceholder(markdown: string, html: string) {
+	if (!looksLikeAppShell(html)) return false;
+	const compact = placeholderText(markdown);
+	if (!compact || wordCount(compact) > 16 || compact.length > 180) {
+		return false;
+	}
+	if (/\byou need to enable javascript to run this app\b/i.test(compact)) {
+		return true;
+	}
+	const tokens = compact
+		.split(/\s+/)
+		.filter((token) => !loadingStopWords.has(token));
+	if (tokens.length === 0) return false;
+	const placeholder = tokens.filter((token) =>
+		loadingPlaceholderWords.has(token),
+	).length;
+	return (
+		placeholder / tokens.length >= 0.6 &&
+		/\b(?:loading|please wait|enable javascript)\b/i.test(compact)
+	);
+}
+
 export function emptyContentError(html: string) {
 	return emptyShellMarkers.test(html)
 		? "app shell without static text"
@@ -100,6 +122,43 @@ function rawGithubOrXhr(html: string) {
 	return /raw\.githubusercontent\.com|xhrPromise/i.test(html);
 }
 
+function placeholderText(markdown: string) {
+	return markdown
+		.replace(/\u2026/g, " ")
+		.replace(/[#*_`[\]()]/g, " ")
+		.replace(/[^\p{Letter}\p{Number}]+/gu, " ")
+		.toLowerCase()
+		.trim();
+}
+
 function markerPattern(sources: string[]) {
 	return new RegExp(sources.join("|"), "i");
 }
+
+const loadingPlaceholderWords = new Set([
+	"docs",
+	"documentation",
+	"enable",
+	"javascript",
+	"js",
+	"loads",
+	"loading",
+	"wait",
+	"waiting",
+]);
+const loadingStopWords = new Set([
+	"a",
+	"an",
+	"and",
+	"app",
+	"for",
+	"in",
+	"of",
+	"please",
+	"run",
+	"the",
+	"this",
+	"to",
+	"you",
+	"your",
+]);

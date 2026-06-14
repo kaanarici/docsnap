@@ -3,6 +3,7 @@ import type { Config, FetchResult } from "../src/core/types.ts";
 import { discoverAssetPages } from "../src/discover/assets.ts";
 import { crawlScoped } from "../src/discover/crawl.ts";
 import { discoverFeed, discoverRelNextPages } from "../src/discover/feed.ts";
+import { discoverLlms } from "../src/discover/llms.ts";
 import type { Robots } from "../src/discover/robots.ts";
 import { discoverSitemaps } from "../src/discover/sitemap.ts";
 import { fetchText, setFetchTransportForTest } from "../src/fetch/fetcher.ts";
@@ -10,6 +11,7 @@ import { fetchText, setFetchTransportForTest } from "../src/fetch/fetcher.ts";
 await discoveryFinalUrlRegression();
 await discoveryResourceGateRegression();
 await fetchRedirectGateRegression();
+await llmsRedirectGateRegression();
 
 async function discoveryFinalUrlRegression() {
 	const config = parsedConfig("https://docs.example.com/");
@@ -153,6 +155,35 @@ async function fetchRedirectGateRegression() {
 		fetched.join(" ") ===
 			"https://docs.example.com/http https://docs.example.com/refresh",
 	);
+}
+
+async function llmsRedirectGateRegression() {
+	const config = parsedConfig("https://docs.example.com/");
+	const finalUrl = "https://llmsgate.example/private/llms.txt";
+	const fetched: string[] = [];
+	await withTransport(
+		async (url) => {
+			fetched.push(url);
+			if (url === "https://llmsgate.example/llms.txt") {
+				return response(url, 301, "", "text/plain", { location: finalUrl });
+			}
+			if (url === finalUrl) {
+				throw new Error("robots-disallowed redirected llms.txt was fetched");
+			}
+			return response(url, 404, "not found", "text/plain");
+		},
+		async () => {
+			const urls = await discoverLlms(
+				"https://llmsgate.example/docs/",
+				config,
+				{
+					allowResource: (url) => url !== finalUrl,
+				},
+			);
+			assert(urls.length === 0);
+		},
+	);
+	assert(!fetched.includes(finalUrl));
 }
 
 async function withTransport(

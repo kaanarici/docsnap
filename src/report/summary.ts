@@ -15,7 +15,6 @@ import {
 	type PageSuccess,
 	pageExtractors,
 	type RefreshSummary,
-	type RenderSummary,
 	type RunSummary,
 } from "../core/types.ts";
 
@@ -30,7 +29,6 @@ export function buildSummary(
 	elapsedMs: number,
 	firstPageMs: number | null = null,
 	refresh: RefreshSummary = emptyRefreshSummary(),
-	render: RenderSummary = emptyRenderSummary(config),
 	cache: CacheSummary = emptyCacheSummary(config),
 ): RunSummary {
 	let written = 0;
@@ -126,25 +124,8 @@ export function buildSummary(
 		),
 		byFailureKind,
 		errors,
-		render,
 		refresh,
 		cache,
-	};
-}
-
-export function emptyRenderSummary(config: Config): RenderSummary {
-	return {
-		mode: config.render,
-		renderer: "none",
-		browser: null,
-		attempted: 0,
-		renderedPages: 0,
-		failedPages: 0,
-		elapsedMs: 0,
-		resourceRequests: 0,
-		blockedRequests: 0,
-		unavailableReason: null,
-		pages: [],
 	};
 }
 

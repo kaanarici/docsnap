@@ -204,8 +204,6 @@ async function visibleStaticContentWinsRegression() {
 		assert(!record.markdown.includes("Hidden attacker prose"));
 		assert(result.summary.byExtractor.html === 1);
 		assert(result.summary.byExtractor["inline-state"] === 0);
-		assert(result.summary.render.attempted === 1);
-		assert(record.render?.error?.startsWith("render_miss:"));
 	} finally {
 		setFetchTransportForTest(undefined);
 	}
@@ -235,7 +233,6 @@ async function pipelineRegression() {
 		assert(record.extractor === "inline-state");
 		assert(record.inlineStateSource === "next-data");
 		assert(record.markdown.includes("The pipeline should recover this prose"));
-		assert(result.summary.render.attempted === 0);
 		assert(result.summary.byExtractor["inline-state"] === 1);
 		assert(result.summary.byInlineStateSource["next-data"] === 1);
 		const summary = JSON.parse(
@@ -267,7 +264,7 @@ function inlineShell() {
 			props: {
 				pageProps: {
 					title: "Inline Docs",
-					body: "The pipeline should recover this prose from inline state before browser rendering. It contains enough documentation words to pass quality scoring and become a normal Markdown page.",
+					body: "The pipeline should recover this prose from inline state before any app-shell failure is recorded. It contains enough documentation words to pass quality scoring and become a normal Markdown page.",
 					more: "This verifies that recovered state flows through extraction, quality scoring, summary reporting, and file writing without changing the renderer.",
 				},
 			},

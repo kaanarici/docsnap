@@ -6,7 +6,6 @@ export const discoverySources = [
 	"nav",
 	"crawl",
 	"asset",
-	"render",
 ] as const;
 
 export type DiscoverySource = (typeof discoverySources)[number];
@@ -70,13 +69,6 @@ export const lowQualityConfidence = 0.6;
 
 export type RunStatus = "ok" | "partial" | "failed";
 export type MaxAppliesTo = "all" | "non-llms";
-export type RenderMode = "auto" | "never" | "always";
-export type RenderReason =
-	| "always"
-	| "app-shell"
-	| "empty-app-shell"
-	| "low-confidence-shell";
-export type RenderRenderer = "none";
 
 export type Config = {
 	seedUrl: string;
@@ -91,7 +83,6 @@ export type Config = {
 	pageOnly: boolean;
 	ignoreRobots: boolean;
 	cache: boolean;
-	render: RenderMode;
 	userAgent: string;
 	timeoutMs: number;
 	retryHttp?: boolean;
@@ -167,16 +158,6 @@ type PageTimings = {
 	fetchMs: number;
 	extractMs: number;
 	writeMs: number;
-	renderMs?: number;
-};
-
-export type PageRender = {
-	renderer: RenderRenderer;
-	reason: RenderReason;
-	timedOut?: boolean;
-	resourceRequests: number;
-	blockedRequests: number;
-	error?: string;
 };
 
 type PageBase = {
@@ -190,7 +171,6 @@ type PageBase = {
 	lastModified?: string;
 	fetchedAt: string;
 	injectionSignals: InjectionSignal[];
-	render?: PageRender;
 	publishedAt?: string;
 	updatedAt?: string;
 };
@@ -259,7 +239,6 @@ export type RunSummary = {
 	byInlineStateSource: Partial<Record<InlineStateSource, number>>;
 	byFailureKind: Partial<Record<FailureKind, number>>;
 	errors: Array<{ url: string; error: string; kind: FailureKind }>;
-	render: RenderSummary;
 	refresh: RefreshSummary;
 	cache: CacheSummary;
 	agentFilesUpdated?: string[];
@@ -276,31 +255,6 @@ export type CacheSummary = {
 	bytesRead: number;
 	bytesWritten: number;
 	evictedBytes: number;
-};
-
-export type RenderPageSummary = {
-	url: string;
-	reason: RenderReason;
-	ok: boolean;
-	renderMs: number;
-	resourceRequests: number;
-	blockedRequests: number;
-	timedOut?: boolean;
-	error?: string;
-};
-
-export type RenderSummary = {
-	mode: RenderMode;
-	renderer: RenderRenderer;
-	browser: string | null;
-	attempted: number;
-	renderedPages: number;
-	failedPages: number;
-	elapsedMs: number;
-	resourceRequests: number;
-	blockedRequests: number;
-	unavailableReason: string | null;
-	pages: RenderPageSummary[];
 };
 
 export type RefreshChange = "new" | "changed" | "unchanged" | "removed";

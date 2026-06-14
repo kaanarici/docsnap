@@ -211,8 +211,7 @@ function isSource(value: unknown): value is DiscoverySource {
 		value === "feed" ||
 		value === "nav" ||
 		value === "crawl" ||
-		value === "asset" ||
-		value === "render"
+		value === "asset"
 	);
 }
 

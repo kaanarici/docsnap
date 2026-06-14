@@ -63,7 +63,6 @@ Prefer focused reads for large files. Use frontmatter URLs when you need to cite
 - Page limit reached: ${summary.maxReached ? `yes, stopped at ${summary.max}; this capture may be incomplete` : "no"}
 - Failure kinds: ${failureKinds(summary)}
 - Refresh: ${refreshLine(summary)}
-- JS rendering: ${renderLine(summary)}
 - Snapshot root: ${summary.rootHash}
 - Rendered bytes: ${summary.renderedBytes}
 - Output: ${summary.outDir}
@@ -148,14 +147,6 @@ function refreshLine(summary: RunSummary) {
 	const refresh = summary.refresh;
 	if (!refresh.enabled) return `disabled (${refresh.reason ?? "unknown"})`;
 	return `new=${refresh.new}, changed=${refresh.changed}, unchanged=${refresh.unchanged}, removed=${refresh.removed}`;
-}
-
-function renderLine(summary: RunSummary) {
-	const render = summary.render;
-	if (render.mode === "never") return "disabled";
-	if (render.unavailableReason)
-		return `unavailable (${render.unavailableReason}), missed=${render.failedPages}`;
-	return `mode=${render.mode}, rendered=${render.renderedPages}/${render.attempted}, blockedRequests=${render.blockedRequests}`;
 }
 
 function refreshSection(summary: RunSummary) {
