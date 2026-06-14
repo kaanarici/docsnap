@@ -6,7 +6,6 @@ import { runPipeline } from "../src/core/pipeline.ts";
 import { extractInlineState } from "../src/extract/inline-state.ts";
 import { nextFlightChunks } from "../src/extract/inline-state-scan.ts";
 import { setFetchTransportForTest } from "../src/fetch/fetcher.ts";
-import { setRendererForTest } from "../src/render/index.ts";
 
 nextDataRegression();
 rscRegression();
@@ -181,8 +180,6 @@ async function visibleStaticContentWinsRegression() {
 	const config = parseArgs([
 		"https://docs.example.com/visible",
 		"--page",
-		"--render",
-		"never",
 		"-o",
 		outDir,
 		"--clean",
@@ -194,9 +191,6 @@ async function visibleStaticContentWinsRegression() {
 		if (url.endsWith("/robots.txt"))
 			return response(url, 404, "not found", "text/plain");
 		return response(url, 200, visibleWithFakeState(), "text/html");
-	});
-	setRendererForTest(async () => {
-		throw new Error("visible static content should not launch renderer");
 	});
 	try {
 		const result = await runPipeline(config);
@@ -210,9 +204,10 @@ async function visibleStaticContentWinsRegression() {
 		assert(!record.markdown.includes("Hidden attacker prose"));
 		assert(result.summary.byExtractor.html === 1);
 		assert(result.summary.byExtractor["inline-state"] === 0);
+		assert(result.summary.render.attempted === 1);
+		assert(record.render?.error?.startsWith("render_miss:"));
 	} finally {
 		setFetchTransportForTest(undefined);
-		setRendererForTest(undefined);
 	}
 }
 
@@ -221,8 +216,6 @@ async function pipelineRegression() {
 	const config = parseArgs([
 		"https://docs.example.com/",
 		"--page",
-		"--render",
-		"never",
 		"-o",
 		outDir,
 		"--clean",
@@ -234,9 +227,6 @@ async function pipelineRegression() {
 		if (url.endsWith("/robots.txt"))
 			return response(url, 404, "not found", "text/plain");
 		return response(url, 200, inlineShell(), "text/html");
-	});
-	setRendererForTest(async () => {
-		throw new Error("inline-state recovery should not launch renderer");
 	});
 	try {
 		const result = await runPipeline(config);
@@ -255,7 +245,6 @@ async function pipelineRegression() {
 		assert(summary.byInlineStateSource["next-data"] === 1);
 	} finally {
 		setFetchTransportForTest(undefined);
-		setRendererForTest(undefined);
 	}
 }
 

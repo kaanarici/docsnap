@@ -2,9 +2,8 @@ import { pruneCache } from "../cache/eviction.ts";
 import { cacheSummary } from "../cache/store.ts";
 import { looksLikeAppShell } from "../discover/assets.ts";
 import { discover } from "../discover/index.ts";
-import { discoverPageLinks } from "../discover/nav.ts";
 import { loadRobots, type Robots } from "../discover/robots.ts";
-import { inScope, normalizeUrl, scopeFromSeed } from "../discover/url.ts";
+import { normalizeUrl } from "../discover/url.ts";
 import { extractMany } from "../extract/pool.ts";
 import { fetchMany, fetchText } from "../fetch/fetcher.ts";
 import { filteredNonPageResult } from "../fetch/result.ts";
@@ -31,7 +30,6 @@ import {
 	renderCandidates,
 } from "../render/index.ts";
 import { buildSummary } from "../report/summary.ts";
-import { validatePublicHttpUrl } from "../security/url.ts";
 import { dedupeRecords } from "./dedupe.ts";
 import { applyInlineState } from "./inline-state.ts";
 import { hasOutputPath, isPageSuccess } from "./records.ts";
@@ -73,32 +71,14 @@ export async function runPipeline(
 		progress?.(`docsnap: fetching ${discovered.length} pages`);
 		const attempted = [...discovered];
 		const seen = new Set(discovered.map((item) => candidateKey(item.url)));
-		const first = await fetchAndExtract(
+		const records = await fetchAndExtract(
 			discovered,
 			config,
 			prior,
 			refresh,
 			renderState,
 		);
-		progress?.(`docsnap: extracting ${first.records.length} pages`);
-		let records = first.records;
-		const renderedBackfill = await renderedLinkBackfill(
-			first.rendered,
-			config,
-			seen,
-			attempted.length,
-		);
-		if (renderedBackfill.length > 0) {
-			attempted.push(...renderedBackfill);
-			const extra = await fetchAndExtract(
-				renderedBackfill,
-				config,
-				prior,
-				refresh,
-				renderState,
-			);
-			records = [...records, ...extra.records];
-		}
+		progress?.(`docsnap: extracting ${records.length} pages`);
 		let dedupe = dedupeRecords(records);
 		if (shouldBackfill(config, dedupe.records, discovered)) {
 			progress?.("docsnap: backfilling failed pages");
@@ -112,7 +92,7 @@ export async function runPipeline(
 					refresh,
 					renderState,
 				);
-				dedupe = dedupeRecords([...dedupe.records, ...extraRecords.records]);
+				dedupe = dedupeRecords([...dedupe.records, ...extraRecords]);
 			}
 		}
 		const finalRecords = dedupe.records;
@@ -171,7 +151,7 @@ async function fetchAndExtract(
 	prior: PriorState,
 	refresh: RefreshCounters,
 	renderState: RenderState,
-): Promise<{ records: PageRecord[]; rendered: FetchResult[] }> {
+): Promise<PageRecord[]> {
 	const robotsByOrigin = new Map<string, Robots>();
 	const allowUrl = config.ignoreRobots
 		? undefined
@@ -206,10 +186,7 @@ async function fetchAndExtract(
 		config,
 		renderState,
 	);
-	return {
-		records: [...reused, ...rendered.records],
-		rendered: rendered.results,
-	};
+	return [...reused, ...rendered];
 }
 async function recoverNotModified(
 	item: FetchedUrl,
@@ -249,7 +226,7 @@ async function applyRendering(
 	staticRecords: PageRecord[],
 	config: Config,
 	renderState: RenderState,
-): Promise<{ records: PageRecord[]; results: FetchResult[] }> {
+): Promise<PageRecord[]> {
 	const candidates = inputs
 		.map((input, index) => ({
 			input,
@@ -262,16 +239,10 @@ async function applyRendering(
 			): item is { input: FetchedUrl; index: number; reason: RenderReason } =>
 				item.reason !== undefined,
 		);
-	if (candidates.length === 0) return { records: staticRecords, results: [] };
+	if (candidates.length === 0) return staticRecords;
 	const attempts = await renderCandidates(candidates, config, renderState);
-	if (attempts.length === 0) return { records: staticRecords, results: [] };
-	const renderedInputs = attempts
-		.map((attempt) => attempt.rendered)
-		.filter((input): input is FetchedUrl => Boolean(input));
-	const renderedRecords = await extractMany(renderedInputs);
+	if (attempts.length === 0) return staticRecords;
 	const output = [...staticRecords];
-	const renderedResults: FetchResult[] = [];
-	let renderedIndex = 0;
 	const indexByInput = new Map(
 		candidates.map((item) => [item.input, item.index]),
 	);
@@ -279,22 +250,12 @@ async function applyRendering(
 		const index = indexByInput.get(attempt.input);
 		if (index === undefined) continue;
 		const staticRecord = output[index]!;
-		if (!attempt.rendered) {
-			if (attempt.render) staticRecord.render = attempt.render;
-			continue;
-		}
-		const renderedRecord = renderedRecords[renderedIndex++]!;
-		renderedResults.push(attempt.rendered.result);
-		if (attempt.render) renderedRecord.render = attempt.render;
-		renderedRecord.timings.renderMs = attempt.page.renderMs;
-		if (shouldUseRenderedRecord(staticRecord, renderedRecord)) {
-			output[index] = renderedRecord;
-		} else if (attempt.render) {
+		if (attempt.render) {
 			staticRecord.render = attempt.render;
 			staticRecord.timings.renderMs = attempt.page.renderMs;
 		}
 	}
-	return { records: output, results: renderedResults };
+	return output;
 }
 function renderReason(
 	input: FetchedUrl,
@@ -338,54 +299,6 @@ function isHtmlResult(result: FetchResult) {
 		(/html|xhtml/i.test(result.contentType) ||
 			/<(?:html|body|script)\b/i.test(result.body))
 	);
-}
-function shouldUseRenderedRecord(
-	staticRecord: PageRecord,
-	renderedRecord: PageRecord,
-) {
-	if (!renderedRecord.ok) return false;
-	return (
-		!staticRecord.ok ||
-		renderedRecord.confidence >= lowQualityConfidence ||
-		renderedRecord.confidence > staticRecord.confidence
-	);
-}
-
-async function renderedLinkBackfill(
-	rendered: FetchResult[],
-	config: Config,
-	seen: Set<string>,
-	attemptedCount: number,
-): Promise<DiscoveredUrl[]> {
-	if (
-		config.pageOnly ||
-		rendered.length === 0 ||
-		attemptedCount >= config.max
-	) {
-		return [];
-	}
-	const seed = config.seedUrl;
-	const scope = scopeFromSeed(seed);
-	const robotsByOrigin = new Map<string, Robots>();
-	const out: DiscoveredUrl[] = [];
-	for (const result of rendered) {
-		for (const raw of discoverPageLinks(result.body, result.finalUrl)) {
-			if (attemptedCount + out.length >= config.max) return out;
-			const url = normalizeUrl(raw, result.finalUrl);
-			if (
-				!url ||
-				seen.has(candidateKey(url)) ||
-				!inScope(url, seed, scope) ||
-				validatePublicHttpUrl(url) ||
-				!(await allowedByRobots(url, config, robotsByOrigin))
-			) {
-				continue;
-			}
-			seen.add(candidateKey(url));
-			out.push({ url, source: "render" });
-		}
-	}
-	return out;
 }
 async function allowedByRobots(
 	url: string,

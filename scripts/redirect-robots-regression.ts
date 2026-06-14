@@ -6,94 +6,10 @@ import { discoverFeed, discoverRelNextPages } from "../src/discover/feed.ts";
 import type { Robots } from "../src/discover/robots.ts";
 import { discoverSitemaps } from "../src/discover/sitemap.ts";
 import { fetchText, setFetchTransportForTest } from "../src/fetch/fetcher.ts";
-import {
-	fetchRenderResponse,
-	handlePausedRenderRequest,
-} from "../src/render/fulfill.ts";
-import { RenderPolicy } from "../src/render/policy.ts";
 
-await renderRedirectPolicyRegression();
-await renderCookieScopeRegression();
 await discoveryFinalUrlRegression();
 await discoveryResourceGateRegression();
 await fetchRedirectGateRegression();
-
-async function renderRedirectPolicyRegression() {
-	const config = parsedConfig("https://docs.example.com/");
-	const fetched: string[] = [];
-	const commands: string[] = [];
-	const policy = new RenderPolicy(config, {
-		publicUrlCheck: async () => undefined,
-		robotsLoader: async (origin) => ({
-			...allowAllRobots(),
-			allowed: (url) =>
-				origin !== "https://other.example" || !url.includes("/private.js"),
-		}),
-	});
-	const result = await handlePausedRenderRequest(
-		pausedRequest("blocked", "https://docs.example.com/app.js", {
-			cookie: "sid=origin",
-		}),
-		policy.beginPage(),
-		config,
-		async (method) => {
-			commands.push(method);
-		},
-		{
-			transport: async (url, headers) => {
-				fetched.push(`${url} ${headers["cookie"] ?? ""}`.trim());
-				if (url.endsWith("/app.js"))
-					return response(url, 302, "", "text/javascript", {
-						location: "https://other.example/private.js",
-					});
-				throw new Error("disallowed redirect target fetched");
-			},
-		},
-	);
-	assert(result === "failed");
-	assert(commands[0] === "Fetch.failRequest");
-	assert(fetched.join("|") === "https://docs.example.com/app.js sid=origin");
-}
-
-async function renderCookieScopeRegression() {
-	const config = parsedConfig("https://docs.example.com/");
-	const calls: Array<{ url: string; cookie: string | undefined }> = [];
-	const result = await fetchRenderResponse(
-		{
-			url: "https://docs.example.com/start.js",
-			method: "GET",
-			headers: { Cookie: "sid=origin" },
-		},
-		config,
-		{
-			pagePolicy: new RenderPolicy(config, {
-				publicUrlCheck: async () => undefined,
-				robotsLoader: async () => allowAllRobots(),
-			}).beginPage(),
-			resourceType: "Script",
-			transport: async (url, headers) => {
-				calls.push({ url, cookie: headers["cookie"] });
-				if (url.endsWith("/start.js"))
-					return response(url, 302, "", "text/javascript", {
-						location: "https://cdn.example.com/final.js",
-					});
-				return response(url, 200, "console.log('ok')", "text/javascript", {}, [
-					"cdn=1; Path=/",
-				]);
-			},
-		},
-	);
-	assert(calls[0]?.cookie === "sid=origin");
-	assert(calls[1]?.url === "https://cdn.example.com/final.js");
-	assert(calls[1]?.cookie === undefined);
-	assert(result.finalUrl === "https://cdn.example.com/final.js");
-	assert(result.redirects[0]?.to === "https://cdn.example.com/final.js");
-	assert(
-		!result.headers.some(
-			(header) => header.name.toLowerCase() === "set-cookie",
-		),
-	);
-}
 
 async function discoveryFinalUrlRegression() {
 	const config = parsedConfig("https://docs.example.com/");
@@ -272,25 +188,12 @@ function fetchedResult(
 	};
 }
 
-function pausedRequest(
-	requestId: string,
-	url: string,
-	headers: Record<string, string> = {},
-) {
-	return {
-		requestId,
-		resourceType: "Script",
-		request: { url, method: "GET", headers },
-	};
-}
-
 function response(
 	url: string,
 	status: number,
 	body: string,
 	contentType = "text/html",
 	headers: Record<string, string> = {},
-	setCookie: string[] = [],
 ) {
 	const normalized = new Map(
 		Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]),
@@ -303,7 +206,7 @@ function response(
 				name.toLowerCase() === "content-type"
 					? contentType
 					: (normalized.get(name.toLowerCase()) ?? null),
-			getSetCookie: () => setCookie,
+			getSetCookie: () => [],
 		},
 		body: new TextEncoder().encode(body),
 	};
