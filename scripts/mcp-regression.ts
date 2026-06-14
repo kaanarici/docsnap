@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getCorpusSummary } from "../src/mcp/corpus.ts";
 import {
 	exitOnSandboxNetworkDisabled,
 	startLoopbackServer,
@@ -341,6 +342,27 @@ async function main(): Promise<void> {
 		await fixture?.stop();
 		await rm(tmpRoot, { recursive: true, force: true });
 		await rm(outsideRoot, { recursive: true, force: true });
+	}
+}
+
+// a parseable but partially-written/foreign summary.json (missing collection
+// fields) must degrade gracefully instead of throwing on .slice
+{
+	const minimalRoot = await mkdtemp(join(tmpdir(), "docsnap-minimal-"));
+	try {
+		await writeFile(
+			join(minimalRoot, "summary.json"),
+			JSON.stringify({ seedUrl: "https://docs.example.com/" }),
+		);
+		const view = await getCorpusSummary(minimalRoot, {
+			includeErrors: true,
+			includeRefreshChanges: true,
+			errorLimit: 5,
+		});
+		assert(Array.isArray(view.errors) && view.errors.length === 0);
+		assert(!("refresh" in view));
+	} finally {
+		await rm(minimalRoot, { recursive: true, force: true });
 	}
 }
 
