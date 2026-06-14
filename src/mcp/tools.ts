@@ -2,7 +2,12 @@ import { parseArgs } from "../cli/args.ts";
 import { runPipeline } from "../core/pipeline.ts";
 import type { Config } from "../core/types.ts";
 import { resolvePriorOutputPath } from "../output/prior.ts";
-import { type McpState, readableCorpusDir, rememberCorpus } from "./access.ts";
+import {
+	type McpState,
+	readableCorpusDir,
+	rememberCorpus,
+	writableCorpusDir,
+} from "./access.ts";
 import {
 	assertSafeProjectRoot,
 	getCorpusSummary,
@@ -50,7 +55,13 @@ export async function callTool(
 
 async function capture(args: unknown, state: McpState) {
 	const input = captureInput(args);
-	const result = await runPipeline(configForCapture(input), stderrProgress);
+	const output_dir = input.output_dir
+		? await writableCorpusDir(input.output_dir)
+		: input.output_dir;
+	const result = await runPipeline(
+		configForCapture({ ...input, output_dir }),
+		stderrProgress,
+	);
 	rememberCorpus(state, result.summary.outDir);
 	return jsonToolResult(captureResult(result.summary));
 }

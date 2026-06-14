@@ -64,7 +64,10 @@ const pages: Record<string, string> = {
 	),
 };
 
+// the server runs with cwd=tmpRoot (a workspace); the corpus lives under it,
+// and a separate outsideRoot models a dir the server must not read or write
 const tmpRoot = await mkdtemp(join(tmpdir(), "docsnap-mcp-"));
+const outsideRoot = await mkdtemp(join(tmpdir(), "docsnap-outside-"));
 const outDir = join(tmpRoot, "capture");
 let fixture: TestServer | undefined;
 let client: McpClient | undefined;
@@ -73,7 +76,7 @@ async function main(): Promise<void> {
 	try {
 		fixture = await startLoopbackServer(fixtureResponse);
 		origin = fixture.origin;
-		client = new McpClient(origin);
+		client = new McpClient(origin, tmpRoot);
 
 		const oversized = assertObject(await client.raw("x".repeat(4_194_305)));
 		assert(get(oversized, "error.code") === -32700);
@@ -96,7 +99,7 @@ async function main(): Promise<void> {
 		);
 		assert(Array.isArray(batch) && batch.length === 2, "batch returns array");
 
-		const outsideDir = join(tmpRoot, "outside-corpus");
+		const outsideDir = join(outsideRoot, "outside-corpus");
 		const outsideSummary = `${JSON.stringify({
 			seedUrl: `${origin}/`,
 			outDir: "outside refresh secret",
@@ -144,6 +147,26 @@ async function main(): Promise<void> {
 			String(get(escapedResource, "error.message")).includes(
 				"under the MCP server cwd",
 			),
+		);
+
+		// capture must not write/clean outside cwd (reads are already contained)
+		const captureEscape = (await client.request("tools/call", {
+			name: "docsnap_capture",
+			arguments: { url: `${origin}/`, output_dir: outsideDir, clean: true },
+		})) as ToolCallResult;
+		assert(
+			captureEscape.isError === true,
+			"capture outside cwd should be rejected",
+		);
+		assert(
+			(captureEscape.content[0]?.text ?? "").includes(
+				"under the MCP server cwd",
+			),
+		);
+		assert(
+			(await readFile(join(outsideDir, "summary.json"), "utf8")) ===
+				outsideSummary,
+			"rejected capture must not clean or write the outside dir",
 		);
 
 		const toolsList = assertObject(await client.request("tools/list", {}));
@@ -268,6 +291,19 @@ async function main(): Promise<void> {
 		assert(read.text.includes("WEB-DERIVED CONTENT (UNTRUSTED DATA)"));
 		assert(read.text.includes("Source URL:"));
 		assert(read.text.includes("Injection signals: ai-directed-instruction"));
+		// the fence is tagged with a per-response nonce a captured page can't forge
+		const fence = read.text.match(
+			/----- BEGIN WEB CONTENT ([0-9a-f-]{36}) -----/,
+		);
+		assert(fence, "web content fence should be tagged with a nonce");
+		assert(
+			read.text.includes(`----- END WEB CONTENT ${fence[1]} -----`),
+			"begin/end fence nonce should match",
+		);
+		assert(
+			!read.text.includes("----- BEGIN WEB CONTENT -----"),
+			"fence must not use a predictable untagged delimiter",
+		);
 
 		const resources = assertObject(await client.request("resources/list", {}));
 		const listedResources = (resources as { resources: ListedResource[] })
@@ -304,6 +340,7 @@ async function main(): Promise<void> {
 		await client?.stop();
 		await fixture?.stop();
 		await rm(tmpRoot, { recursive: true, force: true });
+		await rm(outsideRoot, { recursive: true, force: true });
 	}
 }
 

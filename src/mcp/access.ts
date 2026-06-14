@@ -1,4 +1,5 @@
 import { readFile, realpath, stat } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { isInsideOrSame } from "../core/fs-safety.ts";
 import { resolvePriorOutputPath } from "../output/prior.ts";
 
@@ -40,6 +41,27 @@ export async function readableCorpusDir(
 	throw new Error(
 		"output_dir must be under the MCP server cwd or captured by this server session",
 	);
+}
+
+// capture writes (and with clean:true, rm -rf) a target dir; unlike reads the
+// dir need not exist yet, so realpath the deepest existing ancestor (resolving
+// symlinks consistently with cwd) and reattach the missing tail before checking
+// containment — defeats a symlinked ancestor escaping cwd
+export async function writableCorpusDir(outputDir: string): Promise<string> {
+	const cwd = await realpath(process.cwd());
+	const resolved = await resolveRealPath(resolve(cwd, outputDir));
+	if (!isInsideOrSame(cwd, resolved)) {
+		throw new Error("output_dir must be under the MCP server cwd");
+	}
+	return resolved;
+}
+
+async function resolveRealPath(target: string): Promise<string> {
+	const existing = await realpathOrUndefined(target);
+	if (existing !== undefined) return existing;
+	const parent = dirname(target);
+	if (parent === target) return target;
+	return join(await resolveRealPath(parent), basename(target));
 }
 
 export async function readBoundedCorpusFile(
