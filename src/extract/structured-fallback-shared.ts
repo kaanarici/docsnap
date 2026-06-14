@@ -253,6 +253,27 @@ export function linkText(value: string) {
 	return out.join("").trim();
 }
 
+export function safeHref(value: string | null, baseUrl: string) {
+	if (!value) return undefined;
+	const stripped = stripControlChars(value.trim());
+	if (!stripped || hasUnsafeHrefChar(stripped)) return undefined;
+	try {
+		const resolved = new URL(stripped, baseUrl);
+		if (!allowedSchemes.has(resolved.protocol)) return undefined;
+		return stripped.startsWith("//") ? resolved.href : stripped;
+	} catch {
+		return undefined;
+	}
+}
+
+// content-bearing alt only: empty/missing alt is decorative (HTML spec) and dropped
+export function imageMarkdown(element: Element, baseUrl: string) {
+	const alt = linkText(element.getAttribute("alt") ?? "");
+	if (!alt) return "";
+	const src = safeHref(element.getAttribute("src"), baseUrl);
+	return src ? `![${alt}](${src})` : alt;
+}
+
 export function stripControlChars(value: string) {
 	const out: string[] = [];
 	for (const char of value) {

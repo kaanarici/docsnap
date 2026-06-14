@@ -92,6 +92,77 @@ assert(codeDoc.markdown.includes("```ts"));
 assert(codeDoc.markdown.includes('  url: "https://example.com/docs",'));
 assert(codeDoc.markdown.includes("console.log(result.markdown);"));
 
+const definitionList = await page(
+	"definition-list",
+	`<html><head><title>API Options</title></head><body><main>
+		${mediaDecoy}
+		<h1>API Options</h1>
+		<p>Public reference documentation lists capture options as a definition list for agents and human reviewers alike.</p>
+		<dl>
+			<dt>timeout</dt>
+			<dd>Maximum milliseconds to wait before a public capture is abandoned.</dd>
+			<dt>retries</dt>
+			<dd>Number of additional attempts when a transient network failure occurs.</dd>
+		</dl>
+	</main></body></html>`,
+);
+assertOk(definitionList);
+assert(
+	definitionList.extractor === "structured",
+	"definition list should use structured",
+);
+assert(definitionList.markdown.includes("**timeout**"));
+assert(
+	definitionList.markdown.includes(
+		": Maximum milliseconds to wait before a public capture is abandoned.",
+	),
+);
+assert(definitionList.markdown.includes("**retries**"));
+// the term/definition boundary must survive (not fused into one run-on line)
+assert(
+	!/timeout\s+Maximum milliseconds/.test(definitionList.markdown),
+	"definition terms and values must not fuse into a run-on",
+);
+
+// block-level img (direct child of main) exercises the render path; empty-alt is decorative
+const blockImage = await page(
+	"block-image",
+	`<html><head><title>Architecture</title></head><body><main>
+		${mediaDecoy}
+		<h1>Architecture</h1>
+		<p>Public architecture documentation describes the capture pipeline with a single explanatory diagram for downstream agents.</p>
+		<img src="/diagram.png" alt="Pipeline diagram showing fetch then extract then write stages">
+		<img src="/spacer.png" alt="">
+	</main></body></html>`,
+);
+assertOk(blockImage);
+assert(
+	blockImage.markdown.includes(
+		"![Pipeline diagram showing fetch then extract then write stages](/diagram.png)",
+	),
+	"content-bearing block image alt must be preserved",
+);
+assert(
+	!blockImage.markdown.includes("/spacer.png"),
+	"decorative empty-alt image must be dropped",
+);
+
+const unsafeImage = await page(
+	"unsafe-image",
+	`<html><head><title>Unsafe Image</title></head><body><main>
+		${mediaDecoy}
+		<h1>Unsafe Image</h1>
+		<p>Public documentation keeps image alt text while neutralizing an unsafe image source reference for safety.</p>
+		<p><img src="javascript:alert(1)" alt="diagram caption that should remain as text"></p>
+	</main></body></html>`,
+);
+assertOk(unsafeImage);
+assert(!unsafeImage.markdown.includes("javascript:"));
+assert(
+	unsafeImage.markdown.includes("diagram caption that should remain as text"),
+	"unsafe image src falls back to plain alt text",
+);
+
 const longCode = "const value = capturePublicDocs();\n".repeat(
 	Math.ceil(maxInlineChars / 34) + 20,
 );

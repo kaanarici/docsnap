@@ -1,7 +1,6 @@
 import {
-	allowedSchemes,
 	collapseInlineWhitespace,
-	hasUnsafeHrefChar,
+	imageMarkdown,
 	isElement,
 	isLanguageChar,
 	isLinkDominatedContainer,
@@ -11,9 +10,9 @@ import {
 	maxInlineChars,
 	maxLanguageChars,
 	pushInline,
+	safeHref,
 	sanitizeText,
 	shouldSkipElement,
-	stripControlChars,
 	tagName,
 	textNode,
 	tidyInline,
@@ -111,6 +110,10 @@ export function inlineMarkdown(
 			chars = pushWholeInline(chunks, codeBlock(node), chars);
 			continue;
 		}
+		if (tag === "img") {
+			chars = pushWholeInline(chunks, imageMarkdown(node, baseUrl), chars);
+			continue;
+		}
 		if (voidTags.has(tag)) continue;
 		pushInlineChildren(stack, node, budget.maxVisits - budget.visits);
 	}
@@ -137,19 +140,6 @@ function renderLink(element: Element, baseUrl: string) {
 	if (!text) return "";
 	const href = safeHref(element.getAttribute("href"), baseUrl);
 	return href ? `[${text}](${href})` : text;
-}
-
-function safeHref(value: string | null, baseUrl: string) {
-	if (!value) return undefined;
-	const stripped = stripControlChars(value.trim());
-	if (!stripped || hasUnsafeHrefChar(stripped)) return undefined;
-	try {
-		const resolved = new URL(stripped, baseUrl);
-		if (!allowedSchemes.has(resolved.protocol)) return undefined;
-		return stripped.startsWith("//") ? resolved.href : stripped;
-	} catch {
-		return undefined;
-	}
 }
 
 export function codeBlock(element: Element) {
