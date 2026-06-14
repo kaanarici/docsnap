@@ -260,7 +260,9 @@ function childElements(element: Element, name: string) {
 }
 
 function localName(element: Element | null | undefined) {
-	return (element?.localName ?? "").toLowerCase();
+	// linkedom returns the prefixed name (e.g. "rdf:RDF") for namespaced
+	// elements; drop the prefix so RSS 1.0/RDF feeds match feed/rss/rdf
+	return (element?.localName ?? "").toLowerCase().split(":").pop() ?? "";
 }
 
 function isFeedContent(contentType: string, body: string) {
