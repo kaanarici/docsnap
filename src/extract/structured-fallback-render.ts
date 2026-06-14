@@ -6,6 +6,7 @@ import {
 import {
 	blockTags,
 	collapseWhitespace,
+	imageMarkdown,
 	isElement,
 	isHeading,
 	isLinkDominatedContainer,
@@ -95,6 +96,14 @@ export function serializeRoot(root: Element, baseUrl: string) {
 			appendBlock(blocks, "---", output);
 			continue;
 		}
+		if (tag === "dl") {
+			appendBlock(blocks, renderDefinitionList(node, baseUrl, budget), output);
+			continue;
+		}
+		if (tag === "img") {
+			appendBlock(blocks, imageMarkdown(node, baseUrl), output);
+			continue;
+		}
 		if (voidTags.has(tag)) continue;
 		if (hasDirectBlockChild(node)) {
 			pushNodeChildren(stack, node, budget.maxVisits - budget.visits);
@@ -104,6 +113,32 @@ export function serializeRoot(root: Element, baseUrl: string) {
 	}
 
 	return blocks.join("\n\n");
+}
+
+function renderDefinitionList(
+	list: Element,
+	baseUrl: string,
+	budget: VisitBudget,
+) {
+	const lines: string[] = [];
+	const children = list.childNodes;
+	for (
+		let index = 0;
+		index < children.length && lines.length < maxListItems;
+		index++
+	) {
+		const child = children[index];
+		if (!isElement(child)) continue;
+		const tag = tagName(child);
+		if (tag === "dt") {
+			const term = inlineMarkdown(child, baseUrl, budget).trim();
+			if (term) lines.push(`**${term}**`);
+		} else if (tag === "dd") {
+			const definition = inlineMarkdown(child, baseUrl, budget).trim();
+			if (definition) lines.push(`: ${definition}`);
+		}
+	}
+	return lines.join("\n");
 }
 
 function renderList(
