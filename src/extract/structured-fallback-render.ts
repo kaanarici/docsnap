@@ -1,44 +1,86 @@
 import {
-	codeBlock,
-	inlineMarkdown,
-	pushNodeChildren,
-} from "./structured-fallback-inline.ts";
-import {
-	blockTags,
-	collapseWhitespace,
+	collapseInlineWhitespace,
+	escapeTableCell,
 	imageMarkdown,
 	isElement,
-	isHeading,
+	isLanguageChar,
 	isLinkDominatedContainer,
+	linkText,
+	maxBacktickRun,
+	maxCodeChars,
 	maxDirectChildScan,
-	maxListDepth,
-	maxListItems,
-	maxOutputChars,
-	maxSerializeVisits,
-	type OutputState,
+	maxInlineChars,
+	maxLanguageChars,
+	maxTableCells,
+	maxTableFrames,
+	maxTableRows,
+	pushInline,
+	removePipes,
+	safeHref,
 	sanitizeText,
 	shouldSkipElement,
+	tableBlockTags,
 	tagName,
 	takeVisit,
 	textNode,
+	tidyInline,
 	type VisitBudget,
 	voidTags,
 } from "./structured-fallback-shared.ts";
-import { renderTable } from "./structured-fallback-table.ts";
 
-export function serializeRoot(root: Element, baseUrl: string) {
-	const blocks: string[] = [];
-	const output: OutputState = { chars: 0 };
-	const budget: VisitBudget = { visits: 0, maxVisits: maxSerializeVisits };
-	const stack: Node[] = [root];
+type InlineCheckpoint = {
+	chunks: number;
+	chars: number;
+};
 
-	while (stack.length > 0 && takeVisit(budget)) {
-		const node = stack.pop()!;
+type InlineFrame = {
+	node: Node;
+	close?: string;
+	checkpoint?: InlineCheckpoint;
+};
+
+type TableRow = {
+	cells: Element[];
+	header: boolean;
+};
+
+export function inlineMarkdown(
+	root: Element,
+	baseUrl: string,
+	budget: VisitBudget,
+	options: { skipNestedLists?: boolean } = {},
+) {
+	const chunks: string[] = [];
+	let chars = 0;
+	const stack: InlineFrame[] = [{ node: root }];
+	const atomicCheckpoints: InlineCheckpoint[] = [];
+
+	while (
+		stack.length > 0 &&
+		(chars < maxInlineChars || atomicCheckpoints.length > 0) &&
+		takeInlineVisit(budget)
+	) {
+		const frame = stack.pop()!;
+		if (frame.close !== undefined) {
+			if (frame.checkpoint) {
+				atomicCheckpoints.pop();
+				if (!fitsInline(frame.close, chars)) {
+					chunks.length = frame.checkpoint.chunks;
+					chars = frame.checkpoint.chars;
+					continue;
+				}
+				chars = pushWholeInline(chunks, frame.close, chars);
+				continue;
+			}
+			chars = pushInline(chunks, frame.close, chars);
+			continue;
+		}
+		const node = frame.node;
 		if (node.nodeType === textNode) {
-			appendBlock(
-				blocks,
-				sanitizeText(collapseWhitespace(node.textContent ?? "")),
-				output,
+			chars = pushInline(
+				chunks,
+				sanitizeText(collapseInlineWhitespace(node.textContent ?? "")),
+				chars,
 			);
 			continue;
 		}
@@ -49,203 +91,373 @@ export function serializeRoot(root: Element, baseUrl: string) {
 		) {
 			continue;
 		}
-
 		const tag = tagName(node);
-		if (isHeading(tag)) {
-			const text = inlineMarkdown(node, baseUrl, budget).trim();
-			appendBlock(blocks, `${"#".repeat(Number(tag[1]))} ${text}`, output);
+		if (options.skipNestedLists && (tag === "ul" || tag === "ol")) continue;
+		if (tag === "br") {
+			chars = pushInline(chunks, "\n", chars);
 			continue;
 		}
-		if (tag === "p") {
-			appendBlock(blocks, inlineMarkdown(node, baseUrl, budget), output);
+		const parent = node.parentNode;
+		if (tag === "code" && (!isElement(parent) || tagName(parent) !== "pre")) {
+			chars = pushWholeInline(chunks, inlineCode(collectRawText(node)), chars);
 			continue;
 		}
-		if (tag === "pre") {
-			appendBlock(blocks, codeBlock(node), output);
+		if (tag === "a") {
+			chars = pushInline(chunks, renderLink(node, baseUrl), chars);
 			continue;
 		}
-		if (tag === "ul" || tag === "ol") {
-			appendBlock(
-				blocks,
-				renderList(node, tag === "ol", baseUrl, budget),
-				output,
+		if (tag === "strong" || tag === "b") {
+			chars = renderAtomicInline(
+				chunks,
+				stack,
+				atomicCheckpoints,
+				node,
+				"**",
+				chars,
+				budget,
 			);
 			continue;
 		}
-		if (tag === "li") {
-			appendBlock(
-				blocks,
-				inlineMarkdown(node, baseUrl, budget, { skipNestedLists: true }),
-				output,
-			);
-			continue;
-		}
-		if (tag === "table") {
-			appendBlock(blocks, renderTable(node, baseUrl, budget), output);
-			continue;
-		}
-		if (tag === "blockquote") {
-			appendBlock(
-				blocks,
-				quoteBlock(inlineMarkdown(node, baseUrl, budget)),
-				output,
+		if (tag === "em" || tag === "i") {
+			chars = renderAtomicInline(
+				chunks,
+				stack,
+				atomicCheckpoints,
+				node,
+				"*",
+				chars,
+				budget,
 			);
 			continue;
 		}
 		if (tag === "hr") {
-			appendBlock(blocks, "---", output);
+			chars = pushInline(chunks, "\n---\n", chars);
 			continue;
 		}
-		if (tag === "dl") {
-			appendBlock(blocks, renderDefinitionList(node, baseUrl, budget), output);
+		if (tag === "pre") {
+			chars = pushWholeInline(chunks, codeBlock(node), chars);
 			continue;
 		}
 		if (tag === "img") {
-			appendBlock(blocks, imageMarkdown(node, baseUrl), output);
+			chars = pushWholeInline(chunks, imageMarkdown(node, baseUrl), chars);
 			continue;
 		}
 		if (voidTags.has(tag)) continue;
-		if (hasDirectBlockChild(node)) {
-			pushNodeChildren(stack, node, budget.maxVisits - budget.visits);
-		} else {
-			appendBlock(blocks, inlineMarkdown(node, baseUrl, budget), output);
-		}
+		pushInlineChildren(stack, node, budget.maxVisits - budget.visits);
 	}
-
-	return blocks.join("\n\n");
+	if (atomicCheckpoints.length > 0)
+		chunks.length = atomicCheckpoints[0]!.chunks;
+	return tidyInline(chunks.join(""));
 }
 
-function renderDefinitionList(
-	list: Element,
-	baseUrl: string,
-	budget: VisitBudget,
+export function codeBlock(element: Element) {
+	const codeElement = firstElementChildWithTag(element, "code");
+	const source = codeElement ?? element;
+	const language = languageToken(source);
+	const body = collectRawText(source).slice(0, maxCodeChars).trimEnd();
+	if (!body) return "";
+	const fence = "`".repeat(Math.max(3, maxBacktickRun(body) + 1));
+	return `${fence}${language}\n${body}\n${fence}`;
+}
+
+export function pushNodeChildren(
+	stack: Node[],
+	element: Element,
+	limit: number,
 ) {
-	const lines: string[] = [];
-	const children = list.childNodes;
-	for (
-		let index = 0;
-		index < children.length && lines.length < maxListItems;
-		index++
-	) {
+	const children = element.childNodes;
+	let pushed = 0;
+	for (let index = children.length - 1; index >= 0; index--) {
+		if (pushed >= limit) break;
 		const child = children[index];
-		if (!isElement(child)) continue;
-		const tag = tagName(child);
-		if (tag === "dt") {
-			const term = inlineMarkdown(child, baseUrl, budget).trim();
-			if (term) lines.push(`**${term}**`);
-		} else if (tag === "dd") {
-			const definition = inlineMarkdown(child, baseUrl, budget).trim();
-			if (definition) lines.push(`: ${definition}`);
+		if (child) {
+			stack.push(child);
+			pushed++;
 		}
 	}
-	return lines.join("\n");
 }
 
-function renderList(
-	list: Element,
-	ordered: boolean,
+export function renderTable(
+	table: Element,
 	baseUrl: string,
 	budget: VisitBudget,
 ) {
-	const lines: string[] = [];
-	const stack: Array<{
-		items: Element[];
-		ordered: boolean;
-		depth: number;
-		next: number;
-	}> = [{ items: directListItems(list), ordered, depth: 0, next: 0 }];
+	const collected = collectTableRows(table, budget);
+	if (collected.invalid || collected.rows.length < 2) {
+		return tableRowsAsProse(collected.rows, baseUrl, budget);
+	}
+	const headerRows = collected.rows.filter((row) => row.header);
+	const header = collected.rows[0];
+	if (!header || headerRows.length !== 1 || !header.header) {
+		return tableRowsAsProse(collected.rows, baseUrl, budget);
+	}
+	const columns = header.cells.length;
+	if (columns === 0) return tableRowsAsProse(collected.rows, baseUrl, budget);
 
-	while (stack.length > 0 && takeVisit(budget)) {
-		const frame = stack[stack.length - 1]!;
-		if (frame.next >= frame.items.length) {
-			stack.pop();
+	const renderedRows: string[][] = [];
+	for (const row of collected.rows.slice(1)) {
+		if (row.header || row.cells.length > columns) {
+			return tableRowsAsProse(collected.rows, baseUrl, budget);
+		}
+		const cells = row.cells.map((cell) =>
+			tableCellMarkdown(cell, baseUrl, budget),
+		);
+		while (cells.length < columns) cells.push("");
+		renderedRows.push(cells);
+	}
+	if (renderedRows.length === 0) {
+		return tableRowsAsProse(collected.rows, baseUrl, budget);
+	}
+
+	const headerCells = header.cells.map((cell) =>
+		tableCellMarkdown(cell, baseUrl, budget),
+	);
+	const separator = headerCells.map(() => "---");
+	return [
+		pipeRow(headerCells),
+		pipeRow(separator),
+		...renderedRows.map(pipeRow),
+	].join("\n");
+}
+
+function renderAtomicInline(
+	chunks: string[],
+	stack: InlineFrame[],
+	atomicCheckpoints: InlineCheckpoint[],
+	node: Element,
+	marker: string,
+	chars: number,
+	budget: VisitBudget,
+) {
+	if (!fitsInline(`${marker}${marker}`, chars)) return chars;
+	const checkpoint = { chunks: chunks.length, chars };
+	atomicCheckpoints.push(checkpoint);
+	stack.push({ node, close: marker, checkpoint });
+	pushInlineChildren(stack, node, budget.maxVisits - budget.visits);
+	return pushWholeInline(chunks, marker, chars);
+}
+
+function renderLink(element: Element, baseUrl: string) {
+	const text = linkText(collectRawText(element));
+	if (!text) return "";
+	const href = safeHref(element.getAttribute("href"), baseUrl);
+	return href ? `[${text}](${href})` : text;
+}
+
+function inlineCode(value: string) {
+	const code = value.replaceAll("\n", " ");
+	if (!code) return "";
+	const fence = "`".repeat(Math.max(1, maxBacktickRun(code) + 1));
+	const pad = code.startsWith("`") || code.endsWith("`") ? " " : "";
+	return `${fence}${pad}${code}${pad}${fence}`;
+}
+
+function collectRawText(root: Element) {
+	const chunks: string[] = [];
+	let chars = 0;
+	let visits = 0;
+	const stack: Node[] = [root];
+	while (stack.length > 0 && chars < maxInlineChars && visits++ < 4_000) {
+		const node = stack.pop()!;
+		if (node.nodeType === textNode) {
+			const value = node.textContent ?? "";
+			const available = maxInlineChars - chars;
+			chunks.push(value.length > available ? value.slice(0, available) : value);
+			chars += value.length;
 			continue;
 		}
-		const item = frame.items[frame.next]!;
-		frame.next++;
-		const marker = frame.ordered ? `${frame.next}. ` : "- ";
-		const indent = "  ".repeat(Math.min(frame.depth, maxListDepth));
-		const text = inlineMarkdown(item, baseUrl, budget, {
-			skipNestedLists: true,
-		}).trim();
-		lines.push(`${indent}${marker}${text}`);
-		const nested = directNestedLists(item);
-		for (let index = nested.length - 1; index >= 0; index--) {
-			const child = nested[index]!;
-			stack.push({
-				items: directListItems(child),
-				ordered: tagName(child) === "ol",
-				depth: frame.depth + 1,
-				next: 0,
-			});
+		if (
+			!isElement(node) ||
+			(node !== root &&
+				(shouldSkipElement(node) || isLinkDominatedContainer(node)))
+		) {
+			continue;
+		}
+		pushNodeChildren(stack, node, 4_000 - visits);
+	}
+	return chunks.join("");
+}
+
+function languageToken(element: Element) {
+	const className = element.getAttribute("class") ?? "";
+	for (const marker of ["language-", "lang-"]) {
+		const start = className.indexOf(marker);
+		if (start < 0) continue;
+		return readLanguage(className, start + marker.length);
+	}
+	return "";
+}
+
+function readLanguage(value: string, start: number) {
+	const chars: string[] = [];
+	for (
+		let index = start;
+		index < value.length && chars.length < maxLanguageChars;
+		index++
+	) {
+		const char = value[index]!;
+		if (!isLanguageChar(char)) break;
+		chars.push(char);
+	}
+	return chars.length > 0 ? chars.join("") : "";
+}
+
+function pushInlineChildren(
+	stack: InlineFrame[],
+	element: Element,
+	limit: number,
+) {
+	const children = element.childNodes;
+	let pushed = 0;
+	for (let index = children.length - 1; index >= 0; index--) {
+		if (pushed >= limit) break;
+		const child = children[index];
+		if (child) {
+			stack.push({ node: child });
+			pushed++;
+		}
+	}
+}
+
+function firstElementChildWithTag(element: Element, tag: string) {
+	const children = element.childNodes;
+	for (let index = 0; index < children.length; index++) {
+		const child = children[index];
+		if (isElement(child) && tagName(child) === tag) return child;
+	}
+	return undefined;
+}
+
+function pushWholeInline(chunks: string[], value: string, chars: number) {
+	if (!fitsInline(value, chars)) return chars;
+	chunks.push(value);
+	return chars + value.length;
+}
+
+function fitsInline(value: string, chars: number) {
+	return Boolean(value) && chars + value.length <= maxInlineChars;
+}
+
+function takeInlineVisit(budget: VisitBudget) {
+	if (budget.visits >= budget.maxVisits) return false;
+	budget.visits++;
+	return true;
+}
+
+function collectTableRows(table: Element, budget: VisitBudget) {
+	const rows: TableRow[] = [];
+	let invalid = false;
+	const stack: Array<{ node: Node; inHead: boolean }> = [
+		{ node: table, inHead: false },
+	];
+	let frames = 1;
+
+	while (stack.length > 0 && rows.length < maxTableRows && takeVisit(budget)) {
+		const frame = stack.pop()!;
+		if (!isElement(frame.node)) continue;
+		const element = frame.node;
+		const tag = tagName(element);
+		if (element !== table && tag === "table") {
+			invalid = true;
+			continue;
+		}
+		const inHead = frame.inHead || tag === "thead";
+		if (tag === "tr") {
+			const cells = directTableCells(element);
+			if (cells.invalid) invalid = true;
+			if (cells.cells.length > 0) {
+				rows.push({
+					cells: cells.cells,
+					header: inHead || cells.cells.every((cell) => tagName(cell) === "th"),
+				});
+			}
+			continue;
+		}
+		const children = element.childNodes;
+		for (let index = children.length - 1; index >= 0; index--) {
+			if (frames >= maxTableFrames) {
+				invalid = true;
+				break;
+			}
+			const child = children[index];
+			if (child) {
+				stack.push({ node: child, inHead });
+				frames++;
+			}
 		}
 	}
 
-	return lines.join("\n");
+	return { invalid, rows };
 }
 
-function appendBlock(blocks: string[], block: string, output: OutputState) {
-	const clean = block.trim();
-	if (!clean || output.chars >= maxOutputChars) return;
-	const available = maxOutputChars - output.chars;
-	if (clean.length > available && mustStayWhole(clean)) return;
-	const value =
-		clean.length > available ? clean.slice(0, available).trimEnd() : clean;
-	if (!value) return;
-	blocks.push(value);
-	output.chars += value.length + 2;
-}
-
-function mustStayWhole(block: string) {
-	return block.startsWith("```") || block.startsWith("| ");
-}
-
-function quoteBlock(value: string) {
-	const lines = value
-		.split("\n")
-		.map((line) => (line.trim() ? `> ${line.trim()}` : ">"));
-	return lines.join("\n");
-}
-
-function directListItems(list: Element) {
-	const items: Element[] = [];
-	const children = list.childNodes;
-	for (
-		let index = 0;
-		index < children.length && items.length < maxListItems;
-		index++
-	) {
-		const child = children[index];
-		if (isElement(child) && tagName(child) === "li") items.push(child);
-	}
-	return items;
-}
-
-function directNestedLists(item: Element) {
-	const lists: Element[] = [];
-	const children = item.childNodes;
-	for (
-		let index = 0;
-		index < children.length && lists.length < maxListItems;
-		index++
-	) {
-		const child = children[index];
-		if (!isElement(child)) continue;
-		const tag = tagName(child);
-		if (tag === "ul" || tag === "ol") lists.push(child);
-	}
-	return lists;
-}
-
-function hasDirectBlockChild(element: Element) {
-	const children = element.childNodes;
+function directTableCells(row: Element) {
+	const cells: Element[] = [];
+	let invalid = false;
+	const children = row.childNodes;
 	for (
 		let index = 0;
 		index < children.length && index < maxDirectChildScan;
 		index++
 	) {
+		if (cells.length >= maxTableCells) {
+			invalid = true;
+			break;
+		}
 		const child = children[index];
-		if (isElement(child) && blockTags.has(tagName(child))) return true;
+		if (!isElement(child)) continue;
+		const tag = tagName(child);
+		if (tag !== "td" && tag !== "th") continue;
+		if (
+			child.hasAttribute("colspan") ||
+			child.hasAttribute("rowspan") ||
+			!isInlineOnlyCell(child)
+		) {
+			invalid = true;
+		}
+		cells.push(child);
 	}
-	return false;
+	return { cells, invalid };
 }
+
+function isInlineOnlyCell(cell: Element) {
+	const stack: Node[] = [cell];
+	let visits = 0;
+	while (stack.length > 0 && visits++ < 2_000) {
+		const node = stack.pop()!;
+		if (!isElement(node)) continue;
+		if (node !== cell && tableBlockTags.has(tagName(node))) return false;
+		const children = node.childNodes;
+		for (let index = children.length - 1; index >= 0; index--) {
+			const child = children[index];
+			if (child) stack.push(child);
+		}
+	}
+	return true;
+}
+
+function tableCellMarkdown(
+	cell: Element,
+	baseUrl: string,
+	budget: VisitBudget,
+) {
+	return escapeTableCell(
+		inlineMarkdown(cell, baseUrl, budget).trim().replaceAll("\n", " "),
+	);
+}
+
+function tableRowsAsProse(
+	rows: TableRow[],
+	baseUrl: string,
+	budget: VisitBudget,
+) {
+	const lines: string[] = [];
+	for (const row of rows.slice(0, maxTableRows)) {
+		const cells = row.cells
+			.map((cell) => removePipes(inlineMarkdown(cell, baseUrl, budget).trim()))
+			.filter(Boolean);
+		if (cells.length > 0) lines.push(cells.join(" - "));
+	}
+	return lines.join("\n");
+}
+
+const pipeRow = (cells: string[]) => `| ${cells.join(" | ")} |`;

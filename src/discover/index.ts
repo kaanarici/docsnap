@@ -1,7 +1,8 @@
 import type { Config, DiscoveredUrl } from "../core/types.ts";
+import { isLanguageSelector, looksLikeAppShell } from "../extract/app-shell.ts";
 import { fetchText } from "../fetch/fetcher.ts";
 import { filteredNonPageResult, robotsBlockedResult } from "../fetch/result.ts";
-import { discoverAssetPages, looksLikeAppShell } from "./assets.ts";
+import { discoverAssetPages } from "./assets.ts";
 import { canonicalOriginSeed, literalAllowPrefix } from "./blocked-seed.ts";
 import {
 	discoverLlmsCorpus,
@@ -468,13 +469,4 @@ async function disallowedSeedDiscovery(
 	return [
 		{ url: inputSeed, source: "seed", fetched: robotsBlockedResult(inputSeed) },
 	];
-}
-
-function isLanguageSelector(finalUrl: string, html: string) {
-	return (
-		/\/select-language(?:[/?#]|$)/i.test(finalUrl) &&
-		/path-select-language|ecl-splash-page__language|currentPath":"select-language/i.test(
-			html,
-		)
-	);
 }
