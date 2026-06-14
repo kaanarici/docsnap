@@ -201,6 +201,27 @@ assertOk(degenerate);
 assert(degenerate.extractor === "fallback", "degenerate should stay flat");
 assert(degenerate.markdown.toLowerCase().includes("plain public notice"));
 
+// svg/canvas text is deliberately excluded from captured content (decorative
+// diagram labels / accessibility fallbacks, not prose). The flat-walker dedup
+// made the fallback path consistent with the structured path's existing skip;
+// drive structuredFallback directly to lock that skip set.
+const { document: svgDocument } = parseHTML(
+	`<html><body><main>
+		<h1>Diagram Page</h1>
+		<p>Public architecture documentation explains the capture pipeline stages for downstream agents in clear readable prose.</p>
+		<svg><text>SVGDIAGRAMLABELNOISE coordinates legend axis</text></svg>
+		<canvas>CANVASFALLBACKNOISE rendering context</canvas>
+	</main></body></html>`,
+);
+const svgMarkdown = structuredFallback(
+	svgDocument,
+	"https://docs.example.com/diagram",
+);
+assert(svgMarkdown.includes("# Diagram Page"));
+assert(svgMarkdown.includes("capture pipeline stages"));
+assert(!svgMarkdown.includes("SVGDIAGRAMLABELNOISE"));
+assert(!svgMarkdown.includes("CANVASFALLBACKNOISE"));
+
 const deep = await page(
 	"deep",
 	`<html><head><title>Deep Nest</title></head><body><main>${mediaDecoy}${"<div>".repeat(
