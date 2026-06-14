@@ -67,7 +67,8 @@ export function recordFromExtracted(
 	]);
 	const quality = scoreMarkdown(markdown, extracted.title);
 	if (
-		extracted.extractor === "fallback" &&
+		(extracted.extractor === "fallback" ||
+			extracted.extractor === "structured") &&
 		wordCount(markdown) < 20 &&
 		quality.reasons.includes("thin content")
 	) {
