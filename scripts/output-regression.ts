@@ -7,6 +7,7 @@ import { dedupeRecords } from "../src/core/dedupe.ts";
 import { setFetchTransportForTest } from "../src/fetch/fetcher.ts";
 import { agentReadme } from "../src/output/agent.ts";
 import { installAgentFiles } from "../src/output/agent-files.ts";
+import { renderPage } from "../src/output/page.ts";
 import { buildSummary } from "../src/report/summary.ts";
 
 const parsedPage = parseArgs(["https://docs.example.com/api/auth", "--page"]);
@@ -52,6 +53,13 @@ assert(lowQualitySummary.qualityWarnings === 1);
 assert(lowQualitySummary.userAgent === parsedPage.userAgent);
 assert(!("ignoreRobots" in lowQualitySummary));
 assert(agentReadme([thinPage], lowQualitySummary).includes("thin content"));
+// a low-quality page is self-describing: its own frontmatter names the reason
+assert(renderPage(thinPage).includes('qualityReasons: ["thin content"]'));
+assert(
+	!renderPage(
+		page("https://docs.example.com/ok", "html", "clean body"),
+	).includes("qualityReasons"),
+);
 const ignoreRobotsSummary = buildSummary(
 	[thinPage],
 	{ ...parsedPage, ignoreRobots: true },

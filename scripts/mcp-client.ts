@@ -1,3 +1,5 @@
+import { resolve } from "node:path";
+
 type RpcMessage = {
 	id?: number | null;
 	result?: unknown;
@@ -22,10 +24,10 @@ export class McpClient {
 	private pumpError: Error | undefined;
 	private readonly stderr: Promise<string>;
 
-	constructor(allowedOrigin: string) {
+	constructor(allowedOrigin: string, cwd: string = process.cwd()) {
 		this.proc = Bun.spawn({
-			cmd: ["bun", "bin/docsnap", "mcp"],
-			cwd: process.cwd(),
+			cmd: ["bun", resolve("bin/docsnap"), "mcp"],
+			cwd,
 			env: { ...cleanEnv(), DOCSNAP_ALLOW_TEST_HOST: allowedOrigin },
 			stdin: "pipe",
 			stdout: "pipe",

@@ -140,6 +140,9 @@ await withCacheEnv("mcp-page-robots", async () => {
 		}
 		return response(url, 404, "not found", { "content-type": "text/plain" });
 	});
+	// the MCP server only writes under its cwd; capture from the workspace root
+	const cwd0 = process.cwd();
+	process.chdir(root);
 	try {
 		const outDir = join(root, "capture");
 		const result = toolJson(
@@ -161,6 +164,7 @@ await withCacheEnv("mcp-page-robots", async () => {
 		assert(summary.byFailureKind.blocked === 1);
 		assert(pageFetches === 0);
 	} finally {
+		process.chdir(cwd0);
 		setFetchTransportForTest(undefined);
 		await rm(root, { recursive: true, force: true });
 	}

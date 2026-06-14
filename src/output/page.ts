@@ -14,6 +14,9 @@ function frontmatter(record: PageSuccess) {
 		fetchedAt: record.fetchedAt,
 		extractor: record.extractor,
 		confidence: record.confidence,
+		...(record.qualityReasons.length
+			? { qualityReasons: record.qualityReasons }
+			: {}),
 		contentHash: record.contentHash,
 		...(record.injectionSignals.length
 			? { injectionSignals: record.injectionSignals }
