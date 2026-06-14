@@ -1,3 +1,4 @@
+import { StringDecoder } from "node:string_decoder";
 import type { McpState } from "./access.ts";
 import { listResources, readResource } from "./resources.ts";
 import { callTool, listTools } from "./tools.ts";
@@ -26,8 +27,10 @@ const maxFrameBytes = 4 * 1024 * 1024;
 
 export async function runJsonRpcServer(options: ServerOptions): Promise<void> {
 	let buffer = "";
+	// buffers incomplete multibyte utf-8 sequences split across stdin chunks
+	const decoder = new StringDecoder("utf8");
 	for await (const chunk of process.stdin) {
-		buffer += chunk.toString();
+		buffer += decoder.write(chunk as Buffer);
 		for (;;) {
 			const newline = buffer.indexOf("\n");
 			if (newline < 0) {

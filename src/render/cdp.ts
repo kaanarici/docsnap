@@ -1,4 +1,5 @@
 import type { Readable, Writable } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
 
 type CdpError = {
 	message: string;
@@ -33,6 +34,8 @@ const defaultMaxFrameBytes = 32 * 1024 * 1024;
 
 export class CdpConnection {
 	private buffer = "";
+	// buffers incomplete multibyte utf-8 sequences split across pipe chunks
+	private readonly decoder = new StringDecoder("utf8");
 	private closed: Error | undefined;
 	private nextId = 1;
 	private pending = new Map<number, Pending>();
@@ -108,7 +111,7 @@ export class CdpConnection {
 
 	private read(chunk: Buffer): void {
 		if (this.closed) return;
-		this.buffer += chunk.toString("utf8");
+		this.buffer += this.decoder.write(chunk);
 		if (Buffer.byteLength(this.buffer, "utf8") > this.maxFrameBytes) {
 			this.destroy(new Error(`CDP frame exceeds ${this.maxFrameBytes} bytes`));
 			return;
