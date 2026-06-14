@@ -53,6 +53,58 @@ for (const body of [
 	assert(appShell.error === "app shell without static text");
 }
 
+// rss/atom feeds are discovery sources, not content pages: a feed reached as a
+// crawl link must be excluded, not captured as raw fenced XML
+const atomFeed = await extractPage({
+	source: "crawl",
+	result: {
+		ok: true,
+		url: "https://example.com/atom/everything/",
+		finalUrl: "https://example.com/atom/everything/",
+		status: 200,
+		contentType: "application/atom+xml; charset=utf-8",
+		body: `<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title>Example Weblog</title><entry><title>Post one</title><link href="https://example.com/2026/post-one/"/><summary>First post summary.</summary></entry></feed>`,
+		fetchMs: 1,
+	},
+} satisfies FetchedUrl);
+assert(!atomFeed.ok);
+assert(atomFeed.failureKind === "empty");
+assert(
+	atomFeed.error === "feed resource used for discovery, not a content page",
+);
+
+// an rss feed served as application/xml (caught via the feed-root parse)
+const rssFeed = await extractPage({
+	source: "crawl",
+	result: {
+		ok: true,
+		url: "https://example.com/feed.xml",
+		finalUrl: "https://example.com/feed.xml",
+		status: 200,
+		contentType: "application/xml",
+		body: `<?xml version="1.0"?><rss version="2.0"><channel><title>Example</title><item><title>One</title><link>https://example.com/one</link></item></channel></rss>`,
+		fetchMs: 1,
+	},
+} satisfies FetchedUrl);
+assert(!rssFeed.ok);
+assert(rssFeed.failureKind === "empty");
+
+// a non-feed xml asset is still captured as a text asset (not excluded)
+const xmlConfig = await extractPage({
+	source: "seed",
+	result: {
+		ok: true,
+		url: "https://example.com/config.xml",
+		finalUrl: "https://example.com/config.xml",
+		status: 200,
+		contentType: "application/xml",
+		body: `<?xml version="1.0"?><configuration><setting name="theme">dark mode preference for the public documentation viewer surface</setting></configuration>`,
+		fetchMs: 1,
+	},
+} satisfies FetchedUrl);
+assert(xmlConfig.ok);
+assert(xmlConfig.extractor === "text");
+
 const metaTitlePage = await extractPage({
 	source: "seed",
 	result: {
