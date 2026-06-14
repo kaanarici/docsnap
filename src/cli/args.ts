@@ -26,7 +26,7 @@ Flags:
   --clean                   remove output dir before writing
   --dry-run                 run without writing files
   --page                    capture only the given page after robots.txt check
-  --render <mode>           JS rendering mode: auto, never, always; default auto
+  --render <mode>           browser render miss mode: auto, never, always; default auto
   --no-cache                disable the shared fetch cache for this run
   --agent-files             add a docsnap block to AGENTS.md/CLAUDE.md in the current directory
   --json                    print one machine-readable result

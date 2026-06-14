@@ -68,5 +68,5 @@ function failureSummary(summary: RunSummary) {
 
 function renderSummary(summary: RunSummary) {
 	const render = summary.render;
-	return `docsnap: rendered ${render.renderedPages}/${render.attempted} pages with ${render.renderer}`;
+	return `docsnap: browser render skipped for ${render.failedPages}/${render.attempted} candidates`;
 }

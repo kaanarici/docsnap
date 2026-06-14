@@ -76,7 +76,7 @@ export type RenderReason =
 	| "app-shell"
 	| "empty-app-shell"
 	| "low-confidence-shell";
-export type RenderRenderer = "chrome-cdp";
+export type RenderRenderer = "none";
 
 export type Config = {
 	seedUrl: string;

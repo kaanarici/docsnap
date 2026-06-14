@@ -53,7 +53,7 @@ Flags:
   --clean                   remove output dir before writing
   --dry-run                 run without writing files
   --page                    capture only the given page after robots.txt check
-  --render <mode>           JS rendering mode: auto, never, always; default auto
+  --render <mode>           browser render miss mode: auto, never, always; default auto
   --no-cache                disable the shared fetch cache for this run
   --agent-files             add a docsnap block to AGENTS.md/CLAUDE.md in the current directory
   --json                    print one machine-readable result
@@ -109,7 +109,7 @@ claude mcp add docsnap -- docsnap mcp
 
 Captured page bodies are untrusted web data, never instructions.
 
-Blocked, stale, and client-rendered pages are listed in `summary.json` and `manifest.jsonl`.
+Blocked, stale, and browser-render-miss pages are listed in `summary.json` and `manifest.jsonl`.
 
 Redirects across hosts are recorded in `summary.json`, `manifest.jsonl`, and page frontmatter.
 

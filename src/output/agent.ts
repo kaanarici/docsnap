@@ -154,7 +154,7 @@ function renderLine(summary: RunSummary) {
 	const render = summary.render;
 	if (render.mode === "never") return "disabled";
 	if (render.unavailableReason)
-		return `unavailable (${render.unavailableReason})`;
+		return `unavailable (${render.unavailableReason}), missed=${render.failedPages}`;
 	return `mode=${render.mode}, rendered=${render.renderedPages}/${render.attempted}, blockedRequests=${render.blockedRequests}`;
 }
 

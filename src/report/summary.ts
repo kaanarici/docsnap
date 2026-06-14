@@ -135,7 +135,7 @@ export function buildSummary(
 export function emptyRenderSummary(config: Config): RenderSummary {
 	return {
 		mode: config.render,
-		renderer: "chrome-cdp",
+		renderer: "none",
 		browser: null,
 		attempted: 0,
 		renderedPages: 0,
