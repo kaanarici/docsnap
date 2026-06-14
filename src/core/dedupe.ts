@@ -94,6 +94,7 @@ const extractorScore: Record<PageSuccess["extractor"], number> = {
 	markdown: 4,
 	text: 3,
 	html: 2,
+	structured: 2,
 	"inline-state": 2,
 	fallback: 1,
 };

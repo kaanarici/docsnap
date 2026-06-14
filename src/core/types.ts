@@ -16,6 +16,7 @@ export const pageExtractors = [
 	"html",
 	"text",
 	"fallback",
+	"structured",
 	"inline-state",
 ] as const;
 

@@ -222,7 +222,8 @@ function isExtractor(value: unknown): value is PageExtractor {
 		value === "html" ||
 		value === "text" ||
 		value === "inline-state" ||
-		value === "fallback"
+		value === "fallback" ||
+		value === "structured"
 	);
 }
 

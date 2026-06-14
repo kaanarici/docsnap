@@ -82,9 +82,10 @@ const linkOnlyRecovery = await extractPage({
 	},
 } satisfies FetchedUrl);
 assert(linkOnlyRecovery.ok);
-assert(linkOnlyRecovery.extractor === "fallback");
-assert(linkOnlyRecovery.markdown.includes("Docs you got questions"));
-assert(linkOnlyRecovery.markdown.includes("grommet docs components"));
+assert(linkOnlyRecovery.extractor === "structured");
+assert(linkOnlyRecovery.markdown.includes("# Docs"));
+assert(linkOnlyRecovery.markdown.includes("## you got questions"));
+assert(!linkOnlyRecovery.markdown.includes("grommet docs components"));
 
 const mediaOnlyRecovery = await extractPage({
 	source: "seed",
@@ -99,7 +100,7 @@ const mediaOnlyRecovery = await extractPage({
 	},
 } satisfies FetchedUrl);
 assert(mediaOnlyRecovery.ok);
-assert(mediaOnlyRecovery.extractor === "fallback");
+assert(mediaOnlyRecovery.extractor === "structured");
 assert(mediaOnlyRecovery.markdown.includes("Develop for Apple platforms"));
 
 const chromeOnlyRecovery = await extractPage({
@@ -115,8 +116,9 @@ const chromeOnlyRecovery = await extractPage({
 	},
 } satisfies FetchedUrl);
 assert(chromeOnlyRecovery.ok);
-assert(chromeOnlyRecovery.extractor === "fallback");
+assert(chromeOnlyRecovery.extractor === "structured");
 assert(chromeOnlyRecovery.markdown.includes("Choose from undergraduate"));
+assert(!chromeOnlyRecovery.markdown.includes("Home"));
 
 const largeOutline = await extractPage({
 	source: "seed",

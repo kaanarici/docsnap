@@ -33,7 +33,9 @@ function shouldAttemptInlineState(
 	return (
 		reason === "empty-app-shell" ||
 		reason === "low-confidence-shell" ||
-		(reason === "app-shell" && staticRecord.extractor === "fallback")
+		(reason === "app-shell" &&
+			(staticRecord.extractor === "fallback" ||
+				staticRecord.extractor === "structured"))
 	);
 }
 
@@ -48,6 +50,8 @@ function shouldUseInlineStateRecord(
 	if (!staticRecord.ok) return true;
 	return (
 		reason === "low-confidence-shell" ||
-		(reason === "app-shell" && staticRecord.extractor === "fallback")
+		(reason === "app-shell" &&
+			(staticRecord.extractor === "fallback" ||
+				staticRecord.extractor === "structured"))
 	);
 }

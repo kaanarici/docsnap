@@ -17,6 +17,7 @@ import {
 } from "./page-record.ts";
 import { scoreMarkdown } from "./quality.ts";
 import { extractSerializedText } from "./scripts.ts";
+import { structuredFallback } from "./structured-fallback.ts";
 
 export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 	const { metadata, result, source } = input;
@@ -137,14 +138,14 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 			linkOnlyMarkdown(markdown) ||
 			mediaOnlyMarkdown(markdown) ||
 			chromeOnlyMarkdown(markdown)
-				? pageText(document)
-				: "";
-		if (wordCount(fallback) > 20) {
+				? structuredOrFlat(freshDocument(cleaned), result.finalUrl)
+				: undefined;
+		if (fallback && wordCount(fallback.markdown) > 20) {
 			return {
 				...(title ? { title } : {}),
 				...(canonical ? { canonicalUrl: canonical } : {}),
-				markdown: fallback,
-				extractor: "fallback" as const,
+				markdown: fallback.markdown,
+				extractor: fallback.extractor,
 			};
 		}
 		return {
@@ -156,19 +157,42 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 	}
 
 	const title = documentTitleText;
-	const fallback = pageText(document);
+	const fallbackDocument = freshDocument(cleaned);
+	const fallback = structuredOrFlat(fallbackDocument, result.finalUrl);
 	const serialized =
-		wordCount(fallback) < 40
+		wordCount(fallback.markdown) < 40
 			? extractSerializedText(result.body, title)
 			: undefined;
-	const metadata = serialized ? undefined : metadataMarkdown(document, title);
-	const markdown = serialized ?? (fallback || metadata || "");
+	const metadata = serialized
+		? undefined
+		: metadataMarkdown(fallbackDocument, title);
+	const markdown = serialized ?? (fallback.markdown || metadata || "");
+	const extractor = serialized
+		? ("fallback" as const)
+		: fallback.markdown
+			? fallback.extractor
+			: ("fallback" as const);
 	return {
 		...(title ? { title } : {}),
 		...(canonical ? { canonicalUrl: canonical } : {}),
 		markdown: isShellPlaceholder(markdown, title, result.body) ? "" : markdown,
-		extractor: "fallback" as const,
+		extractor,
 	};
+}
+
+function freshDocument(html: string) {
+	return parseHTML(html).document;
+}
+
+function structuredOrFlat(
+	document: Document,
+	baseUrl: string,
+): { markdown: string; extractor: "structured" | "fallback" } {
+	const structured = structuredFallback(document, baseUrl);
+	if (wordCount(structured) >= 20) {
+		return { markdown: structured, extractor: "structured" };
+	}
+	return { markdown: pageText(document), extractor: "fallback" };
 }
 
 function pageText(document: Document) {
@@ -247,19 +271,104 @@ function chromeOnlyMarkdown(markdown: string) {
 }
 
 function readableText(node: Node): string {
-	if (node.nodeType === 3) return node.textContent ?? "";
-	const text = Array.from(node.childNodes)
-		.map(readableText)
-		.filter(Boolean)
-		.join(" ");
-	return text
+	const parts: string[] = [];
+	const stack: Array<{ node: Node; inAnchor: boolean }> = [
+		{ node, inAnchor: false },
+	];
+	let visits = 0;
+	let chars = 0;
+	let anchorChars = 0;
+	while (stack.length > 0 && visits++ < 60_000 && chars < 200_000) {
+		const frame = stack.pop()!;
+		if (frame.node.nodeType === 3) {
+			const value = frame.node.textContent ?? "";
+			parts.push(value);
+			const textChars = visibleChars(value);
+			chars += textChars;
+			if (frame.inAnchor) anchorChars += textChars;
+			continue;
+		}
+		if (!isReadableElement(frame.node)) continue;
+		if (skipReadableElement(frame.node)) continue;
+		const inAnchor = frame.inAnchor || readableTag(frame.node) === "a";
+		const children = frame.node.childNodes;
+		const remaining = Math.max(0, 60_000 - visits);
+		let pushed = 0;
+		for (let index = children.length - 1; index >= 0; index--) {
+			if (pushed >= remaining) break;
+			const child = children[index];
+			if (!child) continue;
+			stack.push({ node: child, inAnchor });
+			pushed++;
+		}
+	}
+	if (chars > 0 && anchorChars / chars >= 0.5) return "";
+	return parts
+		.join(" ")
 		.replace(/\s+/g, " ")
 		.replace(/\s+([,.;:!?])/g, "$1")
 		.trim();
 }
 
+function isReadableElement(node: Node): node is Element {
+	return node.nodeType === 1;
+}
+
+function skipReadableElement(element: Element) {
+	const tag = readableTag(element);
+	return (
+		tag === "script" ||
+		tag === "style" ||
+		tag === "noscript" ||
+		tag === "template" ||
+		tag === "nav" ||
+		tag === "header" ||
+		tag === "footer" ||
+		tag === "aside" ||
+		element.getAttribute("role")?.toLowerCase() === "navigation" ||
+		element.hasAttribute("hidden") ||
+		element.getAttribute("aria-hidden")?.toLowerCase() === "true" ||
+		readableStyleHides(element.getAttribute("style") ?? "")
+	);
+}
+
+function readableTag(element: Element) {
+	return element.tagName.toLowerCase();
+}
+
+function readableStyleHides(style: string) {
+	for (const declaration of style.slice(0, 2_048).split(";")) {
+		const colon = declaration.indexOf(":");
+		if (colon < 0) continue;
+		const property = declaration.slice(0, colon).trim().toLowerCase();
+		const value = declaration
+			.slice(colon + 1)
+			.trim()
+			.toLowerCase();
+		if (property === "display" && value.startsWith("none")) return true;
+		if (property === "visibility" && value.startsWith("hidden")) return true;
+	}
+	return false;
+}
+
+function visibleChars(value: string) {
+	let count = 0;
+	for (const char of value) {
+		if (
+			char !== " " &&
+			char !== "\n" &&
+			char !== "\r" &&
+			char !== "\t" &&
+			char !== "\f"
+		) {
+			count++;
+		}
+	}
+	return count;
+}
+
 function textElement(element: Element | null): Element | undefined {
-	const text = element?.textContent?.trim() ?? "";
+	const text = element ? readableText(element) : "";
 	return wordCount(text) >= 8 ? (element ?? undefined) : undefined;
 }
 
