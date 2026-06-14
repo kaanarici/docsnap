@@ -105,6 +105,41 @@ const xmlConfig = await extractPage({
 assert(xmlConfig.ok);
 assert(xmlConfig.extractor === "text");
 
+// an rss 1.0 / rdf feed (namespaced <rdf:RDF> root) is also excluded
+const rdfFeed = await extractPage({
+	source: "crawl",
+	result: {
+		ok: true,
+		url: "https://example.com/rdf",
+		finalUrl: "https://example.com/rdf",
+		status: 200,
+		contentType: "application/xml",
+		body: `<?xml version="1.0"?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/"><channel><title>Example</title></channel><item><title>One</title><link>https://example.com/one</link></item></rdf:RDF>`,
+		fetchMs: 1,
+	},
+} satisfies FetchedUrl);
+assert(!rdfFeed.ok);
+assert(rdfFeed.failureKind === "empty");
+
+// xhtml is a real content page (matches the xml content-type guard but is not a
+// feed) and must NOT be excluded
+const xhtml = await extractPage({
+	source: "seed",
+	result: {
+		ok: true,
+		url: "https://example.com/page",
+		finalUrl: "https://example.com/page",
+		status: 200,
+		contentType: "application/xhtml+xml",
+		body: `<html xmlns="http://www.w3.org/1999/xhtml"><head><title>XHTML Page</title></head><body><main><h1>XHTML Page</h1><p>This is a real public documentation content page served as xhtml, not a feed, so it must be captured.</p></main></body></html>`,
+		fetchMs: 1,
+	},
+} satisfies FetchedUrl);
+assert(xhtml.ok);
+assert(xhtml.extractor === "html");
+assert(xhtml.markdown.includes("real public documentation content page"));
+assert(!xhtml.markdown.includes("```"));
+
 const metaTitlePage = await extractPage({
 	source: "seed",
 	result: {

@@ -11,6 +11,8 @@ export function isMarkdownLike(result: FetchResult): boolean {
 }
 
 export function isStructuredTextAsset(result: FetchResult): boolean {
+	// xhtml matches the xml token but is a content page, not a data asset
+	if (/xhtml/i.test(result.contentType)) return false;
 	if (structuredTextContent.test(result.contentType)) return true;
 	return (
 		structuredTextPath.test(new URL(result.finalUrl).pathname) &&
