@@ -78,15 +78,27 @@ export async function readSummary(outputDir: string): Promise<RunSummary> {
 		corpusLimits.summaryBytes,
 	);
 	try {
-		const summary = JSON.parse(text) as RunSummary;
-		if (!summary || typeof summary !== "object" || !summary.seedUrl) {
+		const raw = JSON.parse(text) as LooseSummary;
+		if (!raw || typeof raw !== "object" || !raw.seedUrl) {
 			throw new Error("missing seedUrl");
 		}
-		return summary;
+		// a parseable but partially-written/foreign summary may omit collection
+		// fields; default them so read tools degrade gracefully instead of throwing
+		return {
+			...raw,
+			errors: raw.errors ?? [],
+			byFailureKind: raw.byFailureKind ?? {},
+			refresh: raw.refresh
+				? { ...raw.refresh, changedPages: raw.refresh.changedPages ?? [] }
+				: raw.refresh,
+		} as RunSummary;
 	} catch {
 		throw new Error(`Invalid ${runFiles.summary} in corpus`);
 	}
 }
+
+type LooseSummary = Omit<RunSummary, "errors" | "byFailureKind" | "refresh"> &
+	Partial<Pick<RunSummary, "errors" | "byFailureKind" | "refresh">>;
 
 export async function readManifest(outputDir: string): Promise<CorpusPage[]> {
 	const text = await readCorpusFile(
@@ -162,7 +174,7 @@ export async function getCorpusSummary(
 		...(options.includeErrors
 			? { errors: summary.errors.slice(0, options.errorLimit) }
 			: {}),
-		...(options.includeRefreshChanges
+		...(options.includeRefreshChanges && summary.refresh
 			? { refresh: cappedRefresh(summary.refresh) }
 			: {}),
 	};
