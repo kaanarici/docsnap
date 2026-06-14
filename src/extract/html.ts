@@ -3,6 +3,7 @@ import { parseHTML } from "linkedom";
 import { uniqueByWhitespace, wordCount } from "../core/text.ts";
 import type { FetchedUrl, FetchResult, PageRecord } from "../core/types.ts";
 import { urlWithoutFragmentAndQuery } from "../core/url.ts";
+import { isFeedResponse } from "../discover/feed.ts";
 import {
 	isMarkdownLike,
 	isStructuredTextAsset,
@@ -35,6 +36,16 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 			metadata,
 			result.error,
 			result.failureKind,
+		);
+	// rss/atom feeds are discovery sources, not content pages; exclude them from
+	// the corpus instead of capturing the raw feed XML as a page
+	if (feedLikeContentType(result.contentType) && isFeedResponse(result))
+		return failedRecord(
+			result,
+			source,
+			metadata,
+			"feed resource used for discovery, not a content page",
+			"empty",
 		);
 	const signals = rawInjectionSignals(result);
 
@@ -76,6 +87,11 @@ function isShellPlaceholder(
 			markdown.includes(title) &&
 			/<div[^>]+id=["']app["'][^>]*>\s*<\/div>/i.test(html))
 	);
+}
+
+// cheap guard so the feed-root DOM parse only runs for xml-ish responses
+function feedLikeContentType(contentType: string): boolean {
+	return /(?:rss|atom)\+xml|\bxml\b/i.test(contentType);
 }
 
 async function extractBody(result: FetchResult): Promise<ExtractedBody> {
