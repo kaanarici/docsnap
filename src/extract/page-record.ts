@@ -13,6 +13,11 @@ import {
 	scanMarkdownForInjectionSignals,
 	scanRawHtmlForInjectionSignals,
 } from "../security/injection.ts";
+import {
+	emptyContentError,
+	isBlockedChallenge,
+	isLanguageSelector,
+} from "./app-shell.ts";
 import { cleanMarkdown, linksFromMarkdown } from "./markdown.ts";
 import { scoreMarkdown } from "./quality.ts";
 
@@ -139,30 +144,6 @@ export function failedRecord(
 
 export function rawInjectionSignals(result: FetchResult) {
 	return scanRawHtmlForInjectionSignals(result.body);
-}
-
-function isBlockedChallenge(markdown: string, title: string | undefined) {
-	return (
-		/client challenge/i.test(title ?? "") ||
-		/required part of this site couldn.t load/i.test(markdown)
-	);
-}
-
-function isLanguageSelector(finalUrl: string, html: string) {
-	return (
-		/\/select-language(?:[/?#]|$)/i.test(finalUrl) &&
-		/path-select-language|ecl-splash-page__language|currentPath":"select-language/i.test(
-			html,
-		)
-	);
-}
-
-function emptyContentError(html: string) {
-	return /(__docusaurus|v-app-loading|enable javascript in your browser|zdWebClientConfig|catalog-app|react-target|app-root|id=["']app["']|ohcglobal|__meteor_runtime_config__|raw\.githubusercontent\.com)/i.test(
-		html,
-	)
-		? "app shell without static text"
-		: "empty content";
 }
 
 function uniqueSignals(signals: PageRecord["injectionSignals"]) {

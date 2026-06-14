@@ -1,10 +1,10 @@
 import { pruneCache } from "../cache/eviction.ts";
 import { cacheSummary } from "../cache/store.ts";
-import { looksLikeAppShell } from "../discover/assets.ts";
 import { discover } from "../discover/index.ts";
 import { discoverPageLinks } from "../discover/nav.ts";
 import { loadRobots, type Robots } from "../discover/robots.ts";
 import { inScope, normalizeUrl, scopeFromSeed } from "../discover/url.ts";
+import { looksLikeAppShell } from "../extract/app-shell.ts";
 import { extractMany } from "../extract/pool.ts";
 import { fetchMany, fetchText } from "../fetch/fetcher.ts";
 import { filteredNonPageResult } from "../fetch/result.ts";

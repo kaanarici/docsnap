@@ -1,6 +1,7 @@
 import { parseHTML } from "linkedom";
 import { uniqueByWhitespace, whitespaceKey } from "../core/text.ts";
 import type { Config, DiscoveredUrl, FetchResult } from "../core/types.ts";
+import { looksLikeAppShell } from "../extract/app-shell.ts";
 import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
 import { runBounded } from "../fetch/rate-limit.ts";
 import { inScope, normalizeUrl } from "./url.ts";
@@ -36,26 +37,6 @@ type TextPage = {
 
 const maxAssets = 32;
 const jsAccept = "application/javascript,text/javascript,*/*;q=0.8";
-
-export function looksLikeAppShell(html: string): boolean {
-	if (
-		/zdWebClientConfig|catalog-app|react-target|app-root|ohcglobal|__meteor_runtime_config__/i.test(
-			html,
-		)
-	)
-		return true;
-	const { document } = parseHTML(html);
-	const scriptCount = document.querySelectorAll(
-		"script[src],link[href]",
-	).length;
-	if (scriptCount === 0) return false;
-	document.querySelectorAll("script,style,noscript").forEach((node) => {
-		node.remove();
-	});
-	const bodyText = whitespaceKey(document.body?.textContent ?? "");
-	const anchorCount = document.querySelectorAll("a[href]").length;
-	return bodyText.length < 500 && anchorCount < 5;
-}
 
 export async function discoverAssetPages(
 	seed: string,

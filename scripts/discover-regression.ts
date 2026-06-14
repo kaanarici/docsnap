@@ -1,15 +1,13 @@
 import { parseArgs } from "../src/cli/args.ts";
 import type { FetchResult } from "../src/core/types.ts";
-import {
-	discoverAssetPages,
-	looksLikeAppShell,
-} from "../src/discover/assets.ts";
+import { discoverAssetPages } from "../src/discover/assets.ts";
 import { crawlScoped } from "../src/discover/crawl.ts";
 import { discover } from "../src/discover/index.ts";
 import { discoverLlms } from "../src/discover/llms.ts";
 import { discoverNav } from "../src/discover/nav.ts";
 import { loadRobots, parseRobots } from "../src/discover/robots.ts";
 import { normalizeUrl, sameScopeLinks } from "../src/discover/url.ts";
+import { looksLikeAppShell } from "../src/extract/app-shell.ts";
 import { setFetchTransportForTest } from "../src/fetch/fetcher.ts";
 
 const links = discoverNav(

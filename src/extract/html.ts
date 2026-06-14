@@ -4,6 +4,7 @@ import { uniqueByWhitespace, wordCount } from "../core/text.ts";
 import type { FetchedUrl, FetchResult, PageRecord } from "../core/types.ts";
 import { urlWithoutFragmentAndQuery } from "../core/url.ts";
 import { isFeedResponse } from "../discover/feed.ts";
+import { chromeHeading, isShellPlaceholder } from "./app-shell.ts";
 import {
 	isMarkdownLike,
 	isStructuredTextAsset,
@@ -62,31 +63,6 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 			signals,
 		);
 	}
-}
-
-function isShellPlaceholder(
-	markdown: string,
-	title: string | undefined,
-	html: string,
-) {
-	return (
-		(((Boolean(title) &&
-			markdown.replace(/^#+\s*/, "").trim() === title?.trim()) ||
-			(wordCount(markdown) <= 2 &&
-				/raw\.githubusercontent\.com|xhrPromise/i.test(html))) &&
-			/catalog-app|react-target|app-root|ohcglobal|__meteor_runtime_config__|raw\.githubusercontent\.com/i.test(
-				html,
-			)) ||
-		(/^\s*search\s*$/i.test(markdown) &&
-			/<input[^>]+type=["']search["']|placeholder=["']search["']|class=["'][^"']*search/i.test(
-				html,
-			) &&
-			/__docusaurus/i.test(html)) ||
-		(title !== undefined &&
-			wordCount(markdown) <= 8 &&
-			markdown.includes(title) &&
-			/<div[^>]+id=["']app["'][^>]*>\s*<\/div>/i.test(html))
-	);
 }
 
 // cheap guard so the feed-root DOM parse only runs for xml-ish responses
@@ -156,12 +132,9 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 				extractor: "fallback" as const,
 			};
 		}
-		const fallback =
-			linkOnlyMarkdown(markdown) ||
-			mediaOnlyMarkdown(markdown) ||
-			chromeOnlyMarkdown(markdown)
-				? structuredOrFlat(freshDocument(cleaned), result.finalUrl)
-				: undefined;
+		const fallback = chromeOnlyExtractedMarkdown(markdown)
+			? structuredOrFlat(freshDocument(cleaned), result.finalUrl)
+			: undefined;
 		if (fallback && wordCount(fallback.markdown) > 20) {
 			return {
 				...(title ? { title } : {}),
@@ -248,47 +221,25 @@ function largePageOutline(
 	return wordCount(markdown) >= 8 ? markdown : undefined;
 }
 
-function chromeHeading(text: string) {
-	return /^(our api|hello world|support|sign in|search(?: developer site)?)$/i.test(
-		text,
-	);
-}
-
-function linkOnlyMarkdown(markdown: string) {
+function chromeOnlyExtractedMarkdown(markdown: string) {
+	const words = wordCount(markdown);
+	const linkCount = linksFromMarkdown(markdown).length;
+	const imageCount = (markdown.match(/!\[[^\]]*]\([^)]+\)/g) ?? []).length;
 	const withoutLinks = markdown
 		.replace(/\[[^\]]+]\([^)]+\)/g, "")
 		.replace(/\s+/g, "");
-	return (
-		linksFromMarkdown(markdown).length >= 2 &&
-		wordCount(markdown) <= 8 &&
-		!withoutLinks
-	);
-}
-
-function mediaOnlyMarkdown(markdown: string) {
+	if (linkCount >= 2 && words <= 8 && !withoutLinks) return true;
 	const withoutMedia = markdown
 		.replace(/!\[[^\]]*]\([^)]+\)/g, "")
 		.replace(/\[[^\]]+]\([^)]+\)/g, "")
 		.replace(/\s+/g, "");
-	return (
-		(markdown.match(/!\[[^\]]*]\([^)]+\)/g) ?? []).length > 0 &&
-		wordCount(markdown) <= 6 &&
-		!withoutMedia
-	);
-}
-
-function chromeOnlyMarkdown(markdown: string) {
+	if (imageCount > 0 && words <= 6 && !withoutMedia) return true;
 	const withoutChrome = markdown
 		.replace(/!\[[^\]]*]\([^)]+\)/g, "")
 		.replace(/\[[^\]]+]\([^)]+\)/g, "")
 		.replace(/[>#|/\\\-–—:]+/g, " ");
-	const chromeCount =
-		(markdown.match(/!\[[^\]]*]\([^)]+\)/g) ?? []).length +
-		linksFromMarkdown(markdown).length;
 	return (
-		chromeCount >= 2 &&
-		wordCount(markdown) <= 16 &&
-		wordCount(withoutChrome) <= 2
+		imageCount + linkCount >= 2 && words <= 16 && wordCount(withoutChrome) <= 2
 	);
 }
 
