@@ -89,12 +89,13 @@ export function isLinkDominatedContainer(element: Element) {
 }
 
 function hasDirectHeading(element: Element) {
+	const children = element.childNodes;
 	for (
 		let index = 0;
-		index < element.childNodes.length && index < maxDirectChildScan;
+		index < children.length && index < maxDirectChildScan;
 		index++
 	) {
-		const child = element.childNodes[index];
+		const child = children[index];
 		if (isElement(child) && isHeading(tagName(child))) return true;
 	}
 	return false;

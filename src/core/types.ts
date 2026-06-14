@@ -59,6 +59,7 @@ export const injectionSignals = [
 	"fake-system-turn",
 	"ai-directed-instruction",
 	"tool-exfiltration-language",
+	"unsafe-link-scheme",
 	"encoded-injection-blob",
 	"opaque-encoded-blob",
 ] as const;

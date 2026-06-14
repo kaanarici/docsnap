@@ -20,6 +20,10 @@ const markdownMs = timed("markdown links", () => {
 			"https://docs.example.com/api|/guide",
 	);
 	assert(
+		markdownLinkHrefs(String.raw`\[x\](javascript:alert(1))`).length === 0,
+	);
+	assert(markdownLinkHrefs("[x](/y)").join("|") === "/y");
+	assert(
 		replaceMarkdownLinks(markdown, ({ text, href, suffix }) =>
 			href === "/guide" ? `[${text}](/local/guide${suffix})` : undefined,
 		).endsWith("[Guide](/local/guide)."),

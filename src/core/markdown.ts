@@ -40,9 +40,9 @@ function markdownLinkSpans(markdown: string): MarkdownLinkSpan[] {
 	const links: MarkdownLinkSpan[] = [];
 	let index = 0;
 	while (index < markdown.length) {
-		const start = markdown.indexOf("[", index);
+		const start = findUnescaped(markdown, "[", index);
 		if (start === -1) break;
-		const textEnd = markdown.indexOf("]", start + 1);
+		const textEnd = findUnescaped(markdown, "]", start + 1);
 		if (textEnd === -1) break;
 		if (markdown[textEnd + 1] !== "(") {
 			index = textEnd + 1;
@@ -70,6 +70,21 @@ function markdownLinkSpans(markdown: string): MarkdownLinkSpan[] {
 		index = end + 1;
 	}
 	return links;
+}
+
+function findUnescaped(markdown: string, target: "[" | "]", start: number) {
+	let backslashes = 0;
+	for (let index = start; index < markdown.length; index++) {
+		const char = markdown[index]!;
+		if (char === "\\") {
+			backslashes++;
+			continue;
+		}
+		const escaped = backslashes % 2 === 1;
+		backslashes = 0;
+		if (char === target && !escaped) return index;
+	}
+	return -1;
 }
 
 function invalidHrefChar(char: string) {

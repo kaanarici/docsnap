@@ -1,6 +1,9 @@
+import { parseHTML } from "linkedom";
 import { type FetchedUrl, lowQualityConfidence } from "../src/core/types.ts";
 import { extractPage } from "../src/extract/html.ts";
 import { scoreMarkdown } from "../src/extract/quality.ts";
+import { structuredFallback } from "../src/extract/structured-fallback.ts";
+import { maxInlineChars } from "../src/extract/structured-fallback-shared.ts";
 
 const mediaDecoy = `<article><img src="hero.png"><img src="icon.png"></article>`;
 
@@ -89,6 +92,34 @@ assert(codeDoc.markdown.includes("```ts"));
 assert(codeDoc.markdown.includes('  url: "https://example.com/docs",'));
 assert(codeDoc.markdown.includes("console.log(result.markdown);"));
 
+const longCode = "const value = capturePublicDocs();\n".repeat(
+	Math.ceil(maxInlineChars / 34) + 20,
+);
+const budgetEdgeText = "edge ".repeat(Math.ceil(maxInlineChars / 5) + 10);
+const listLongPre = await page(
+	"list-long-pre",
+	`<html><head><title>List Long Pre</title></head><body><main>
+		${mediaDecoy}
+		<h1>List Long Pre</h1>
+		<p>Public list documentation keeps markdown delimiters balanced when an inline code block is too large for the item budget.</p>
+		<ul><li><pre><code>${longCode}</code></pre>${budgetEdgeText}<strong>bold tail</strong><em>italic tail</em></li></ul>
+	</main></body></html>`,
+);
+assertOk(listLongPre);
+assertBalancedDelimiters(listLongPre.markdown, "list long pre");
+
+const quoteLongPre = await page(
+	"quote-long-pre",
+	`<html><head><title>Quote Long Pre</title></head><body><main>
+		${mediaDecoy}
+		<h1>Quote Long Pre</h1>
+		<p>Public quote documentation keeps markdown delimiters balanced when an inline pre block exceeds the quote budget.</p>
+		<blockquote><pre><code>${longCode}</code></pre>${budgetEdgeText}<strong>bold tail</strong><em>italic tail</em></blockquote>
+	</main></body></html>`,
+);
+assertOk(quoteLongPre);
+assertBalancedDelimiters(quoteLongPre.markdown, "quote long pre");
+
 const degenerate = await page(
 	"degenerate",
 	`<html><head><title>Plain Notice</title></head><body>
@@ -109,6 +140,26 @@ const deep = await page(
 );
 assertOk(deep);
 assert(deep.markdown.includes("Deep public documentation content"));
+
+const wideSiblings = Array.from(
+	{ length: 12_000 },
+	(_, index) =>
+		`<p>Wide sibling ${index} keeps structured fallback scans linear for public documentation extraction workflows.</p>`,
+).join("");
+const { document: wideDocument } = parseHTML(
+	`<html><body><main><h1>Wide Siblings</h1>${wideSiblings}</main></body></html>`,
+);
+const wideStart = performance.now();
+const wideMarkdown = structuredFallback(
+	wideDocument,
+	"https://docs.example.com/wide-siblings",
+);
+const wideMs = performance.now() - wideStart;
+assert(wideMarkdown.includes("# Wide Siblings"));
+assert(
+	wideMs < 1500,
+	`wide sibling structured fallback took ${wideMs.toFixed(1)}ms`,
+);
 
 const giantDescription =
 	"Stable capture behavior for agent documentation workflows with bounded table traversal and predictable markdown output. ".repeat(
@@ -234,4 +285,44 @@ function assert(
 	message = "assertion failed",
 ): asserts condition {
 	if (!condition) throw new Error(message);
+}
+
+function assertBalancedDelimiters(markdown: string, label: string) {
+	assert(
+		tokenCount(markdown, "```") % 2 === 0,
+		`${label} has unbalanced code fences`,
+	);
+	assert(
+		tokenCount(markdown, "**") % 2 === 0,
+		`${label} has unbalanced strong delimiters`,
+	);
+	assert(
+		singleAsteriskCount(markdown) % 2 === 0,
+		`${label} has unbalanced emphasis delimiters`,
+	);
+}
+
+function tokenCount(value: string, token: string) {
+	let count = 0;
+	let index = 0;
+	while (true) {
+		const next = value.indexOf(token, index);
+		if (next < 0) return count;
+		count++;
+		index = next + token.length;
+	}
+}
+
+function singleAsteriskCount(value: string) {
+	let count = 0;
+	for (let index = 0; index < value.length; index++) {
+		if (
+			value[index] === "*" &&
+			value[index - 1] !== "*" &&
+			value[index + 1] !== "*"
+		) {
+			count++;
+		}
+	}
+	return count;
 }

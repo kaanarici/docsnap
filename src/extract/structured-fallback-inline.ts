@@ -29,15 +29,26 @@ export function inlineMarkdown(
 ) {
 	const chunks: string[] = [];
 	let chars = 0;
-	const stack: Array<{ node: Node; close?: string }> = [{ node: root }];
+	const stack: InlineFrame[] = [{ node: root }];
+	const atomicCheckpoints: InlineCheckpoint[] = [];
 
 	while (
 		stack.length > 0 &&
-		chars < maxInlineChars &&
+		(chars < maxInlineChars || atomicCheckpoints.length > 0) &&
 		takeInlineVisit(budget)
 	) {
 		const frame = stack.pop()!;
 		if (frame.close !== undefined) {
+			if (frame.checkpoint) {
+				atomicCheckpoints.pop();
+				if (!fitsInline(frame.close, chars)) {
+					chunks.length = frame.checkpoint.chunks;
+					chars = frame.checkpoint.chars;
+					continue;
+				}
+				chars = pushWholeInline(chunks, frame.close, chars);
+				continue;
+			}
 			chars = pushInline(chunks, frame.close, chars);
 			continue;
 		}
@@ -65,7 +76,7 @@ export function inlineMarkdown(
 		}
 		const parent = node.parentNode;
 		if (tag === "code" && (!isElement(parent) || tagName(parent) !== "pre")) {
-			chars = pushInline(chunks, inlineCode(collectRawText(node)), chars);
+			chars = pushWholeInline(chunks, inlineCode(collectRawText(node)), chars);
 			continue;
 		}
 		if (tag === "a") {
@@ -73,15 +84,23 @@ export function inlineMarkdown(
 			continue;
 		}
 		if (tag === "strong" || tag === "b") {
-			stack.push({ node, close: "**" });
+			const marker = "**";
+			if (!fitsInline(`${marker}${marker}`, chars)) continue;
+			const checkpoint = { chunks: chunks.length, chars };
+			atomicCheckpoints.push(checkpoint);
+			stack.push({ node, close: marker, checkpoint });
 			pushInlineChildren(stack, node, budget.maxVisits - budget.visits);
-			chars = pushInline(chunks, "**", chars);
+			chars = pushWholeInline(chunks, marker, chars);
 			continue;
 		}
 		if (tag === "em" || tag === "i") {
-			stack.push({ node, close: "*" });
+			const marker = "*";
+			if (!fitsInline(`${marker}${marker}`, chars)) continue;
+			const checkpoint = { chunks: chunks.length, chars };
+			atomicCheckpoints.push(checkpoint);
+			stack.push({ node, close: marker, checkpoint });
 			pushInlineChildren(stack, node, budget.maxVisits - budget.visits);
-			chars = pushInline(chunks, "*", chars);
+			chars = pushWholeInline(chunks, marker, chars);
 			continue;
 		}
 		if (tag === "hr") {
@@ -89,15 +108,29 @@ export function inlineMarkdown(
 			continue;
 		}
 		if (tag === "pre") {
-			chars = pushInline(chunks, codeBlock(node), chars);
+			chars = pushWholeInline(chunks, codeBlock(node), chars);
 			continue;
 		}
 		if (voidTags.has(tag)) continue;
 		pushInlineChildren(stack, node, budget.maxVisits - budget.visits);
 	}
+	if (atomicCheckpoints.length > 0) {
+		chunks.length = atomicCheckpoints[0]!.chunks;
+	}
 
 	return tidyInline(chunks.join(""));
 }
+
+type InlineCheckpoint = {
+	chunks: number;
+	chars: number;
+};
+
+type InlineFrame = {
+	node: Node;
+	close?: string;
+	checkpoint?: InlineCheckpoint;
+};
 
 function renderLink(element: Element, baseUrl: string) {
 	const text = linkText(collectRawText(element));
@@ -205,7 +238,7 @@ export function pushNodeChildren(
 }
 
 function pushInlineChildren(
-	stack: Array<{ node: Node; close?: string }>,
+	stack: InlineFrame[],
 	element: Element,
 	limit: number,
 ) {
@@ -222,11 +255,22 @@ function pushInlineChildren(
 }
 
 function firstElementChildWithTag(element: Element, tag: string) {
-	for (let index = 0; index < element.childNodes.length; index++) {
-		const child = element.childNodes[index];
+	const children = element.childNodes;
+	for (let index = 0; index < children.length; index++) {
+		const child = children[index];
 		if (isElement(child) && tagName(child) === tag) return child;
 	}
 	return undefined;
+}
+
+function pushWholeInline(chunks: string[], value: string, chars: number) {
+	if (!fitsInline(value, chars)) return chars;
+	chunks.push(value);
+	return chars + value.length;
+}
+
+function fitsInline(value: string, chars: number) {
+	return Boolean(value) && chars + value.length <= maxInlineChars;
 }
 
 function takeInlineVisit(budget: VisitBudget) {

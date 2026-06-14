@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { parseHTML } from "linkedom";
+import { markdownLinkHrefs } from "../core/markdown.ts";
 import type { InjectionSignal } from "../core/types.ts";
 
 type SignalPattern = readonly [InjectionSignal, RegExp];
@@ -115,6 +116,7 @@ export function scanMarkdownForInjectionSignals(
 		...unicodeSignals(markdown),
 		...instructionSignals(markdown),
 		...mixedScriptSignals(markdown),
+		...unsafeLinkSchemeSignals(markdown),
 		...encodedSignals(markdown),
 	]);
 }
@@ -164,6 +166,33 @@ function encodedSignals(text: string): InjectionSignal[] {
 		if (candidate.length >= 128) signals.add("opaque-encoded-blob");
 	}
 	return [...signals];
+}
+
+function unsafeLinkSchemeSignals(markdown: string): InjectionSignal[] {
+	for (const href of markdownLinkHrefs(markdown)) {
+		const scheme = hrefScheme(href);
+		if (scheme === "javascript" || scheme === "vbscript") {
+			return ["unsafe-link-scheme"];
+		}
+	}
+	return [];
+}
+
+function hrefScheme(href: string) {
+	const trimmed = trimLeadingSpacesAndControls(href);
+	const colon = trimmed.indexOf(":");
+	if (colon <= 0) return undefined;
+	return trimmed.slice(0, colon).toLowerCase();
+}
+
+function trimLeadingSpacesAndControls(value: string) {
+	let index = 0;
+	while (index < value.length) {
+		const code = value.charCodeAt(index);
+		if (code > 0x20 && (code < 0x7f || code > 0x9f)) break;
+		index++;
+	}
+	return value.slice(index);
 }
 
 function encodedCandidates(text: string) {

@@ -121,8 +121,9 @@ function sumChildStats(
 	stats: WeakMap<Node, TextStats>,
 ): TextStats {
 	const total = emptyStats();
-	for (let index = 0; index < element.childNodes.length; index++) {
-		const child = element.childNodes[index];
+	const children = element.childNodes;
+	for (let index = 0; index < children.length; index++) {
+		const child = children[index];
 		if (!child) continue;
 		const childStats = stats.get(child);
 		if (!childStats) continue;
