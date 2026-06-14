@@ -18,6 +18,12 @@ import {
 import { scoreMarkdown } from "./quality.ts";
 import { extractSerializedText } from "./scripts.ts";
 import { structuredFallback } from "./structured-fallback.ts";
+import {
+	countTextChars,
+	isElement,
+	shouldSkipElement,
+	tagName,
+} from "./structured-fallback-shared.ts";
 
 export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 	const { metadata, result, source } = input;
@@ -283,14 +289,14 @@ function readableText(node: Node): string {
 		if (frame.node.nodeType === 3) {
 			const value = frame.node.textContent ?? "";
 			parts.push(value);
-			const textChars = visibleChars(value);
+			const textChars = countTextChars(value);
 			chars += textChars;
 			if (frame.inAnchor) anchorChars += textChars;
 			continue;
 		}
-		if (!isReadableElement(frame.node)) continue;
-		if (skipReadableElement(frame.node)) continue;
-		const inAnchor = frame.inAnchor || readableTag(frame.node) === "a";
+		if (!isElement(frame.node)) continue;
+		if (shouldSkipElement(frame.node)) continue;
+		const inAnchor = frame.inAnchor || tagName(frame.node) === "a";
 		const children = frame.node.childNodes;
 		const remaining = Math.max(0, 60_000 - visits);
 		let pushed = 0;
@@ -308,63 +314,6 @@ function readableText(node: Node): string {
 		.replace(/\s+/g, " ")
 		.replace(/\s+([,.;:!?])/g, "$1")
 		.trim();
-}
-
-function isReadableElement(node: Node): node is Element {
-	return node.nodeType === 1;
-}
-
-function skipReadableElement(element: Element) {
-	const tag = readableTag(element);
-	return (
-		tag === "script" ||
-		tag === "style" ||
-		tag === "noscript" ||
-		tag === "template" ||
-		tag === "nav" ||
-		tag === "header" ||
-		tag === "footer" ||
-		tag === "aside" ||
-		element.getAttribute("role")?.toLowerCase() === "navigation" ||
-		element.hasAttribute("hidden") ||
-		element.getAttribute("aria-hidden")?.toLowerCase() === "true" ||
-		readableStyleHides(element.getAttribute("style") ?? "")
-	);
-}
-
-function readableTag(element: Element) {
-	return element.tagName.toLowerCase();
-}
-
-function readableStyleHides(style: string) {
-	for (const declaration of style.slice(0, 2_048).split(";")) {
-		const colon = declaration.indexOf(":");
-		if (colon < 0) continue;
-		const property = declaration.slice(0, colon).trim().toLowerCase();
-		const value = declaration
-			.slice(colon + 1)
-			.trim()
-			.toLowerCase();
-		if (property === "display" && value.startsWith("none")) return true;
-		if (property === "visibility" && value.startsWith("hidden")) return true;
-	}
-	return false;
-}
-
-function visibleChars(value: string) {
-	let count = 0;
-	for (const char of value) {
-		if (
-			char !== " " &&
-			char !== "\n" &&
-			char !== "\r" &&
-			char !== "\t" &&
-			char !== "\f"
-		) {
-			count++;
-		}
-	}
-	return count;
 }
 
 function textElement(element: Element | null): Element | undefined {
