@@ -110,16 +110,17 @@ function collectTableRows(table: Element, budget: VisitBudget) {
 function directTableCells(row: Element) {
 	const cells: Element[] = [];
 	let invalid = false;
+	const children = row.childNodes;
 	for (
 		let index = 0;
-		index < row.childNodes.length && index < maxDirectChildScan;
+		index < children.length && index < maxDirectChildScan;
 		index++
 	) {
 		if (cells.length >= maxTableCells) {
 			invalid = true;
 			break;
 		}
-		const child = row.childNodes[index];
+		const child = children[index];
 		if (!isElement(child)) continue;
 		const tag = tagName(child);
 		if (tag !== "td" && tag !== "th") continue;

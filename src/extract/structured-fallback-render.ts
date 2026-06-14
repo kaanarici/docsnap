@@ -174,12 +174,13 @@ function quoteBlock(value: string) {
 
 function directListItems(list: Element) {
 	const items: Element[] = [];
+	const children = list.childNodes;
 	for (
 		let index = 0;
-		index < list.childNodes.length && items.length < maxListItems;
+		index < children.length && items.length < maxListItems;
 		index++
 	) {
-		const child = list.childNodes[index];
+		const child = children[index];
 		if (isElement(child) && tagName(child) === "li") items.push(child);
 	}
 	return items;
@@ -187,12 +188,13 @@ function directListItems(list: Element) {
 
 function directNestedLists(item: Element) {
 	const lists: Element[] = [];
+	const children = item.childNodes;
 	for (
 		let index = 0;
-		index < item.childNodes.length && lists.length < maxListItems;
+		index < children.length && lists.length < maxListItems;
 		index++
 	) {
-		const child = item.childNodes[index];
+		const child = children[index];
 		if (!isElement(child)) continue;
 		const tag = tagName(child);
 		if (tag === "ul" || tag === "ol") lists.push(child);
@@ -201,12 +203,13 @@ function directNestedLists(item: Element) {
 }
 
 function hasDirectBlockChild(element: Element) {
+	const children = element.childNodes;
 	for (
 		let index = 0;
-		index < element.childNodes.length && index < maxDirectChildScan;
+		index < children.length && index < maxDirectChildScan;
 		index++
 	) {
-		const child = element.childNodes[index];
+		const child = children[index];
 		if (isElement(child) && blockTags.has(tagName(child))) return true;
 	}
 	return false;
