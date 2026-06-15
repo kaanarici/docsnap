@@ -1,5 +1,6 @@
 import { type FetchedUrl, lowQualityConfidence } from "../src/core/types.ts";
 import { extractPage } from "../src/extract/html.ts";
+import { cleanMarkdown } from "../src/extract/markdown.ts";
 import { scoreMarkdown } from "../src/extract/quality.ts";
 
 assert(
@@ -307,6 +308,20 @@ const languageSelector = await extractPage({
 assert(!languageSelector.ok);
 assert(languageSelector.failureKind === "empty");
 assert(languageSelector.error === "language selector without article content");
+
+// a multi-line stock-photo caption in image alt is collapsed and capped, while a
+// short meaningful alt and the image src are left intact
+const captionAlt = `${"Mandatory Credit Photo by agency. A view of a building that serves a purpose. ".repeat(8)}`;
+const cappedImage = cleanMarkdown(
+	`![${captionAlt.replace(/\. /g, ".\n\t")}](https://cdn.example/img.jpg)`,
+);
+const cappedAltText = cappedImage.match(/!\[([^\]]*)\]/)?.[1] ?? "";
+assert(cappedAltText.length <= 250);
+assert(!cappedAltText.includes("\n"));
+assert(cappedAltText.endsWith("…"));
+assert(cappedImage.includes("](https://cdn.example/img.jpg)"));
+const shortImage = cleanMarkdown("![fetch then extract diagram](/x.png)");
+assert(shortImage.includes("![fetch then extract diagram](/x.png)"));
 
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");
