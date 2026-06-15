@@ -23,6 +23,7 @@ import { structuredFallback } from "./structured-fallback.ts";
 import {
 	countTextChars,
 	isElement,
+	maxBacktickRun,
 	shouldSkipElement,
 	tagName,
 } from "./structured-fallback-shared.ts";
@@ -310,7 +311,9 @@ function textElement(element: Element | null): Element | undefined {
 
 function renderTextAsset(title: string, body: string, url: string) {
 	const language = languageFromUrl(url);
-	const fence = body.includes("```") ? "````" : "```";
+	// fence must be longer than the longest backtick run in the body, or it
+	// closes early and strands content (mirrors codeBlock in structured-fallback)
+	const fence = "`".repeat(Math.max(3, maxBacktickRun(body) + 1));
 	return `# ${title}\n\n${fence}${language}\n${body.trim()}\n${fence}`;
 }
 

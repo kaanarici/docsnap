@@ -388,6 +388,27 @@ assert(
 assert(chromeKept.includes("- Subscribe"));
 assert(chromeKept.includes("> Share"));
 
+// a structured-text asset whose body contains a long backtick run must be fenced
+// with MORE backticks than that run, or the block closes early and strands content
+const backtickAsset = await extractPage({
+	source: "seed",
+	result: {
+		ok: true,
+		url: "https://example.com/snippet.json",
+		finalUrl: "https://example.com/snippet.json",
+		status: 200,
+		contentType: "application/json",
+		body: '{"snippet": "use ````` to fence a block"}',
+		fetchMs: 1,
+	},
+} satisfies FetchedUrl);
+assert(backtickAsset.ok);
+assert(backtickAsset.extractor === "text");
+const assetFences = backtickAsset.markdown.match(/^`{3,}/gm) ?? [];
+assert(assetFences.length === 2);
+assert(assetFences[0]!.length >= 6);
+assert(backtickAsset.markdown.includes("use ````` to fence"));
+
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");
 }
