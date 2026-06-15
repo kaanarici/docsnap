@@ -323,6 +323,20 @@ assert(cappedImage.includes("](https://cdn.example/img.jpg)"));
 const shortImage = cleanMarkdown("![fetch then extract diagram](/x.png)");
 assert(shortImage.includes("![fetch then extract diagram](/x.png)"));
 
+// standalone ad-slot labels are dropped; headings and in-sentence use are kept
+const adStripped = cleanMarkdown(
+	"## How to tie a tie\n\nFirst step.\n\nAdvertisement\n\nSecond step.\n\nSPONSORED\n\nDone.",
+);
+assert(!/^advertisement$/im.test(adStripped));
+assert(!/^sponsored$/im.test(adStripped));
+assert(adStripped.includes("First step."));
+assert(adStripped.includes("Second step."));
+const adKept = cleanMarkdown(
+	"## Advertisement\n\nThe advertisement industry is large.",
+);
+assert(adKept.includes("## Advertisement"));
+assert(adKept.includes("The advertisement industry is large."));
+
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");
 }

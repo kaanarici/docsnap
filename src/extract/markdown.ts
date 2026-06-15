@@ -38,6 +38,7 @@ export function cleanMarkdown(markdown: string): string {
 			continue;
 		}
 
+		if (isAdLabel(line)) continue;
 		lines.push(line);
 	}
 
@@ -47,6 +48,20 @@ export function cleanMarkdown(markdown: string): string {
 			.replace(/\n{3,}/g, "\n\n")
 			.trim(),
 	);
+}
+
+// standalone ad-slot labels leak into the body on ad-supported content sites;
+// a bare line that is only one of these is never article content
+const adLabels = new Set([
+	"advertisement",
+	"advertisements",
+	"sponsored",
+	"sponsored content",
+	"sponsored links",
+]);
+
+function isAdLabel(line: string): boolean {
+	return adLabels.has(line.trim().toLowerCase());
 }
 
 const maxAltChars = 250;
