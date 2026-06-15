@@ -30,18 +30,29 @@ export async function extractMany(inputs: FetchedUrl[]): Promise<PageRecord[]> {
 
 	const size = Math.min(heavy.length, Math.max(1, cpus().length - 1), 8);
 	let next = 0;
+	const pool: Worker[] = [];
+	// a fatal error in one worker must tear down the siblings too; otherwise they
+	// keep draining the queue and hold the event loop open after a failed run
+	const terminateAll = () => {
+		for (const worker of pool) worker.terminate();
+	};
 
-	const workers = Array.from({ length: size }, () => {
+	const tasks = Array.from({ length: size }, () => {
 		const worker = new Worker(new URL("./worker.ts", import.meta.url), {
 			type: "module",
 		});
+		pool.push(worker);
 		return new Promise<void>((resolve, reject) => {
-			worker.onerror = (event) => reject(event.error);
+			const fail = (error: Error) => {
+				terminateAll();
+				reject(error);
+			};
+			worker.onerror = (event) =>
+				fail(event.error ?? new Error("extract worker crashed"));
 			worker.onmessage = (event: MessageEvent<Message>) => {
 				const message = event.data;
 				if ("error" in message) {
-					reject(new Error(message.error));
-					worker.terminate();
+					fail(new Error(message.error));
 					return;
 				}
 				results[message.id] = message.record;
@@ -61,7 +72,7 @@ export async function extractMany(inputs: FetchedUrl[]): Promise<PageRecord[]> {
 		});
 	});
 
-	await Promise.all(workers);
+	await Promise.all(tasks);
 	return results;
 }
 
