@@ -53,10 +53,6 @@ export function validatePublicHttpUrl(raw: string): string | undefined {
 	return undefined;
 }
 
-export async function assertPublicHttpUrl(raw: string): Promise<void> {
-	await resolvePublicHttpUrl(raw);
-}
-
 export async function resolvePublicHttpUrl(
 	raw: string,
 ): Promise<PublicHttpAddress> {

@@ -22,10 +22,6 @@ export function jsonToolResult(value: unknown): ToolResult {
 	};
 }
 
-export function textToolResult(text: string): ToolResult {
-	return { content: [{ type: "text", text }] };
-}
-
 export function errorToolResult(
 	toolName: string,
 	error: unknown,
