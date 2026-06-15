@@ -7,11 +7,14 @@ import { discoverLlms } from "../src/discover/llms.ts";
 import type { Robots } from "../src/discover/robots.ts";
 import { discoverSitemaps } from "../src/discover/sitemap.ts";
 import { fetchText, setFetchTransportForTest } from "../src/fetch/fetcher.ts";
+import type { FetchTransport } from "../src/fetch/transport.ts";
+import { withWritersideTopic } from "../src/fetch/writerside.ts";
 
 await discoveryFinalUrlRegression();
 await discoveryResourceGateRegression();
 await fetchRedirectGateRegression();
 await llmsRedirectGateRegression();
+await writersideTopicGateRegression();
 
 async function discoveryFinalUrlRegression() {
 	const config = parsedConfig("https://docs.example.com/");
@@ -245,6 +248,37 @@ function response(
 
 function allowAllRobots(): Robots {
 	return { sitemaps: [], allows: [], disallows: [], allowed: () => true };
+}
+
+async function writersideTopicGateRegression() {
+	const config = parsedConfig("https://docs.example.com/");
+	const html = `<html data-topic="/topics/page.json"><body>doc</body></html>`;
+	const base = "https://docs.example.com/docs/page";
+	const headers = { accept: "text/html", "user-agent": "docsnap" };
+	let calls = 0;
+	const transport = (async () => {
+		calls++;
+		return {
+			status: 200,
+			body: new TextEncoder().encode("{}"),
+		} as unknown as Awaited<ReturnType<FetchTransport>>;
+	}) as FetchTransport;
+	// a robots-disallowed topic path must not be fetched
+	const before = calls;
+	const blocked = await withWritersideTopic(
+		html,
+		base,
+		headers,
+		config,
+		transport,
+		() => false,
+	);
+	assert(calls === before);
+	assert(blocked === html);
+	// an allowed topic is fetched
+	const beforeAllowed = calls;
+	await withWritersideTopic(html, base, headers, config, transport, () => true);
+	assert(calls === beforeAllowed + 1);
 }
 
 function parsedConfig(seed: string): Config {

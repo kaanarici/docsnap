@@ -9,9 +9,13 @@ export async function withWritersideTopic(
 	headers: RequestHeaders,
 	config: Config,
 	fetchTransport: FetchTransport,
+	allowUrl?: (url: string) => boolean | Promise<boolean>,
 ): Promise<string> {
 	const topicUrl = writersideTopicUrl(html, base);
 	if (!topicUrl) return html;
+	// the topic JSON is a same-origin subrequest on its own path; respect robots
+	// for it like every other secondary fetch
+	if (allowUrl && !(await allowUrl(topicUrl))) return html;
 	try {
 		const cookie = headers.cookie;
 		const response = await fetchTransport(

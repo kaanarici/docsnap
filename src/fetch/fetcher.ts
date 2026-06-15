@@ -227,17 +227,17 @@ async function fetchOnce(
 				headers,
 				config,
 				fetchTransport,
+				allowUrl,
 			);
 			const full = { ...base, body: text };
 			if (response.status >= 200 && response.status <= 299) {
 				return { ...full, ok: true } satisfies FetchResult;
 			}
-			const error = `HTTP ${response.status}`;
 			return {
 				...full,
 				ok: false,
-				error,
-				failureKind: failureKind(response.status, error),
+				error: `HTTP ${response.status}`,
+				failureKind: failureKind(response.status, `HTTP ${response.status}`),
 			} satisfies FetchResult;
 		} catch (error) {
 			if (attempt < 2 && isRetryableFetchError(error)) {
