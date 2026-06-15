@@ -85,6 +85,9 @@ const cssMs = timed("numeric css noise", () => {
 	}
 	assert(numericCssNoise("1 2 3 12px 4 5"));
 	assert(!numericCssNoise("Install the 12px spacing guide"));
+	// multi-dimension CSS strings are noise too, not just single-px ones
+	assert(numericCssNoise("100px 200px"));
+	assert(numericCssNoise("0px 0px 100px 200px"));
 	const useful =
 		"Install the SDK and configure authentication before creating a project with the command line tool. Review the generated Markdown output and verify each captured page before sharing the corpus with coding agents. Retry changed pages during refresh runs and keep the summary updated for later maintenance work.";
 	const extracted = extractSerializedText(

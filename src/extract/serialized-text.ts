@@ -132,7 +132,6 @@ export function numericCssNoise(text: string): boolean {
 		const token = tokens[index]!;
 		const lower = token.toLowerCase();
 		if (lower.endsWith("px")) {
-			if (pxIndex !== -1) return false;
 			const digits = lower.slice(0, -2);
 			if (!digits || !digitsOnly(digits)) return false;
 			pxIndex = index;
