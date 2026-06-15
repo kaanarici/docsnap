@@ -41,10 +41,52 @@ export function cleanMarkdown(markdown: string): string {
 		lines.push(line);
 	}
 
-	return lines
-		.join("\n")
-		.replace(/\n{3,}/g, "\n\n")
-		.trim();
+	return normalizeImageAlt(
+		lines
+			.join("\n")
+			.replace(/\n{3,}/g, "\n\n")
+			.trim(),
+	);
+}
+
+const maxAltChars = 250;
+
+// defuddle can emit a multi-line stock-photo caption as image alt text, which
+// bloats the corpus and reads like body prose; collapse alt whitespace and cap
+// egregious captions. Linear indexOf scan (no backtracking regex) so it can't
+// ReDoS on hostile markdown.
+function normalizeImageAlt(markdown: string): string {
+	if (!markdown.includes("![")) return markdown;
+	let out = "";
+	let cursor = 0;
+	while (cursor < markdown.length) {
+		const open = markdown.indexOf("![", cursor);
+		if (open < 0) {
+			out += markdown.slice(cursor);
+			break;
+		}
+		const altStart = open + 2;
+		const altEnd = markdown.indexOf("](", altStart);
+		const srcEnd = altEnd < 0 ? -1 : markdown.indexOf(")", altEnd + 2);
+		if (altEnd < 0 || srcEnd < 0) {
+			out += markdown.slice(cursor, altStart);
+			cursor = altStart;
+			continue;
+		}
+		out += markdown.slice(cursor, altStart);
+		out += cappedAlt(markdown.slice(altStart, altEnd));
+		out += markdown.slice(altEnd, srcEnd + 1);
+		cursor = srcEnd + 1;
+	}
+	return out;
+}
+
+function cappedAlt(alt: string): string {
+	if (alt.length <= maxAltChars && !/\n|\s\s/.test(alt)) return alt;
+	const collapsed = alt.replace(/\s+/g, " ").trim();
+	return collapsed.length > maxAltChars
+		? `${collapsed.slice(0, maxAltChars - 1)}…`
+		: collapsed;
 }
 
 type Fence = { marker: "`" | "~"; length: number };
