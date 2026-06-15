@@ -85,6 +85,45 @@ const shortStaticPage = await extractPage({
 assert(shortStaticPage.ok);
 assert(shortStaticPage.markdown.includes("Install docsnap with Bun."));
 
+// a short real page must NOT be blanked just because its title is a substring of the
+// body and the page carries an empty SPA mount div: the shell-placeholder title match
+// must be exact, not a substring
+const shortPageWithAppMount = await extractPage({
+	source: "seed",
+	result: {
+		ok: true,
+		url: "https://docs.example.com/api",
+		finalUrl: "https://docs.example.com/api",
+		status: 200,
+		contentType: "text/html",
+		body: `<html><head><title>API</title></head><body><main><p>The API supports JSON and XML responses.</p></main><div id="app"></div></body></html>`,
+		fetchMs: 1,
+	},
+} satisfies FetchedUrl);
+assert(shortPageWithAppMount.ok);
+assert(
+	shortPageWithAppMount.markdown.includes(
+		"The API supports JSON and XML responses.",
+	),
+);
+
+// a genuine title-only SPA shell (visible text IS exactly the title, empty mount div)
+// must still blank as an empty app shell
+const titleOnlyShell = await extractPage({
+	source: "seed",
+	result: {
+		ok: true,
+		url: "https://app.example.com/",
+		finalUrl: "https://app.example.com/",
+		status: 200,
+		contentType: "text/html",
+		body: `<html><head><title>My App</title></head><body><h1>My App</h1><div id="app"></div></body></html>`,
+		fetchMs: 1,
+	},
+} satisfies FetchedUrl);
+assert(!titleOnlyShell.ok);
+assert(titleOnlyShell.failureKind === "empty");
+
 // rss/atom feeds are discovery sources, not content pages: a feed reached as a
 // crawl link must be excluded, not captured as raw fenced XML
 const atomFeed = await extractPage({

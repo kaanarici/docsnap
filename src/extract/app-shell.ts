@@ -44,8 +44,7 @@ export function isShellPlaceholder(
 			) &&
 			/__docusaurus/i.test(html)) ||
 		(title !== undefined &&
-			wordCount(markdown) <= 8 &&
-			markdown.includes(title) &&
+			markdown.replace(/^#+\s*/, "").trim() === title.trim() &&
 			/<div[^>]+id=["']app["'][^>]*>\s*<\/div>/i.test(html))
 	);
 }
