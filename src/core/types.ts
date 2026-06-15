@@ -216,8 +216,8 @@ export type RunSummary = {
 	generatedAt: string;
 	snapshotVersion: number;
 	rootHash: string;
-	renderedFiles: number;
-	renderedBytes: number;
+	corpusFiles: number;
+	corpusBytes: number;
 	max: number;
 	maxAppliesTo: MaxAppliesTo;
 	maxReached: boolean;

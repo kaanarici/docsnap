@@ -64,7 +64,7 @@ Prefer focused reads for large files. Use frontmatter URLs when you need to cite
 - Failure kinds: ${failureKinds(summary)}
 - Refresh: ${refreshLine(summary)}
 - Snapshot root: ${summary.rootHash}
-- Rendered bytes: ${summary.renderedBytes}
+- Corpus bytes: ${summary.corpusBytes}
 - Output: ${summary.outDir}
 
 ${refreshSection(summary)}
