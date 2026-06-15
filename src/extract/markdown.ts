@@ -38,7 +38,7 @@ export function cleanMarkdown(markdown: string): string {
 			continue;
 		}
 
-		if (isAdLabel(line)) continue;
+		if (isBoilerplateLine(line)) continue;
 		lines.push(line);
 	}
 
@@ -50,18 +50,90 @@ export function cleanMarkdown(markdown: string): string {
 	);
 }
 
-// standalone ad-slot labels leak into the body on ad-supported content sites;
-// a bare line that is only one of these is never article content
-const adLabels = new Set([
+// Standalone UI chrome leaks into captures; only drop bare paragraph lines whose
+// full normalized text is one of these labels.
+const boilerplateLines = new Set([
 	"advertisement",
 	"advertisements",
+	"accept all cookies",
+	"accept cookies",
+	"back to top",
+	"cookie policy",
+	"follow us",
+	"got it",
+	"manage cookies",
+	"most popular",
+	"most read",
+	"newsletter",
+	"print this page",
+	"read more",
+	"related articles",
+	"related stories",
+	"share",
+	"share this",
+	"sign up",
+	"skip to content",
+	"skip to main content",
 	"sponsored",
 	"sponsored content",
 	"sponsored links",
+	"subscribe",
+	"tweet",
+	"we use cookies",
 ]);
 
-function isAdLabel(line: string): boolean {
-	return adLabels.has(line.trim().toLowerCase());
+function isBoilerplateLine(line: string): boolean {
+	const trimmed = line.trim();
+	if (!trimmed || isMarkdownStructuralLine(trimmed)) return false;
+	return boilerplateLines.has(normalizeBoilerplateLine(trimmed));
+}
+
+function isMarkdownStructuralLine(trimmed: string): boolean {
+	const first = trimmed[0];
+	if (first === "#" || first === ">") return true;
+	if ((first === "-" || first === "*" || first === "+") && trimmed[1] === " ") {
+		return true;
+	}
+	return isOrderedListLine(trimmed);
+}
+
+function isOrderedListLine(trimmed: string): boolean {
+	let index = 0;
+	while (index < trimmed.length && isDigit(trimmed.charCodeAt(index))) index++;
+	return (
+		index > 0 &&
+		(trimmed[index] === "." || trimmed[index] === ")") &&
+		trimmed[index + 1] === " "
+	);
+}
+
+function normalizeBoilerplateLine(line: string): string {
+	let out = "";
+	let pendingSpace = false;
+	for (const char of line) {
+		const code = char.charCodeAt(0);
+		const isWhitespace =
+			code === 9 ||
+			code === 10 ||
+			code === 11 ||
+			code === 12 ||
+			code === 13 ||
+			code === 32;
+		if (isWhitespace) {
+			pendingSpace = out.length > 0;
+			continue;
+		}
+		if (pendingSpace) {
+			out += " ";
+			pendingSpace = false;
+		}
+		out += char.toLowerCase();
+	}
+	return out;
+}
+
+function isDigit(code: number): boolean {
+	return code >= 48 && code <= 57;
 }
 
 const maxAltChars = 250;

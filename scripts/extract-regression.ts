@@ -337,6 +337,57 @@ const adKept = cleanMarkdown(
 assert(adKept.includes("## Advertisement"));
 assert(adKept.includes("The advertisement industry is large."));
 
+const chromeLabels = [
+	"Accept all cookies",
+	"Accept cookies",
+	"We use cookies",
+	"Cookie Policy",
+	"Manage cookies",
+	"Got it",
+	"Share this",
+	"Share",
+	"Tweet",
+	"Follow us",
+	"Back to top",
+	"Skip to content",
+	"Skip to main content",
+	"Print this page",
+	"Most read",
+	"Most popular",
+	"Related articles",
+	"Related stories",
+	"Read more",
+	"Sign up",
+	"Subscribe",
+	"Newsletter",
+];
+const chromeStripped = cleanMarkdown(
+	["First paragraph.", ...chromeLabels, "Last paragraph."].join("\n\n"),
+);
+assert(chromeStripped.includes("First paragraph."));
+assert(chromeStripped.includes("Last paragraph."));
+const chromeLines = chromeStripped
+	.split("\n")
+	.map((line) => line.trim().toLowerCase());
+for (const label of chromeLabels) {
+	assert(!chromeLines.includes(label.toLowerCase()));
+}
+assert(
+	!cleanMarkdown("Intro.\n\nAccept   all cookies\n\nDone.").includes("Accept"),
+);
+
+const chromeKept = cleanMarkdown(
+	"## Cookie Policy\n\nThe guide explains how you can subscribe to release updates.\n\n- Subscribe\n\n> Share",
+);
+assert(chromeKept.includes("## Cookie Policy"));
+assert(
+	chromeKept.includes(
+		"The guide explains how you can subscribe to release updates.",
+	),
+);
+assert(chromeKept.includes("- Subscribe"));
+assert(chromeKept.includes("> Share"));
+
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");
 }
