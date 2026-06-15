@@ -18,7 +18,7 @@ import {
 	recordFromExtracted,
 } from "./page-record.ts";
 import { scoreMarkdown } from "./quality.ts";
-import { extractSerializedText } from "./scripts.ts";
+import { extractSerializedText } from "./serialized-text.ts";
 import { structuredFallback } from "./structured-fallback.ts";
 import {
 	countTextChars,
@@ -223,8 +223,8 @@ function pageText(document: Document) {
 	const element =
 		document.querySelector("main") ??
 		document.querySelector("article") ??
-		textElement(document.body) ??
-		textElement(document.documentElement);
+		elementWithText(document.body) ??
+		elementWithText(document.documentElement);
 	return element ? readableText(element) : "";
 }
 
@@ -312,7 +312,7 @@ function readableText(node: Node): string {
 		.trim();
 }
 
-function textElement(element: Element | null): Element | undefined {
+function elementWithText(element: Element | null): Element | undefined {
 	const text = element ? readableText(element) : "";
 	return wordCount(text) >= 8 ? (element ?? undefined) : undefined;
 }

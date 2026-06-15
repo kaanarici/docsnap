@@ -22,11 +22,11 @@ import type {
 	PageRecord,
 	RunSummary,
 } from "../core/types.ts";
-import { agentReadme, treeText } from "./agent.ts";
 import { installAgentFiles } from "./agent-files.ts";
 import { runFiles } from "./files.ts";
 import { manifestLines, summaryJson } from "./manifest.ts";
 import { renderPage } from "./page.ts";
+import { agentReadme, treeText } from "./readme.ts";
 
 export type WriteStats = {
 	pageWrites: number;

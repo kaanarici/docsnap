@@ -1,47 +1,49 @@
 import type { RunSummary } from "../core/types.ts";
 import { runFiles } from "../output/files.ts";
 
-export function note(message: string): void {
+export function logLine(message: string): void {
 	process.stderr.write(`${message}\n`);
 }
 
 export function printSummary(summary: RunSummary): void {
 	const seconds = (summary.elapsedMs / 1000).toFixed(2);
-	note(
+	logLine(
 		`docsnap: ${summary.written} pages ${summary.dryRun ? "found" : `written to ${summary.outDir}`} in ${seconds}s`,
 	);
 	if (summary.maxAppliesTo === "non-llms" && summary.written > summary.max) {
-		note(`docsnap: llms.txt corpus included ${summary.written} pages`);
+		logLine(`docsnap: llms.txt corpus included ${summary.written} pages`);
 	}
 	if (summary.maxReached) {
-		note(
+		logLine(
 			`docsnap: page limit reached; rerun with -m ${summary.max * 2} for more`,
 		);
 	}
 	if (summary.failed || summary.lowQuality) {
 		const notFound = summary.byFailureKind.not_found ?? 0;
 		const failed = summary.failed - notFound;
-		note(issueSummary(failed, notFound, summary.lowQuality));
+		logLine(issueSummary(failed, notFound, summary.lowQuality));
 		const failures = failureSummary(summary);
-		if (failures) note(`docsnap: failure kinds ${failures}`);
+		if (failures) logLine(`docsnap: failure kinds ${failures}`);
 	}
 	if (summary.qualityWarnings) {
-		note(`docsnap: ${summary.qualityWarnings} quality warnings`);
+		logLine(`docsnap: ${summary.qualityWarnings} quality warnings`);
 	}
 	if (summary.injectionSignalPages) {
-		note(`docsnap: ${summary.injectionSignalPages} injection signal pages`);
+		logLine(`docsnap: ${summary.injectionSignalPages} injection signal pages`);
 	}
 	if (summary.hostRedirects) {
 		const page = summary.hostRedirects === 1 ? "page" : "pages";
-		note(`docsnap: ${summary.hostRedirects} ${page} changed host via redirect`);
+		logLine(
+			`docsnap: ${summary.hostRedirects} ${page} changed host via redirect`,
+		);
 	}
 	if (!summary.dryRun) {
-		note(`docsnap: summary ${summary.outDir}/${runFiles.summary}`);
-		note(`docsnap: manifest ${summary.outDir}/${runFiles.manifest}`);
-		note(`docsnap: guide ${summary.outDir}/${runFiles.agentReadme}`);
+		logLine(`docsnap: summary ${summary.outDir}/${runFiles.summary}`);
+		logLine(`docsnap: manifest ${summary.outDir}/${runFiles.manifest}`);
+		logLine(`docsnap: guide ${summary.outDir}/${runFiles.agentReadme}`);
 	}
 	if (summary.agentFilesUpdated) {
-		note(
+		logLine(
 			summary.agentFilesUpdated.length
 				? `docsnap: linked handoff from ${summary.agentFilesUpdated.join(", ")}`
 				: "docsnap: no AGENTS.md, CLAUDE.md, agents.md, or claude.md found in the current directory",

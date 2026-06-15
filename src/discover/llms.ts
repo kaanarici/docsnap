@@ -144,7 +144,7 @@ function looksLikeCorpus(body: string) {
 	);
 }
 
-function discoverCorpusHints(body: string, base: string, explicit: string[]) {
+function guessFullCorpusUrls(body: string, base: string, explicit: string[]) {
 	const hints: string[] = [];
 	for (const name of ["llms-full.txt", "llms-ctx.txt", "llms-ctx-full.txt"]) {
 		if (explicit.some((raw) => new URL(raw).pathname.endsWith(`/${name}`)))
@@ -163,7 +163,7 @@ function corpusLinks(
 ) {
 	const explicit = corpusEntryLinks(body, base);
 	const links = [
-		...new Set([...explicit, ...discoverCorpusHints(body, base, explicit)]),
+		...new Set([...explicit, ...guessFullCorpusUrls(body, base, explicit)]),
 	];
 	if (!maxExplicit) return links;
 	return links.sort(

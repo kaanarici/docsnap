@@ -5,9 +5,9 @@ import { parseArgs } from "../src/cli/args.ts";
 import { runCli } from "../src/cli/index.ts";
 import { dedupeRecords } from "../src/core/dedupe.ts";
 import { setFetchTransportForTest } from "../src/fetch/fetcher.ts";
-import { agentReadme } from "../src/output/agent.ts";
 import { installAgentFiles } from "../src/output/agent-files.ts";
 import { renderPage } from "../src/output/page.ts";
+import { agentReadme } from "../src/output/readme.ts";
 import { buildSummary } from "../src/report/summary.ts";
 
 const parsedPage = parseArgs(["https://docs.example.com/api/auth", "--page"]);

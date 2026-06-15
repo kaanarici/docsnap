@@ -6,7 +6,7 @@ import { stripScriptStyleTags } from "../src/extract/html.ts";
 import {
 	extractSerializedText,
 	numericCssNoise,
-} from "../src/extract/scripts.ts";
+} from "../src/extract/serialized-text.ts";
 import { refreshUrl } from "../src/fetch/refresh.ts";
 import { globMatches } from "../src/mcp/glob.ts";
 

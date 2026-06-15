@@ -2,7 +2,7 @@ import { runPipeline } from "../core/pipeline.ts";
 import type { Config, RunSummary } from "../core/types.ts";
 import { runFiles } from "../output/files.ts";
 import { flagTakesValue, parseArgs } from "./args.ts";
-import { note, printSummary } from "./progress.ts";
+import { logLine, printSummary } from "./progress.ts";
 
 export async function runCli(argv: string[]): Promise<void> {
 	try {
@@ -20,9 +20,9 @@ export async function runCli(argv: string[]): Promise<void> {
 			process.stdout.write(`${await version()}\n`);
 			return;
 		}
-		const progress = parsed.quiet || parsed.json ? undefined : note;
+		const progress = parsed.quiet || parsed.json ? undefined : logLine;
 		if (parsed.ignoreRobots)
-			note("docsnap: warning: --ignore-robots bypasses robots.txt rules");
+			logLine("docsnap: warning: --ignore-robots bypasses robots.txt rules");
 		const result = await runPipeline(parsed, progress);
 		const ok = runOk(result.summary, parsed);
 		if (parsed.json) {

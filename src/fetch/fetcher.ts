@@ -1,4 +1,4 @@
-import { fetchWithCache } from "../cache/fetch.ts";
+import { fetchWithCache } from "../cache/cached-fetch.ts";
 import type {
 	ConditionalRequest,
 	Config,

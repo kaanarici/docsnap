@@ -31,7 +31,7 @@ type TextAsset = {
 type RouteEntry = {
 	path: string;
 	title: string;
-	blockId: string;
+	componentId: string;
 };
 
 type TextPage = {
@@ -217,7 +217,7 @@ function textPages(
 ): TextPage[] {
 	const out: TextPage[] = [];
 	for (const route of routeEntries(js)) {
-		const block = textBlock(js, route.blockId);
+		const block = textBlock(js, route.componentId);
 		if (!block) continue;
 		const markdown = pageMarkdown(route.title, block);
 		if (!markdown) continue;
@@ -237,9 +237,9 @@ function routeEntries(js: string): RouteEntry[] {
 		/path:"([^"]+)",component:([A-Za-z_$][\w$]*),data:\{title:((?:"(?:\\.|[^"\\])*"))/g,
 	)) {
 		const path = match[1]!;
-		const blockId = match[2]!;
+		const componentId = match[2]!;
 		const title = decodeLiteral(match[3]!);
-		if (path && blockId && title) routes.push({ path, title, blockId });
+		if (path && componentId && title) routes.push({ path, title, componentId });
 	}
 	return routes;
 }

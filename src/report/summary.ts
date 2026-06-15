@@ -1,6 +1,6 @@
 import { emptyRefreshSummary } from "../core/refresh.ts";
 import type { SnapshotStats } from "../core/snapshot.ts";
-import { SNAPSHOT_VERSION } from "../core/snapshot.ts";
+import { snapshotSchemaVersion } from "../core/snapshot.ts";
 import {
 	type CacheSummary,
 	type Config,
@@ -89,7 +89,7 @@ export function buildSummary(
 		userAgent: config.userAgent,
 		...(config.ignoreRobots ? { ignoreRobots: true as const } : {}),
 		generatedAt: new Date().toISOString(),
-		snapshotVersion: SNAPSHOT_VERSION,
+		snapshotVersion: snapshotSchemaVersion,
 		rootHash: snapshot.rootHash,
 		corpusFiles: snapshot.files,
 		corpusBytes: snapshot.bytes,

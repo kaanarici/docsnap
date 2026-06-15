@@ -4,7 +4,7 @@ const defaultFreshMs = 6 * 60 * 60 * 1000;
 const maxFreshMs = 24 * 60 * 60 * 1000;
 
 export function freshUntilFor(result: FetchResult): Date | undefined {
-	if (!storeableResponse(result)) return undefined;
+	if (!cacheableResponse(result)) return undefined;
 	const now = Date.now();
 	const cacheControl = result.cacheControl?.toLowerCase();
 	if (cacheControl) {
@@ -23,7 +23,7 @@ export function freshUntilFor(result: FetchResult): Date | undefined {
 	return undefined;
 }
 
-function storeableResponse(result: FetchResult): boolean {
+function cacheableResponse(result: FetchResult): boolean {
 	if (!result.ok || isNotModifiedResult(result)) return false;
 	if (result.status < 200 || result.status > 299) return false;
 	if (result.setCookie) return false;

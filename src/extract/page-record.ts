@@ -34,7 +34,7 @@ export function recordFromExtracted(
 	input: FetchedUrl,
 	extracted: ExtractedBody,
 	started: number,
-	rawInjectionSignals: PageRecord["injectionSignals"],
+	rawSignals: PageRecord["injectionSignals"],
 ): PageRecord {
 	const { metadata, result, source } = input;
 	const markdown = cleanMarkdown(extracted.markdown);
@@ -45,7 +45,7 @@ export function recordFromExtracted(
 			metadata,
 			emptyContentError(result.body),
 			"empty",
-			rawInjectionSignals,
+			rawSignals,
 		);
 	if (isLoadingShellPlaceholder(markdown, result.body)) {
 		return failedRecord(
@@ -54,7 +54,7 @@ export function recordFromExtracted(
 			metadata,
 			"app shell without static text",
 			"empty",
-			rawInjectionSignals,
+			rawSignals,
 		);
 	}
 	if (isBlockedChallenge(markdown, extracted.title)) {
@@ -64,7 +64,7 @@ export function recordFromExtracted(
 			metadata,
 			"blocked by client challenge",
 			"blocked",
-			rawInjectionSignals,
+			rawSignals,
 		);
 	}
 	if (isLanguageSelector(result.finalUrl, result.body)) {
@@ -74,11 +74,11 @@ export function recordFromExtracted(
 			metadata,
 			"language selector without article content",
 			"empty",
-			rawInjectionSignals,
+			rawSignals,
 		);
 	}
 	const injectionSignals = uniqueSignals([
-		...rawInjectionSignals,
+		...rawSignals,
 		...scanMarkdownForInjectionSignals(markdown),
 	]);
 	const quality = scoreMarkdown(markdown, extracted.title);

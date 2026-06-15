@@ -283,7 +283,9 @@ function decodeCandidate(candidate: string): string | undefined {
 	const base64 = decodeBase64(normalized);
 	if (base64) return base64;
 	if (/^[0-9a-fA-F]+$/.test(candidate) && candidate.length % 2 === 0) {
-		return printable(Buffer.from(candidate, "hex").toString("utf8"));
+		return decodedTextIfReadable(
+			Buffer.from(candidate, "hex").toString("utf8"),
+		);
 	}
 	return undefined;
 }
@@ -292,10 +294,10 @@ function decodeBase64(candidate: string): string | undefined {
 	if (candidate.length % 4 === 1) return undefined;
 	const padded = candidate.padEnd(Math.ceil(candidate.length / 4) * 4, "=");
 	if (!/^[A-Za-z0-9+/]+={0,2}$/.test(padded)) return undefined;
-	return printable(Buffer.from(padded, "base64").toString("utf8"));
+	return decodedTextIfReadable(Buffer.from(padded, "base64").toString("utf8"));
 }
 
-function printable(text: string) {
+function decodedTextIfReadable(text: string) {
 	const compact = text.replace(/\s/g, "");
 	if (!compact) return undefined;
 	const printableCount = Array.from(compact).filter((char) => {

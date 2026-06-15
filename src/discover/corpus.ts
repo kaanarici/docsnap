@@ -18,7 +18,7 @@ export async function discoverLlmsUrls(
 	config: Config,
 	options: LlmsCorpusOptions,
 ) {
-	await blockDisallowedLlmsCandidates(seed, config, options);
+	await cacheRobotsBlockedLlmsCandidates(seed, config, options);
 	const allowResource = async (url: string) => {
 		if (config.ignoreRobots) return true;
 		const robots = await robotsForOrigin(
@@ -86,7 +86,7 @@ export async function robotsForOrigin(
 	return robots;
 }
 
-async function blockDisallowedLlmsCandidates(
+async function cacheRobotsBlockedLlmsCandidates(
 	seed: string,
 	config: Config,
 	options: LlmsCorpusOptions,

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-export const SNAPSHOT_VERSION = 1;
+export const snapshotSchemaVersion = 1;
 
 export type SnapshotFile = {
 	path: string;

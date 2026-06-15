@@ -249,7 +249,7 @@ function captureInput(value: unknown) {
 function refreshInput(value: unknown) {
 	const input = objectInput(value, ["output_dir", "max_pages", "concurrency"]);
 	return {
-		output_dir: outputDir(input, "output_dir"),
+		output_dir: requiredOutputDir(input, "output_dir"),
 		max_pages: optionalInt(input, "max_pages", 1, 500),
 		concurrency: optionalInt(input, "concurrency", 1, 64),
 	};
@@ -274,7 +274,7 @@ function summaryInput(value: unknown) {
 		"error_limit",
 	]);
 	return {
-		output_dir: outputDir(input, "output_dir"),
+		output_dir: requiredOutputDir(input, "output_dir"),
 		include_errors: optionalBool(input, "include_errors", true),
 		include_refresh_changes: optionalBool(
 			input,
@@ -293,7 +293,7 @@ function pagesInput(value: unknown) {
 		"include_failures",
 	]);
 	return {
-		output_dir: outputDir(input, "output_dir"),
+		output_dir: requiredOutputDir(input, "output_dir"),
 		page_size: optionalInt(input, "page_size", 1, 200) ?? 50,
 		cursor: optionalCursor(input),
 		include_failures: optionalBool(input, "include_failures", false),
@@ -308,7 +308,7 @@ function searchInput(value: unknown) {
 		"max_results",
 		"snippet_chars",
 	]);
-	const output = outputDir(input, "output_dir");
+	const output = requiredOutputDir(input, "output_dir");
 	return {
 		output_dir: output,
 		query: stringInput(input, "query"),
@@ -326,7 +326,7 @@ function readPageInput(value: unknown) {
 		"max_chars",
 		"include_frontmatter",
 	]);
-	const output = outputDir(input, "output_dir");
+	const output = requiredOutputDir(input, "output_dir");
 	const path = stringInput(input, "output_path");
 	if (!resolvePriorOutputPath({ outDir: output }, path)) {
 		throw new Error("output_path must be a safe relative manifest path");
@@ -369,7 +369,7 @@ function optionalString(input: ObjectInput, key: string): string | undefined {
 	return stringInput(input, key);
 }
 
-function outputDir(input: ObjectInput, key: string): string {
+function requiredOutputDir(input: ObjectInput, key: string): string {
 	return stringInput(input, key);
 }
 
