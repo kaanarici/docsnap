@@ -44,6 +44,44 @@ try {
 	setFetchTransportForTest(undefined);
 }
 
+// ReDoS guard: a seed path segment is attacker-controllable and must not be
+// interpolated into a backtracking RegExp when ranking sitemap-index children
+setFetchTransportForTest(async (input) => {
+	const url = String(input);
+	const longPath = `${"a".repeat(40)}b`;
+	const body = url.endsWith("/sitemap.xml")
+		? `<sitemapindex>${Array.from(
+				{ length: 20 },
+				(_, i) =>
+					`<sitemap><loc>https://redos.example/${longPath}-${i}.xml</loc></sitemap>`,
+			).join("")}</sitemapindex>`
+		: `<urlset></urlset>`;
+	return {
+		url,
+		status: 200,
+		headers: {
+			get: (name: string) =>
+				name === "content-type" ? "application/xml" : null,
+			getSetCookie: () => [],
+		},
+		body: new TextEncoder().encode(body),
+	};
+});
+try {
+	const start = performance.now();
+	await discoverSitemaps(
+		"https://redos.example/",
+		["https://redos.example/sitemap.xml"],
+		rateLimitedConfig,
+		{ limit: 5, scope: "/(a+)+/", accept: () => true },
+	);
+	// malicious "(a+)+" scope must not build a backtracking regex
+	const elapsed = performance.now() - start;
+	assert(elapsed < 2000);
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
 const scopedSitemapFetches: string[] = [];
 setFetchTransportForTest(async (input) => {
 	const url = String(input);

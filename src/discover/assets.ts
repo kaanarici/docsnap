@@ -1,5 +1,9 @@
 import { parseHTML } from "linkedom";
-import { uniqueByWhitespace, whitespaceKey } from "../core/text.ts";
+import {
+	escapeRegExp,
+	uniqueByWhitespace,
+	whitespaceKey,
+} from "../core/text.ts";
 import type { Config, DiscoveredUrl, FetchResult } from "../core/types.ts";
 import { looksLikeAppShell } from "../extract/app-shell.ts";
 import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
@@ -332,10 +336,6 @@ function syntheticFetch(url: string, body: string): FetchResult {
 		fetchMs: 0,
 		redirects: [],
 	};
-}
-
-function escapeRegExp(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 const htmlWords = new Set([

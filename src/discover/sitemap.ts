@@ -1,4 +1,5 @@
 import { DOMParser } from "linkedom";
+import { escapeRegExp } from "../core/text.ts";
 import type { Config } from "../core/types.ts";
 import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
 import { runBounded } from "../fetch/rate-limit.ts";
@@ -204,9 +205,14 @@ function sitemapHintScore(raw: string, scope: string) {
 }
 
 function scopePartVariants(part: string) {
-	const escaped = part.toLowerCase().replaceAll("-", "[_-]");
+	const lower = part.toLowerCase();
+	// the part is a URL path segment (attacker-controllable via the seed); escape
+	// regex metacharacters before building a RegExp so a segment like "(a+)+"
+	// can't trigger catastrophic backtracking, and skip absurdly long segments
+	if (lower.length > 64) return [];
+	const escaped = escapeRegExp(lower).replaceAll("-", "[_-]");
 	const variants = [escaped];
-	const locale = part.toLowerCase().match(/^([a-z]{2})-([a-z]{2})$/);
+	const locale = lower.match(/^([a-z]{2})-([a-z]{2})$/);
 	if (locale) variants.push(`${locale[2]}[_-]${locale[1]}`);
 	return variants.map(
 		(variant) => new RegExp(`(?:^|[/_.-])${variant}(?:[/_.-]|$)`),
