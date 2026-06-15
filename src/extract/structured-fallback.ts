@@ -248,24 +248,66 @@ function renderDefinitionList(
 	budget: VisitBudget,
 ) {
 	const lines: string[] = [];
-	const children = list.childNodes;
-	for (
-		let index = 0;
-		index < children.length && lines.length < maxListItems;
-		index++
-	) {
-		const child = children[index];
+	const stack: Node[] = [];
+	let hasTerm = false;
+	pushDefinitionChildren(stack, list);
+	while (stack.length > 0 && lines.length < maxListItems && takeVisit(budget)) {
+		const child = stack.pop()!;
 		if (!isElement(child)) continue;
 		const tag = tagName(child);
 		if (tag === "dt") {
-			const term = inlineMarkdown(child, baseUrl, budget).trim();
+			const term = inlineMarkdown(child, baseUrl, budget, {
+				skipDefinitionLists: true,
+			}).trim();
+			hasTerm = Boolean(term);
 			if (term) lines.push(`**${term}**`);
+			pushNestedDefinitionLists(stack, child, budget);
 		} else if (tag === "dd") {
-			const definition = inlineMarkdown(child, baseUrl, budget).trim();
-			if (definition) lines.push(`: ${definition}`);
+			const definition = inlineMarkdown(child, baseUrl, budget, {
+				skipDefinitionLists: true,
+			}).trim();
+			if (definition) lines.push(hasTerm ? `: ${definition}` : definition);
+			pushNestedDefinitionLists(stack, child, budget);
+		} else {
+			pushDefinitionChildren(stack, child);
 		}
 	}
 	return lines.join("\n");
+}
+
+function pushDefinitionChildren(stack: Node[], element: Element) {
+	const children = element.childNodes;
+	let pushed = 0;
+	for (let index = children.length - 1; index >= 0; index--) {
+		if (pushed >= maxDirectChildScan) break;
+		const child = children[index];
+		if (child) {
+			stack.push(child);
+			pushed++;
+		}
+	}
+}
+
+function pushNestedDefinitionLists(
+	stack: Node[],
+	element: Element,
+	budget: VisitBudget,
+) {
+	const found: Element[] = [];
+	const scan: Node[] = [];
+	pushDefinitionChildren(scan, element);
+	while (scan.length > 0 && found.length < maxListItems && takeVisit(budget)) {
+		const node = scan.pop()!;
+		if (!isElement(node)) continue;
+		if (tagName(node) === "dl") {
+			found.push(node);
+			continue;
+		}
+		pushDefinitionChildren(scan, node);
+	}
+	for (let index = found.length - 1; index >= 0; index--) {
+		stack.push(found[index]!);
+	}
 }
 
 function renderList(

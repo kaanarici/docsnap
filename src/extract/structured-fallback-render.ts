@@ -5,6 +5,8 @@ import {
 	isElement,
 	isLanguageChar,
 	isLinkDominatedContainer,
+	isMetadataLabel,
+	isMetadataLabelHint,
 	linkText,
 	maxBacktickRun,
 	maxCodeChars,
@@ -48,7 +50,7 @@ export function inlineMarkdown(
 	root: Element,
 	baseUrl: string,
 	budget: VisitBudget,
-	options: { skipNestedLists?: boolean } = {},
+	options: { skipDefinitionLists?: boolean; skipNestedLists?: boolean } = {},
 ) {
 	const chunks: string[] = [];
 	let chars = 0;
@@ -92,6 +94,7 @@ export function inlineMarkdown(
 			continue;
 		}
 		const tag = tagName(node);
+		if (options.skipDefinitionLists && tag === "dl") continue;
 		if (options.skipNestedLists && (tag === "ul" || tag === "ol")) continue;
 		if (tag === "br") {
 			chars = pushInline(chunks, "\n", chars);
@@ -183,6 +186,10 @@ export function renderTable(
 	budget: VisitBudget,
 ) {
 	const collected = collectTableRows(table, budget);
+	const metadata = !collected.invalid
+		? renderMetadataTable(collected.rows, baseUrl, budget)
+		: undefined;
+	if (metadata) return metadata;
 	if (collected.invalid || collected.rows.length < 2) {
 		return tableRowsAsProse(collected.rows, baseUrl, budget);
 	}
@@ -219,7 +226,36 @@ export function renderTable(
 		...renderedRows.map(pipeRow),
 	].join("\n");
 }
+function renderMetadataTable(
+	rows: TableRow[],
+	baseUrl: string,
+	budget: VisitBudget,
+) {
+	if (rows.length < 2) return undefined;
+	const probe = { ...budget };
+	const rendered: string[] = [];
+	let headerLabels = 0;
+	let hintedLabels = 0;
+	for (const row of rows) {
+		if (row.header || row.cells.length !== 2) return undefined;
+		const labelCell = row.cells[0]!;
+		const label = metadataCellText(labelCell, baseUrl, probe);
+		const value = metadataCellText(row.cells[1]!, baseUrl, probe);
+		if (!isMetadataLabel(label) || !value) return undefined;
+		if (tagName(labelCell) === "th") headerLabels++;
+		if (isMetadataLabelHint(label)) hintedLabels++;
+		rendered.push(`**${label}**\n: ${value}`);
+	}
+	if (headerLabels === 0 && hintedLabels === 0) return undefined;
+	budget.visits = probe.visits;
+	return rendered.join("\n");
+}
 
+function metadataCellText(cell: Element, baseUrl: string, budget: VisitBudget) {
+	return removePipes(
+		inlineMarkdown(cell, baseUrl, budget).trim().replaceAll("\n", " "),
+	);
+}
 function renderAtomicInline(
 	chunks: string[],
 	stack: InlineFrame[],

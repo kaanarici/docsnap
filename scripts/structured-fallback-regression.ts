@@ -71,6 +71,35 @@ assert(
 		"| Pro | Ten thousand pages | Agent-ready corpora |",
 	),
 );
+assert(
+	!product.markdown.includes("**Plan**"),
+	"normal multi-column data table should stay on renderTable path",
+);
+
+const metadataTable = await page(
+	"metadata-table",
+	`<html><head><title>Protocol Metadata</title></head><body><main>
+		${mediaDecoy}
+		<h1>Protocol Metadata</h1>
+		<p>Specification pages publish compact metadata tables before the narrative so agents need the label and value relationship preserved.</p>
+		<table>
+			<tbody>
+				<tr><td>Author</td><td>Guido</td></tr>
+				<tr><td>Status</td><td>Active</td></tr>
+				<tr><td>Version</td><td>3.14</td></tr>
+			</tbody>
+		</table>
+	</main></body></html>`,
+);
+assertOk(metadataTable);
+assert(
+	metadataTable.extractor === "structured",
+	"metadata table should use structured fallback",
+);
+assert(metadataTable.markdown.includes("**Author**"));
+assert(metadataTable.markdown.includes(": Guido"));
+assert(metadataTable.markdown.includes("**Status**"));
+assert(!metadataTable.markdown.includes("Author - Guido"));
 
 const codeDoc = await page(
 	"code",
@@ -122,6 +151,31 @@ assert(definitionList.markdown.includes("**retries**"));
 assert(
 	!/timeout\s+Maximum milliseconds/.test(definitionList.markdown),
 	"definition terms and values must not fuse into a run-on",
+);
+
+const metadataDefinitionList = await page(
+	"metadata-definition-list",
+	`<html><head><title>PEP Metadata</title></head><body><main>
+		${mediaDecoy}
+		<h1>PEP Metadata</h1>
+		<p>Python enhancement proposal pages expose metadata as definition blocks whose labels and values must stay associated.</p>
+		<dl>
+			<div><dt><span>Author</span></dt><dd>Guido</dd><dd>Barry Warsaw</dd></div>
+			<dt></dt><dd>Editorial note without a label remains readable.</dd>
+			<dt>Status</dt><dd>Active</dd>
+			<dt>References</dt><dd>Normative references<dl><dt>RFC</dt><dd>2119</dd></dl></dd>
+		</dl>
+	</main></body></html>`,
+);
+assertOk(metadataDefinitionList);
+assert(metadataDefinitionList.markdown.includes("**Author**"));
+assert(metadataDefinitionList.markdown.includes(": Guido"));
+assert(metadataDefinitionList.markdown.includes(": Barry Warsaw"));
+assert(metadataDefinitionList.markdown.includes("**RFC**"));
+assert(metadataDefinitionList.markdown.includes(": 2119"));
+assert(
+	!/Author\s+Guido/.test(metadataDefinitionList.markdown),
+	"metadata definition terms and values must not fuse",
 );
 
 // block-level img (direct child of main) exercises the render path; empty-alt is decorative

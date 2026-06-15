@@ -315,6 +315,55 @@ export function removePipes(value: string) {
 	return out.join("");
 }
 
+export function isMetadataLabel(value: string) {
+	if (!value || value.length > 48) return false;
+	let letters = 0;
+	let words = 0;
+	let inWord = false;
+	for (const char of value) {
+		if (char === "\n" || char === "|" || char === "." || char === ";")
+			return false;
+		const word = !isWhitespace(char) && char !== ":" && char !== "-";
+		if (word && !inWord) words++;
+		inWord = word;
+		if ((char >= "A" && char <= "Z") || (char >= "a" && char <= "z")) letters++;
+	}
+	return letters > 0 && words <= 6;
+}
+
+export function isMetadataLabelHint(value: string) {
+	const label = value.endsWith(":") ? value.slice(0, -1) : value;
+	return metadataLabelHints.has(label.toLowerCase());
+}
+
+const metadataLabelHints = new Set([
+	"author",
+	"authors",
+	"category",
+	"created",
+	"date",
+	"deprecated",
+	"endpoint",
+	"last updated",
+	"license",
+	"method",
+	"module",
+	"obsoletes",
+	"pep",
+	"post-history",
+	"resolution",
+	"requires",
+	"rfc",
+	"returns",
+	"since",
+	"status",
+	"title",
+	"type",
+	"updated",
+	"updates",
+	"version",
+]);
+
 export function pushInline(chunks: string[], value: string, chars: number) {
 	if (!value || chars >= maxInlineChars) return chars;
 	const available = maxInlineChars - chars;
