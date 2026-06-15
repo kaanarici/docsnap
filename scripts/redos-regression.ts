@@ -8,8 +8,23 @@ import {
 	numericCssNoise,
 } from "../src/extract/scripts.ts";
 import { refreshUrl } from "../src/fetch/refresh.ts";
+import { globMatches } from "../src/mcp/glob.ts";
 
 const maxMs = 200;
+
+// MCP path_glob is caller-supplied; the matcher must be linear, not a RegExp
+// whose many '*'->'.*' partitions backtrack catastrophically.
+const globPattern = `${"a*".repeat(25)}b`;
+const globTarget = `${"a".repeat(120)}c`;
+const globStart = performance.now();
+const globResult = globMatches(globPattern, globTarget);
+const globMs = performance.now() - globStart;
+assert(!globResult, "pathological glob must not match");
+assert(globMs < maxMs, `globMatches must stay linear (took ${globMs}ms)`);
+assert(globMatches("docs/*.md", "docs/intro.md"));
+assert(!globMatches("docs/*.md", "blog/intro.md"));
+assert(globMatches("a?c/*", "abc/x"));
+assert(!globMatches("a?c", "abcd"));
 
 const markdownMs = timed("markdown links", () => {
 	assert(markdownLinkHrefs(`${"[".repeat(200_000)}](`).length === 0);

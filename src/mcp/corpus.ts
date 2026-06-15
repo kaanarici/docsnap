@@ -14,6 +14,7 @@ import {
 	McpReadLimitError,
 	readBoundedCorpusFile,
 } from "./access.ts";
+import { globMatches } from "./glob.ts";
 
 export type CorpusPage = {
 	ok: boolean;
@@ -464,16 +465,6 @@ function stripFrontmatter(text: string) {
 	if (!text.startsWith("---\n")) return text;
 	const end = text.indexOf("\n---\n", 4);
 	return end >= 0 ? text.slice(end + 5) : text;
-}
-
-function globMatches(pattern: string, path: string) {
-	const regex = new RegExp(
-		`^${pattern
-			.replace(/[.+^${}()|[\]\\]/g, "\\$&")
-			.replace(/\*/g, ".*")
-			.replace(/\?/g, ".")}$`,
-	);
-	return regex.test(path);
 }
 
 function cappedRefresh(summary: RunSummary["refresh"]) {
