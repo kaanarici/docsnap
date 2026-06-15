@@ -176,12 +176,8 @@ export function isLowQuality(record: PageSuccess): boolean {
 	return record.confidence < lowQualityConfidence;
 }
 
-export function hasQualityWarning(record: PageSuccess): boolean {
-	return record.qualityReasons.length > 0;
-}
-
 export function isQualityWarning(record: PageSuccess): boolean {
-	return hasQualityWarning(record) && !isLowQuality(record);
+	return record.qualityReasons.length > 0 && !isLowQuality(record);
 }
 
 function emptyCounts<T extends string>(keys: readonly T[]) {

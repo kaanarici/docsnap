@@ -65,6 +65,13 @@ export const injectionSignals = [
 
 export type InjectionSignal = (typeof injectionSignals)[number];
 
+export function filterInjectionSignals(value: unknown): InjectionSignal[] {
+	const allowed = new Set<InjectionSignal>(injectionSignals);
+	return Array.isArray(value)
+		? value.filter((item): item is InjectionSignal => allowed.has(item))
+		: [];
+}
+
 export const lowQualityConfidence = 0.6;
 
 export type RunStatus = "ok" | "partial" | "failed";

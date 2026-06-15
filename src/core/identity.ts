@@ -1,3 +1,4 @@
+import { safeDecode } from "./text.ts";
 import { dropFragmentAndQuery } from "./url.ts";
 
 export type IdentityInput = {
@@ -59,14 +60,6 @@ function cleanUrl(raw: string) {
 		return dropFragmentAndQuery(new URL(raw));
 	} catch {
 		return undefined;
-	}
-}
-
-function safeDecode(value: string) {
-	try {
-		return decodeURIComponent(value);
-	} catch {
-		return value;
 	}
 }
 

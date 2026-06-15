@@ -8,6 +8,7 @@ import {
 	discoverLlmsCorpus,
 	discoverLlmsUrls,
 	type LlmsCorpusOptions,
+	resourceAllowed,
 	robotsForOrigin,
 } from "./corpus.ts";
 import { crawlScoped } from "./crawl.ts";
@@ -370,19 +371,6 @@ async function addLlms(
 	}
 }
 
-async function resourceAllowed(
-	url: string,
-	config: Config,
-	robotsByOrigin: LlmsCorpusOptions["robotsByOrigin"],
-) {
-	if (config.ignoreRobots) return true;
-	const robots = await robotsForOrigin(
-		new URL(url).origin,
-		config,
-		robotsByOrigin,
-	);
-	return robots.allowed(url);
-}
 function sitemapResourceGate(
 	declared: string[],
 	allowResource: ((url: string) => Promise<boolean>) | undefined,

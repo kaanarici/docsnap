@@ -15,7 +15,7 @@ export async function extractMany(inputs: FetchedUrl[]): Promise<PageRecord[]> {
 	const heavy: Array<{ id: number; input: FetchedUrl }> = [];
 	await Promise.all(
 		inputs.map(async (input, id) => {
-			if (needsWorker(input)) heavy.push({ id, input });
+			if (shouldExtractInWorker(input.result)) heavy.push({ id, input });
 			else results[id] = await extractPage(input);
 		}),
 	);
@@ -74,8 +74,4 @@ export async function extractMany(inputs: FetchedUrl[]): Promise<PageRecord[]> {
 
 	await Promise.all(tasks);
 	return results;
-}
-
-function needsWorker({ result }: FetchedUrl) {
-	return shouldExtractInWorker(result);
 }

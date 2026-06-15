@@ -14,7 +14,7 @@ import type {
 	PageExtractor,
 	PageSuccess,
 } from "../core/types.ts";
-import { injectionSignals } from "../core/types.ts";
+import { filterInjectionSignals } from "../core/types.ts";
 import { scanMarkdownForInjectionSignals } from "../security/injection.ts";
 import { runFiles } from "./files.ts";
 
@@ -83,7 +83,7 @@ export async function recoverPriorPage(
 	void bytes;
 	void contentBytes;
 	void outputHash;
-	const recoveredSignals = cleanInjectionSignals([
+	const recoveredSignals = filterInjectionSignals([
 		...record.injectionSignals,
 		...scanMarkdownForInjectionSignals(markdown),
 	]);
@@ -190,17 +190,8 @@ function isReusablePrior(
 function normalizePrior(record: PriorPage): PriorPage {
 	return {
 		...record,
-		injectionSignals: cleanInjectionSignals(record.injectionSignals),
+		injectionSignals: filterInjectionSignals(record.injectionSignals),
 	};
-}
-
-function cleanInjectionSignals(value: unknown) {
-	const allowed = new Set(injectionSignals);
-	return Array.isArray(value)
-		? value.filter((item): item is PriorPage["injectionSignals"][number] =>
-				allowed.has(item),
-			)
-		: [];
 }
 
 function isSource(value: unknown): value is DiscoverySource {

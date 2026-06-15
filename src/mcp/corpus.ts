@@ -3,14 +3,15 @@ import { isAbsolute, join, parse, relative, resolve } from "node:path";
 import { isInsideOrSame, isWindowsAbsolute } from "../core/fs-safety.ts";
 import {
 	type FailureKind,
+	filterInjectionSignals,
 	type InjectionSignal,
-	injectionSignals,
 	type RunSummary,
 } from "../core/types.ts";
 import { runFiles } from "../output/files.ts";
 import { resolvePriorOutputPath } from "../output/prior.ts";
 import {
 	corpusLimits,
+	logDiagnostic,
 	McpReadLimitError,
 	readBoundedCorpusFile,
 } from "./access.ts";
@@ -334,7 +335,7 @@ function parseManifestLine(line: string): CorpusPage {
 		ok: raw.ok === true,
 		url: stringValue(raw.url, "url"),
 		finalUrl: stringValue(raw.finalUrl, "finalUrl"),
-		injectionSignals: cleanInjectionSignals(raw.injectionSignals),
+		injectionSignals: filterInjectionSignals(raw.injectionSignals),
 	};
 	if (typeof raw.outputPath === "string") page.outputPath = raw.outputPath;
 	if (typeof raw.title === "string") page.title = raw.title;
@@ -430,13 +431,6 @@ function stringValue(value: unknown, field: string) {
 	return value;
 }
 
-function cleanInjectionSignals(value: unknown): InjectionSignal[] {
-	const allowed = new Set<InjectionSignal>(injectionSignals);
-	return Array.isArray(value)
-		? value.filter((item): item is InjectionSignal => allowed.has(item))
-		: [];
-}
-
 function findQueryIndex(text: string, query: string) {
 	const exact = text.indexOf(query);
 	if (exact >= 0) return exact;
@@ -477,10 +471,4 @@ function cappedRefresh(summary: RunSummary["refresh"]) {
 		changedPagesTruncated:
 			summary.changedPages.length > corpusLimits.refreshChangedPages,
 	};
-}
-
-function logDiagnostic(error: unknown): void {
-	const message =
-		error instanceof Error ? (error.stack ?? error.message) : String(error);
-	process.stderr.write(`${message}\n`);
 }

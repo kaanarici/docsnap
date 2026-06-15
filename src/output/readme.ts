@@ -13,14 +13,9 @@ export function agentReadme(
 	summary: RunSummary,
 ): string {
 	const pages = records.filter(hasOutputPath);
-	const lowQuality = records
-		.filter(isPageSuccess)
-		.filter(isLowQuality)
-		.slice(0, 10);
-	const qualityWarnings = records
-		.filter(isPageSuccess)
-		.filter(isQualityWarning)
-		.slice(0, 10);
+	const successes = records.filter(isPageSuccess);
+	const lowQuality = successes.filter(isLowQuality).slice(0, 10);
+	const qualityWarnings = successes.filter(isQualityWarning).slice(0, 10);
 	const errors = summary.errors.slice(0, 10);
 
 	const body = `# docsnap capture guide

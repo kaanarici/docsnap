@@ -118,13 +118,10 @@ async function writePage(record: PageOutput, config: Config) {
 	const started = performance.now();
 	const path = join(config.outDir, record.outputPath);
 	const body = renderPage(record);
-	if ((await existingBody(path)) === body) {
-		record.timings.writeMs = performance.now() - started;
-		return false;
-	}
-	await atomicWrite(path, body, config.outDir);
+	const wrote = (await existingBody(path)) !== body;
+	if (wrote) await atomicWrite(path, body, config.outDir);
 	record.timings.writeMs = performance.now() - started;
-	return true;
+	return wrote;
 }
 
 async function existingBody(path: string) {

@@ -19,7 +19,7 @@ import type {
 } from "../core/types.ts";
 import { validatePublicHttpUrl } from "../security/url.ts";
 import { blobPath, entryPath, isCacheHex, lockPath, pathFor } from "./paths.ts";
-import { freshUntilFor } from "./policy.ts";
+import { freshUntilFor, isNotModifiedResult } from "./policy.ts";
 
 const schemaVersion = "docsnap-cache-v1";
 const renderMode = "static";
@@ -328,12 +328,6 @@ function cacheResultFromEntry(
 		...(cacheControl ? { cacheControl } : {}),
 		ok: true,
 	};
-}
-
-function isNotModifiedResult(
-	result: FetchResult,
-): result is FetchResult & { ok: true; notModified: true } {
-	return result.ok && "notModified" in result && result.notModified === true;
 }
 
 export function parseEntry(text: string, key: string): CacheEntry | undefined {

@@ -20,21 +20,10 @@ export async function discoverLlms(
 	config: Config,
 	options: LlmsDiscoveryOptions = {},
 ): Promise<string[]> {
-	const base = new URL(seed);
 	const requestedScope = scopeFromSeed(seed);
-	const dir = base.pathname.endsWith("/")
-		? base.pathname
-		: base.pathname.replace(/\/[^/]*$/, "/");
-	const paths = new Set<string>();
-	if (base.pathname.endsWith("/")) paths.add(`${base.pathname}llms.txt`);
-	else if (!/\.[a-z0-9]+$/i.test(base.pathname))
-		paths.add(`${base.pathname}/llms.txt`);
-	paths.add(`${dir}llms.txt`);
-	paths.add("/llms.txt");
-
 	const urls = new Set<string>();
 	const seen = new Set<string>();
-	const queue = [...paths].map((path) => `${base.origin}${path}`);
+	const queue = llmsCandidateUrls(seed);
 	const roots = new Set(queue);
 	while (
 		queue.length > 0 &&
@@ -76,6 +65,20 @@ export async function discoverLlms(
 		}
 	}
 	return [...urls];
+}
+
+export function llmsCandidateUrls(seed: string): string[] {
+	const base = new URL(seed);
+	const dir = base.pathname.endsWith("/")
+		? base.pathname
+		: base.pathname.replace(/\/[^/]*$/, "/");
+	const paths = new Set<string>();
+	if (base.pathname.endsWith("/")) paths.add(`${base.pathname}llms.txt`);
+	else if (!/\.[a-z0-9]+$/i.test(base.pathname))
+		paths.add(`${base.pathname}/llms.txt`);
+	paths.add(`${dir}llms.txt`);
+	paths.add("/llms.txt");
+	return [...paths].map((path) => `${base.origin}${path}`);
 }
 
 function fetchLlmsText(

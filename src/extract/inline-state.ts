@@ -368,18 +368,14 @@ function looksLikeIdentifier(text: string) {
 }
 
 function looksLikeCodeOrStyle(text: string) {
-	if (/[{};]/.test(text)) return true;
-	if (/\b(?:@media|calc\(|rgba?\(|hsla?\(|var\(--|font-family)\b/i.test(text))
-		return true;
-	if (
+	return (
+		/[{};]/.test(text) ||
+		/\b(?:@media|calc\(|rgba?\(|hsla?\(|var\(--|font-family)\b/i.test(text) ||
 		/(?:^|\s)(?:width|height|color|display|position|margin|padding):/i.test(
 			text,
-		)
-	)
-		return true;
-	if (/(?:className|data-|aria-|xmlns|viewBox|strokeWidth)/.test(text))
-		return true;
-	return false;
+		) ||
+		/(?:className|data-|aria-|xmlns|viewBox|strokeWidth)/.test(text)
+	);
 }
 
 function commonProseWords(text: string) {

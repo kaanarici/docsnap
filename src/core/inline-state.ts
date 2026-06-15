@@ -1,6 +1,11 @@
 import { looksLikeAppShell } from "../extract/app-shell.ts";
 import { extractInlineStatePage } from "../extract/inline-state-page.ts";
-import type { FetchedUrl, FetchResult, PageRecord } from "./types.ts";
+import type {
+	FetchedUrl,
+	FetchResult,
+	PageRecord,
+	PageSuccess,
+} from "./types.ts";
 import { lowQualityConfidence } from "./types.ts";
 
 type InlineStateReason =
@@ -32,6 +37,13 @@ function shouldAttemptInlineState(
 	// a failed static record (including empty-app-shell) already returned true
 	// above; these reasons only gate the ok-but-thin cases
 	if (!staticRecord.ok) return true;
+	return reasonGatesThinRecord(staticRecord, reason);
+}
+
+function reasonGatesThinRecord(
+	staticRecord: PageSuccess,
+	reason: InlineStateReason | undefined,
+) {
 	return (
 		reason === "low-confidence-shell" ||
 		(reason === "app-shell" &&
@@ -49,12 +61,7 @@ function shouldUseInlineStateRecord(
 		return false;
 	}
 	if (!staticRecord.ok) return true;
-	return (
-		reason === "low-confidence-shell" ||
-		(reason === "app-shell" &&
-			(staticRecord.extractor === "fallback" ||
-				staticRecord.extractor === "structured"))
-	);
+	return reasonGatesThinRecord(staticRecord, reason);
 }
 
 function inlineStateReason(

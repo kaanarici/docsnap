@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { relative } from "node:path";
 import { hasOutputPath, isPageSuccess } from "../core/records.ts";
+import { safeDecode } from "../core/text.ts";
 import type { PageRecord, PageSuccess } from "../core/types.ts";
 import { urlWithoutFragmentAndQuery } from "../core/url.ts";
 
@@ -65,14 +66,9 @@ function pathPrefix(records: PageSuccess[]) {
 
 function outputSegments(raw: string) {
 	const url = new URL(raw);
-	const parts = routeSegments(raw);
+	const parts = url.pathname.split("/").filter(Boolean).map(slug);
 	if (url.pathname.endsWith("/") || parts.length === 0) parts.push("index");
 	return parts;
-}
-
-function routeSegments(raw: string) {
-	const url = new URL(raw);
-	return url.pathname.split("/").filter(Boolean).map(slug);
 }
 
 function commonPrefix(paths: string[][]) {
@@ -104,14 +100,6 @@ function slug(value: string) {
 		.replace(/^-+|-+$/g, "");
 	if (/^\.+$/.test(clean)) return "page";
 	return clean || "page";
-}
-
-function safeDecode(value: string) {
-	try {
-		return decodeURIComponent(value);
-	} catch {
-		return value;
-	}
 }
 
 function shortHash(value: string) {

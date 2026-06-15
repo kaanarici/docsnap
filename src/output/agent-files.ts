@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import { open, realpath, stat } from "node:fs/promises";
 import { isAbsolute, parse, relative, resolve } from "node:path";
+import { escapeRegExp } from "../core/text.ts";
 import type { RunSummary } from "../core/types.ts";
 import { runFiles } from "./files.ts";
 
@@ -107,8 +108,4 @@ function displayPath(file: string, cwd: string) {
 		return path.replaceAll("\\", "/");
 	const root = parse(file).root;
 	return root ? file : resolve(cwd, file);
-}
-
-function escapeRegExp(value: string) {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

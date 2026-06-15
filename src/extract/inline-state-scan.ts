@@ -1,4 +1,5 @@
 import { parseHTML } from "linkedom";
+import { escapeRegExp } from "../core/text.ts";
 
 export type ScriptBlock = {
 	id: string;
@@ -64,7 +65,7 @@ export function nextFlightChunks(html: string): string[] {
 
 export function assignedExpression(body: string, name: string) {
 	const pattern = new RegExp(
-		`(?:window\\.)?${escapeRegex(name)}\\s*=\\s*`,
+		`(?:window\\.)?${escapeRegExp(name)}\\s*=\\s*`,
 		"g",
 	);
 	const match = pattern.exec(body);
@@ -181,8 +182,4 @@ function decodeStringLiteral(literal: string) {
 	} catch {
 		return "";
 	}
-}
-
-function escapeRegex(value: string) {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

@@ -148,7 +148,7 @@ async function realpathOrUndefined(path: string): Promise<string | undefined> {
 	}
 }
 
-function logDiagnostic(error: unknown): void {
+export function logDiagnostic(error: unknown): void {
 	const message =
 		error instanceof Error ? (error.stack ?? error.message) : String(error);
 	process.stderr.write(`${message}\n`);

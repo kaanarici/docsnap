@@ -163,31 +163,28 @@ export const toolDefinitions: ToolDefinition[] = [
 	},
 ];
 
+const examples: Record<string, unknown> = {
+	docsnap_refresh: { output_dir: "docsnap/react-dev-reference" },
+	docsnap_list_corpora: { root_dir: "docsnap", page_size: 25 },
+	docsnap_get_corpus_summary: { output_dir: "docsnap/react-dev-reference" },
+	docsnap_list_pages: {
+		output_dir: "docsnap/react-dev-reference",
+		page_size: 25,
+	},
+	docsnap_search_corpus: {
+		output_dir: "docsnap/react-dev-reference",
+		query: "useEffect",
+		max_results: 5,
+	},
+	docsnap_read_page: {
+		output_dir: "docsnap/react-dev-reference",
+		output_path: "reference/react/useEffect.md",
+		max_chars: 4000,
+	},
+};
+
 export function exampleFor(name: string): unknown {
-	if (name === "docsnap_refresh")
-		return { output_dir: "docsnap/react-dev-reference" };
-	if (name === "docsnap_list_corpora")
-		return { root_dir: "docsnap", page_size: 25 };
-	if (name === "docsnap_get_corpus_summary") {
-		return { output_dir: "docsnap/react-dev-reference" };
-	}
-	if (name === "docsnap_list_pages") {
-		return { output_dir: "docsnap/react-dev-reference", page_size: 25 };
-	}
-	if (name === "docsnap_search_corpus") {
-		return {
-			output_dir: "docsnap/react-dev-reference",
-			query: "useEffect",
-			max_results: 5,
-		};
-	}
-	if (name === "docsnap_read_page") {
-		return {
-			output_dir: "docsnap/react-dev-reference",
-			output_path: "reference/react/useEffect.md",
-			max_chars: 4000,
-		};
-	}
+	if (Object.hasOwn(examples, name)) return examples[name];
 	return {
 		url: "https://react.dev/reference",
 		output_dir: "docsnap/react-dev-reference",

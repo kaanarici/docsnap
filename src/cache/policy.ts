@@ -45,7 +45,7 @@ function hasAnyDirective(
 	return directives.some((directive) => blocked.includes(directive));
 }
 
-function isNotModifiedResult(
+export function isNotModifiedResult(
 	result: FetchResult,
 ): result is FetchResult & { ok: true; notModified: true } {
 	return result.ok && "notModified" in result && result.notModified === true;

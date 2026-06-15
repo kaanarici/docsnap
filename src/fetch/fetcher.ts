@@ -413,9 +413,7 @@ function routeFallback(
 	) {
 		return undefined;
 	}
-	const docsPath = docsMarkdownFallback(url);
-	if (docsPath) return docsPath;
-	return withoutExtension(url, ".md");
+	return docsMarkdownFallback(url) ?? withoutExtension(url, ".md");
 }
 function withoutExtension(url: URL, extension: string) {
 	url.pathname = url.pathname.slice(0, -extension.length);

@@ -1,6 +1,8 @@
 import { releaseDirLock } from "../core/dir-lock.ts";
 import type { ConditionalRequest, Config, FetchResult } from "../core/types.ts";
 import { validatePublicHttpUrl } from "../security/url.ts";
+import { isNotModifiedResult } from "./policy.ts";
+import type { CacheLookup } from "./store.ts";
 import {
 	acquireCacheLock,
 	cacheConditional,
@@ -46,13 +48,8 @@ export async function fetchWithCache(
 	const request = cacheRequest(url, config, accept);
 	const first = await readCache(config, request);
 	if (first.state === "fresh") {
-		const result = cachedFetchResult(
-			url,
-			first.entry,
-			first.body,
-			performance.now() - started,
-		);
-		if (await cachedAllowed(result, allowUrl)) return result;
+		const hit = await freshHit(url, first, started, allowUrl);
+		if (hit) return hit;
 	}
 	if (first.state === "disabled")
 		return uncached(url, config, accept, undefined, allowUrl);
@@ -61,26 +58,16 @@ export async function fetchWithCache(
 	if (!lock) {
 		const afterWait = await readCache(config, request);
 		if (afterWait.state === "fresh") {
-			const result = cachedFetchResult(
-				url,
-				afterWait.entry,
-				afterWait.body,
-				performance.now() - started,
-			);
-			if (await cachedAllowed(result, allowUrl)) return result;
+			const hit = await freshHit(url, afterWait, started, allowUrl);
+			if (hit) return hit;
 		}
 		return uncached(url, config, accept, undefined, allowUrl);
 	}
 	try {
 		const latest = await readCache(config, request, { count: false });
 		if (latest.state === "fresh") {
-			const result = cachedFetchResult(
-				url,
-				latest.entry,
-				latest.body,
-				performance.now() - started,
-			);
-			if (await cachedAllowed(result, allowUrl)) return result;
+			const hit = await freshHit(url, latest, started, allowUrl);
+			if (hit) return hit;
 		}
 		const stale =
 			latest.state === "stale"
@@ -116,6 +103,21 @@ export async function fetchWithCache(
 	}
 }
 
+async function freshHit(
+	url: string,
+	lookup: Extract<CacheLookup, { body: string }>,
+	started: number,
+	allowUrl: UrlGate | undefined,
+): Promise<FetchResult | undefined> {
+	const result = cachedFetchResult(
+		url,
+		lookup.entry,
+		lookup.body,
+		performance.now() - started,
+	);
+	return (await cachedAllowed(result, allowUrl)) ? result : undefined;
+}
+
 async function cachedAllowed(
 	result: FetchResult,
 	allowUrl: UrlGate | undefined,
@@ -145,10 +147,4 @@ async function writeThroughCache(
 	} finally {
 		await releaseDirLock(lock);
 	}
-}
-
-function isNotModifiedResult(
-	result: FetchResult,
-): result is FetchResult & { ok: true; notModified: true } {
-	return result.ok && "notModified" in result && result.notModified === true;
 }

@@ -5,7 +5,11 @@ import {
 	sameSiteLabel,
 } from "../core/url.ts";
 import { robotsBlockedResult } from "../fetch/result.ts";
-import { discoverLlms, type LlmsDiscoveryOptions } from "./llms.ts";
+import {
+	discoverLlms,
+	type LlmsDiscoveryOptions,
+	llmsCandidateUrls,
+} from "./llms.ts";
 import { loadRobots, type Robots } from "./robots.ts";
 import { addDiscovered, normalizeUrl, pathInScope } from "./url.ts";
 
@@ -19,16 +23,23 @@ export async function discoverLlmsUrls(
 	options: LlmsCorpusOptions,
 ) {
 	await cacheRobotsBlockedLlmsCandidates(seed, config, options);
-	const allowResource = async (url: string) => {
-		if (config.ignoreRobots) return true;
-		const robots = await robotsForOrigin(
-			new URL(url).origin,
-			config,
-			options.robotsByOrigin,
-		);
-		return robots.allowed(url);
-	};
+	const allowResource = (url: string) =>
+		resourceAllowed(url, config, options.robotsByOrigin);
 	return discoverLlms(seed, config, { ...options, allowResource });
+}
+
+export async function resourceAllowed(
+	url: string,
+	config: Config,
+	robotsByOrigin: Map<string, Robots>,
+) {
+	if (config.ignoreRobots) return true;
+	const robots = await robotsForOrigin(
+		new URL(url).origin,
+		config,
+		robotsByOrigin,
+	);
+	return robots.allowed(url);
 }
 
 export async function discoverLlmsCorpus(
@@ -104,20 +115,6 @@ async function cacheRobotsBlockedLlmsCandidates(
 			cache.set(url, Promise.resolve(robotsBlockedResult(url)));
 		}
 	}
-}
-
-function llmsCandidateUrls(seed: string) {
-	const base = new URL(seed);
-	const dir = base.pathname.endsWith("/")
-		? base.pathname
-		: base.pathname.replace(/\/[^/]*$/, "/");
-	const paths = new Set<string>();
-	if (base.pathname.endsWith("/")) paths.add(`${base.pathname}llms.txt`);
-	else if (!/\.[a-z0-9]+$/i.test(base.pathname))
-		paths.add(`${base.pathname}/llms.txt`);
-	paths.add(`${dir}llms.txt`);
-	paths.add("/llms.txt");
-	return [...paths].map((path) => `${base.origin}${path}`);
 }
 
 function hasScopedSameOriginLinks(

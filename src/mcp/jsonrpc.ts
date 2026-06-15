@@ -1,5 +1,5 @@
 import { StringDecoder } from "node:string_decoder";
-import type { McpState } from "./access.ts";
+import { logDiagnostic, type McpState } from "./access.ts";
 import { listResources, readResource } from "./resources.ts";
 import { callTool, listTools } from "./tools.ts";
 
@@ -173,12 +173,6 @@ function send(message: unknown): void {
 
 function errorResponse(id: JsonRpcId, code: number, message: string) {
 	return { jsonrpc: "2.0", id, error: { code, message } };
-}
-
-function logDiagnostic(error: unknown): void {
-	const message =
-		error instanceof Error ? (error.stack ?? error.message) : String(error);
-	process.stderr.write(`${message}\n`);
 }
 
 function safeErrorMessage(error: unknown): string {

@@ -4,16 +4,12 @@ export type MarkdownLink = {
 	suffix: string;
 };
 
-function markdownLinks(markdown: string): MarkdownLink[] {
-	return markdownLinkSpans(markdown);
-}
-
 export function markdownLinkHrefs(markdown: string): string[] {
-	return markdownLinks(markdown).map((link) => link.href);
+	return markdownLinkSpans(markdown).map((link) => link.href);
 }
 
 export function markdownLinkCount(markdown: string): number {
-	return markdownLinks(markdown).length;
+	return markdownLinkSpans(markdown).length;
 }
 
 export function replaceMarkdownLinks(

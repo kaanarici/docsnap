@@ -1,3 +1,4 @@
+import { stripCompleteHtmlElement } from "../core/text.ts";
 import type { FetchResult } from "../core/types.ts";
 
 export function refreshUrl(result: FetchResult): string | undefined {
@@ -17,36 +18,6 @@ export function refreshUrl(result: FetchResult): string | undefined {
 	} catch {
 		return undefined;
 	}
-}
-
-function stripCompleteHtmlElement(html: string, tagName: string): string {
-	const lower = html.toLowerCase();
-	const openToken = `<${tagName}`;
-	const closeToken = `</${tagName}>`;
-	let out = "";
-	let cursor = 0;
-	let index = 0;
-	while (index < html.length) {
-		const start = lower.indexOf(openToken, index);
-		if (start === -1) break;
-		const afterName = start + openToken.length;
-		if (!tagNameBoundary(lower[afterName])) {
-			index = afterName;
-			continue;
-		}
-		const openEnd = html.indexOf(">", afterName);
-		if (openEnd === -1) break;
-		const end = lower.indexOf(closeToken, openEnd + 1);
-		if (end === -1) break;
-		out += html.slice(cursor, start);
-		cursor = end + closeToken.length;
-		index = cursor;
-	}
-	return cursor === 0 ? html : out + html.slice(cursor);
-}
-
-function tagNameBoundary(char: string | undefined) {
-	return char === undefined || /[\s>/]/.test(char);
 }
 
 function refreshTarget(content: string | undefined): string | undefined {

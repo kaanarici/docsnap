@@ -60,7 +60,7 @@ export function inlineMarkdown(
 	while (
 		stack.length > 0 &&
 		(chars < maxInlineChars || atomicCheckpoints.length > 0) &&
-		takeInlineVisit(budget)
+		takeVisit(budget)
 	) {
 		const frame = stack.pop()!;
 		if (frame.close !== undefined) {
@@ -372,12 +372,6 @@ function pushWholeInline(chunks: string[], value: string, chars: number) {
 
 function fitsInline(value: string, chars: number) {
 	return Boolean(value) && chars + value.length <= maxInlineChars;
-}
-
-function takeInlineVisit(budget: VisitBudget) {
-	if (budget.visits >= budget.maxVisits) return false;
-	budget.visits++;
-	return true;
 }
 
 function collectTableRows(table: Element, budget: VisitBudget) {

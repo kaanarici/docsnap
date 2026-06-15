@@ -252,7 +252,7 @@ function renderDefinitionList(
 	// Pair each dd with its own preceding sibling dt: a flat hasTerm flag would
 	// leak a nested dl's term into the outer (empty-dt) dd on malformed markup.
 	const ddHasTerm = new Map<Node, boolean>();
-	pushDefinitionChildren(stack, list);
+	pushNodeChildren(stack, list, maxDirectChildScan);
 	while (stack.length > 0 && lines.length < maxListItems && takeVisit(budget)) {
 		const child = stack.pop()!;
 		if (!isElement(child)) continue;
@@ -278,23 +278,10 @@ function renderDefinitionList(
 				lines.push(ddHasTerm.get(child) ? `: ${definition}` : definition);
 			pushNestedDefinitionLists(stack, child, budget);
 		} else {
-			pushDefinitionChildren(stack, child);
+			pushNodeChildren(stack, child, maxDirectChildScan);
 		}
 	}
 	return lines.join("\n");
-}
-
-function pushDefinitionChildren(stack: Node[], element: Element) {
-	const children = element.childNodes;
-	let pushed = 0;
-	for (let index = children.length - 1; index >= 0; index--) {
-		if (pushed >= maxDirectChildScan) break;
-		const child = children[index];
-		if (child) {
-			stack.push(child);
-			pushed++;
-		}
-	}
 }
 
 function pushNestedDefinitionLists(
@@ -304,7 +291,7 @@ function pushNestedDefinitionLists(
 ) {
 	const found: Element[] = [];
 	const scan: Node[] = [];
-	pushDefinitionChildren(scan, element);
+	pushNodeChildren(scan, element, maxDirectChildScan);
 	while (scan.length > 0 && found.length < maxListItems && takeVisit(budget)) {
 		const node = scan.pop()!;
 		if (!isElement(node)) continue;
@@ -312,7 +299,7 @@ function pushNestedDefinitionLists(
 			found.push(node);
 			continue;
 		}
-		pushDefinitionChildren(scan, node);
+		pushNodeChildren(scan, node, maxDirectChildScan);
 	}
 	for (let index = found.length - 1; index >= 0; index--) {
 		stack.push(found[index]!);
