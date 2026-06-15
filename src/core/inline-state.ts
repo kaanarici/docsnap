@@ -29,9 +29,10 @@ function shouldAttemptInlineState(
 	staticRecord: PageRecord,
 	reason: InlineStateReason | undefined,
 ) {
+	// a failed static record (including empty-app-shell) already returned true
+	// above; these reasons only gate the ok-but-thin cases
 	if (!staticRecord.ok) return true;
 	return (
-		reason === "empty-app-shell" ||
 		reason === "low-confidence-shell" ||
 		(reason === "app-shell" &&
 			(staticRecord.extractor === "fallback" ||

@@ -9,6 +9,7 @@ export function extractInlineStatePage(
 	const { result } = input;
 	if (!result.ok || ("notModified" in result && result.notModified))
 		return undefined;
+	const started = performance.now();
 	const signals = rawInjectionSignals(result);
 	try {
 		const inline = extractInlineState(result.body, result.finalUrl);
@@ -25,7 +26,7 @@ export function extractInlineStatePage(
 				inlineStateSource: inline.source,
 				title,
 			},
-			performance.now(),
+			started,
 			signals,
 		);
 	} catch {
