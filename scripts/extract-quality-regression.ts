@@ -165,6 +165,22 @@ assert(
 );
 pass("marked-real", markedReal);
 
+// A skeleton page with a populated nav bar (5+ links defeats looksLikeAppShell) but
+// no body prose — only an og:description — must still fail honestly, not capture the
+// description as content. Guards the meta-only honesty gate against a nav-link bypass.
+const navShell = await page(
+	"nav-shell",
+	`<html><head><title>My App</title>
+	<meta property="og:description" content="Build fast. Deploy everywhere. Scale infinitely. Start for free today.">
+	</head><body><nav><a href="/a">A</a><a href="/b">B</a><a href="/c">C</a><a href="/d">D</a><a href="/e">E</a><a href="/f">F</a></nav><script src="/app.js"></script></body></html>`,
+);
+assert(!navShell.ok, "nav-link app shell was captured as a clean page");
+assert(
+	navShell.failureKind === "empty",
+	`nav shell failure was ${navShell.failureKind}`,
+);
+pass("nav-shell", navShell);
+
 const table = await page(
 	"table",
 	`<html><head><title>Command Matrix</title></head><body><main>

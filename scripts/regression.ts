@@ -34,12 +34,13 @@ const record = await extractPage({
 		fetchMs: 1,
 	},
 } satisfies FetchedUrl);
-assert(record.ok);
-assert(record.markdown.includes("A product lab building developer tools."));
-assert(!record.markdown.includes("static/chunks"));
-assert(!record.markdown.includes("dangerouslySetInnerHTML"));
-assert(!record.markdown.includes("__variable"));
-assert(record.confidence < lowQualityConfidence);
+// A client-rendered bailout page whose only static text is build/CSS noise in __next_f
+// plus a meta description is not capturable content: it must fail honestly as an empty
+// capture, never mining the noise as prose nor passing the meta description off as the
+// page body. Pages that embed real prose in inline state are still recovered downstream
+// by applyInlineState, which runs on this empty static record.
+assert(!record.ok);
+assert(record.failureKind === "empty");
 const bodylessRecord = await extractPage({
 	source: "seed",
 	result: {
