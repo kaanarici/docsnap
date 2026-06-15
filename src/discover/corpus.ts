@@ -193,6 +193,15 @@ function commonScope(urls: URL[]) {
 	) {
 		length++;
 	}
+	// the scope is a directory prefix with a trailing slash; if the common prefix
+	// consumes a whole file path (a URL that ends exactly here and is not a
+	// "/"-terminated directory), back off to its parent dir so that file still
+	// matches pathInScope's startsWith check instead of being excluded
+	const consumesFile = urls.some(
+		(url, index) =>
+			paths[index]!.length === length && !url.pathname.endsWith("/"),
+	);
+	if (consumesFile && length > 0) length--;
 	return length > 0 ? `/${paths[0]!.slice(0, length).join("/")}/` : "/";
 }
 
