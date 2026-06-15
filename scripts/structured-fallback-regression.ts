@@ -178,6 +178,25 @@ assert(
 	"metadata definition terms and values must not fuse",
 );
 
+// nested <dl> inside an EMPTY outer <dt> must not leak the inner term into the outer <dd>
+const { document: nestedTermDocument } = parseHTML(
+	`<html><body><main><h1>Nested Definitions</h1><p>Public reference pages sometimes nest a definition list inside a term, and the outer value must stay readable for agents reviewing the captured corpus archive.</p><dl><dt><dl><dt>inner label</dt><dd>inner value for the nested entry</dd></dl></dt><dd>outer value without a label of its own</dd></dl></main></body></html>`,
+);
+const nestedTermMarkdown = structuredFallback(
+	nestedTermDocument,
+	"https://docs.example.com/nested-definitions",
+);
+assert(nestedTermMarkdown.includes("**inner label**"));
+assert(nestedTermMarkdown.includes(": inner value for the nested entry"));
+assert(
+	!/(^|\n): outer value without a label/.test(nestedTermMarkdown),
+	"empty outer term leaked a colon prefix into the outer definition",
+);
+assert(
+	nestedTermMarkdown.includes("outer value without a label of its own"),
+	"outer definition value was lost",
+);
+
 // block-level img (direct child of main) exercises the render path; empty-alt is decorative
 const blockImage = await page(
 	"block-image",

@@ -134,6 +134,37 @@ assert(!shell.ok, "app shell was captured as a clean page");
 assert(shell.failureKind === "empty", `shell failure was ${shell.failureKind}`);
 pass("app-shell", shell);
 
+// An app shell whose only "content" is its og/twitter description meta tag must
+// fail honestly, not masquerade as a captured page.
+const metaShell = await page(
+	"meta-shell",
+	`<html><head><title>My App</title>
+	<meta property="og:description" content="Build fast. Deploy everywhere. Scale infinitely. Start for free today.">
+	</head><body><catalog-app></catalog-app><script src="/app.js"></script></body></html>`,
+);
+assert(!metaShell.ok, "og:description shell was captured as a clean page");
+assert(
+	metaShell.failureKind === "empty",
+	`meta shell failure was ${metaShell.failureKind}`,
+);
+pass("meta-shell", metaShell);
+
+// A page with an app-shell marker but real captured body text must NOT be blanked.
+const markedReal = await page(
+	"marked-real",
+	`<html><head><title>Guide</title>
+	<meta property="og:description" content="A short marketing description for the page.">
+	</head><body><catalog-app></catalog-app><main><h1>Guide</h1>
+	<p>This page has real captured documentation text describing how the capture pipeline turns public pages into clean Markdown for agents to read and reuse.</p>
+	</main><script src="/app.js"></script></body></html>`,
+);
+assertOk(markedReal);
+assert(
+	markedReal.markdown.includes("real captured documentation text"),
+	"app-shell marker wrongly blanked a real content page",
+);
+pass("marked-real", markedReal);
+
 const table = await page(
 	"table",
 	`<html><head><title>Command Matrix</title></head><body><main>

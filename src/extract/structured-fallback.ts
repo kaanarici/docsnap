@@ -249,7 +249,9 @@ function renderDefinitionList(
 ) {
 	const lines: string[] = [];
 	const stack: Node[] = [];
-	let hasTerm = false;
+	// Pair each dd with its own preceding sibling dt: a flat hasTerm flag would
+	// leak a nested dl's term into the outer (empty-dt) dd on malformed markup.
+	const ddHasTerm = new Map<Node, boolean>();
 	pushDefinitionChildren(stack, list);
 	while (stack.length > 0 && lines.length < maxListItems && takeVisit(budget)) {
 		const child = stack.pop()!;
@@ -259,14 +261,21 @@ function renderDefinitionList(
 			const term = inlineMarkdown(child, baseUrl, budget, {
 				skipDefinitionLists: true,
 			}).trim();
-			hasTerm = Boolean(term);
 			if (term) lines.push(`**${term}**`);
+			for (
+				let sib = child.nextElementSibling;
+				sib && tagName(sib) === "dd";
+				sib = sib.nextElementSibling
+			) {
+				ddHasTerm.set(sib, Boolean(term));
+			}
 			pushNestedDefinitionLists(stack, child, budget);
 		} else if (tag === "dd") {
 			const definition = inlineMarkdown(child, baseUrl, budget, {
 				skipDefinitionLists: true,
 			}).trim();
-			if (definition) lines.push(hasTerm ? `: ${definition}` : definition);
+			if (definition)
+				lines.push(ddHasTerm.get(child) ? `: ${definition}` : definition);
 			pushNestedDefinitionLists(stack, child, budget);
 		} else {
 			pushDefinitionChildren(stack, child);

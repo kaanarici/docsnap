@@ -4,7 +4,11 @@ import { uniqueByWhitespace, wordCount } from "../core/text.ts";
 import type { FetchedUrl, FetchResult, PageRecord } from "../core/types.ts";
 import { urlWithoutFragmentAndQuery } from "../core/url.ts";
 import { isFeedResponse } from "../discover/feed.ts";
-import { chromeHeading, isShellPlaceholder } from "./app-shell.ts";
+import {
+	chromeHeading,
+	isShellPlaceholder,
+	looksLikeAppShell,
+} from "./app-shell.ts";
 import {
 	isMarkdownLike,
 	isStructuredTextAsset,
@@ -188,10 +192,17 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 		: fallback.markdown
 			? fallback.extractor
 			: ("fallback" as const);
+	// Meta-tag-only output (no real extracted body) on an app shell is the shell's
+	// og/twitter description, not captured content — fail honestly so inline-state
+	// can still recover real JS state and genuine shells record as empty.
+	const metadataOnly = !serialized && !fallback.markdown && Boolean(metadata);
+	const isShell =
+		isShellPlaceholder(markdown, title, result.body) ||
+		(metadataOnly && Boolean(markdown) && looksLikeAppShell(result.body));
 	return {
 		...(title ? { title } : {}),
 		...(canonical ? { canonicalUrl: canonical } : {}),
-		markdown: isShellPlaceholder(markdown, title, result.body) ? "" : markdown,
+		markdown: isShell ? "" : markdown,
 		extractor,
 	};
 }
