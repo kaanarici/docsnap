@@ -50,16 +50,13 @@ export function buildSummary(
 
 	for (const record of records) {
 		bySource[record.source]++;
-		if (record.injectionSignals.length) {
-			injectionSignalPages++;
-			for (const signal of record.injectionSignals) {
-				byInjectionSignal[signal] = (byInjectionSignal[signal] ?? 0) + 1;
-			}
-		}
 		if (record.ok) {
-			// every summary count describes the written corpus; an ok record without
-			// an outputPath (e.g. a backfilled page beyond --max) is never written,
-			// so it must not inflate extractor/quality counts or flip run status
+			// every written-corpus count describes pages actually on disk; an ok record
+			// without an outputPath (e.g. a backfilled page beyond --max) is never
+			// written, so it must not inflate extractor/quality/injection counts or flip
+			// run status. injection signals only matter for captured content: a failed
+			// or unwritten page contributes nothing an agent can read, so its raw-HTML
+			// signals must not trip --fail-on-injection-signal
 			if (record.outputPath) {
 				byExtractor[record.extractor]++;
 				if (record.inlineStateSource) {
@@ -70,6 +67,12 @@ export function buildSummary(
 				if (addRedirectedHosts(record, redirectedHosts)) hostRedirects++;
 				if (isLowQuality(record)) lowQuality++;
 				if (isQualityWarning(record)) qualityWarnings++;
+				if (record.injectionSignals.length) {
+					injectionSignalPages++;
+					for (const signal of record.injectionSignals) {
+						byInjectionSignal[signal] = (byInjectionSignal[signal] ?? 0) + 1;
+					}
+				}
 			}
 			continue;
 		}

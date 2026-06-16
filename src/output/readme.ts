@@ -1,4 +1,4 @@
-import { hasOutputPath, isPageSuccess } from "../core/records.ts";
+import { hasOutputPath } from "../core/records.ts";
 import type {
 	PageOutput,
 	PageRecord,
@@ -12,10 +12,11 @@ export function agentReadme(
 	records: PageRecord[],
 	summary: RunSummary,
 ): string {
+	// quality lists describe the written corpus only — a page beyond --max that was
+	// never written must not appear under low-quality/quality-warning sections
 	const pages = records.filter(hasOutputPath);
-	const successes = records.filter(isPageSuccess);
-	const lowQuality = successes.filter(isLowQuality).slice(0, 10);
-	const qualityWarnings = successes.filter(isQualityWarning).slice(0, 10);
+	const lowQuality = pages.filter(isLowQuality).slice(0, 10);
+	const qualityWarnings = pages.filter(isQualityWarning).slice(0, 10);
 	const errors = summary.errors.slice(0, 10);
 
 	const body = `# docsnap capture guide
