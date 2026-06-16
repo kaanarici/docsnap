@@ -54,13 +54,11 @@ export async function listResources(state: McpState) {
 export async function readResource(uri: string, state: McpState) {
 	const parsed = await parseResourceUri(uri, state);
 	if (parsed.kind === "page") {
-		const page = await readPageSlice(
-			parsed.outputDir,
-			parsed.outputPath,
-			1,
-			25_000,
-			true,
-		);
+		const page = await readPageSlice(parsed.outputDir, parsed.outputPath, {
+			startLine: 1,
+			maxChars: 25_000,
+			includeFrontmatter: true,
+		});
 		return {
 			contents: [
 				{

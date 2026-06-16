@@ -16,6 +16,7 @@ import {
 	readBoundedCorpusFile,
 } from "./access.ts";
 import { globMatches } from "./glob.ts";
+import { buildRankInput, type RankedSnippet, rankPages } from "./retrieval.ts";
 
 export type CorpusPage = {
 	ok: boolean;
@@ -29,6 +30,8 @@ export type CorpusPage = {
 	qualityReasons?: string[];
 	failureKind?: FailureKind;
 	error?: string;
+	contentHash?: string;
+	extractor?: string;
 };
 
 export type PageRead = {
@@ -50,6 +53,12 @@ type SearchOptions = {
 	pathGlob?: string;
 	maxResults: number;
 	snippetChars: number;
+	excludeInjection?: boolean;
+};
+
+export type RankedSearch = {
+	matches: RankedSnippet[];
+	truncated: boolean;
 };
 
 type DirectoryEntry = {
@@ -69,6 +78,8 @@ type ManifestJson = {
 	failureKind?: unknown;
 	error?: unknown;
 	injectionSignals?: unknown;
+	contentHash?: unknown;
+	extractor?: unknown;
 };
 
 const maxScannedDirs = 1000;
@@ -217,64 +228,59 @@ export async function listPages(
 	};
 }
 
-export async function searchCorpus(outputDir: string, options: SearchOptions) {
+export async function searchCorpus(
+	outputDir: string,
+	options: SearchOptions,
+): Promise<RankedSearch> {
 	if (options.query.length > corpusLimits.searchQueryChars) {
 		throw new Error(
 			`query must be ${corpusLimits.searchQueryChars} characters or fewer`,
 		);
 	}
-	const query = options.query.toLowerCase();
-	const matches = [];
-	let scannedPages = 0;
-	let scannedBytes = 0;
-	let truncated = false;
-	for (const record of await readManifest(outputDir)) {
-		if (!record.ok || !record.outputPath) continue;
-		if (options.pathGlob && !globMatches(options.pathGlob, record.outputPath)) {
-			continue;
-		}
-		if (
-			scannedPages >= corpusLimits.searchPages ||
-			scannedBytes >= corpusLimits.searchBytes
-		) {
-			truncated = true;
-			break;
-		}
-		let text: string;
-		try {
-			text = await readCorpusOutput(outputDir, record.outputPath);
-		} catch (error) {
-			if (error instanceof McpReadLimitError) {
-				truncated = true;
-				continue;
-			}
-			throw error;
-		}
-		scannedPages++;
-		scannedBytes += Buffer.byteLength(text);
-		const index = findQueryIndex(text.toLowerCase(), query);
-		if (index < 0) continue;
-		const snippet = snippetAt(text, index, options.snippetChars);
-		matches.push({
-			record: record as CorpusPage & { outputPath: string },
-			lineStart: lineNumberAt(text, snippet.start),
-			lineEnd: lineNumberAt(text, snippet.end),
-			text: snippet.text,
-		});
-		if (matches.length >= options.maxResults) break;
-	}
-	return {
-		matches,
-		truncated: truncated || matches.length >= options.maxResults,
-	};
+	const records = (await readManifest(outputDir)).filter(
+		(record) =>
+			record.ok &&
+			record.outputPath &&
+			(!options.pathGlob || globMatches(options.pathGlob, record.outputPath)),
+	);
+	const { input, truncated } = await buildRankInput(
+		records,
+		(record) => loadCorpusBody(outputDir, record.outputPath),
+		{ maxPages: corpusLimits.searchPages, maxBytes: corpusLimits.searchBytes },
+	);
+	const matches = rankPages(input, options.query, {
+		maxResults: options.maxResults,
+		snippetChars: options.snippetChars,
+		excludeInjection: options.excludeInjection === true,
+	});
+	return { matches, truncated };
 }
+
+// returns null on a per-page read-cap breach so retrieval can record the skip
+// without aborting the whole ranking pass
+async function loadCorpusBody(
+	outputDir: string,
+	outputPath: string,
+): Promise<string | null> {
+	try {
+		return await readCorpusOutput(outputDir, outputPath);
+	} catch (error) {
+		if (error instanceof McpReadLimitError) return null;
+		throw error;
+	}
+}
+
+export type ReadSliceOptions = {
+	startLine: number;
+	endLine?: number;
+	maxChars: number;
+	includeFrontmatter: boolean;
+};
 
 export async function readPageSlice(
 	outputDir: string,
 	outputPath: string,
-	startLine: number,
-	maxChars: number,
-	includeFrontmatter: boolean,
+	options: ReadSliceOptions,
 ): Promise<PageRead> {
 	const record = (await readManifest(outputDir)).find(
 		(item): item is CorpusPage & { outputPath: string } =>
@@ -286,19 +292,24 @@ export async function readPageSlice(
 	if (!resolvePriorOutputPath({ outDir: outputDir }, outputPath)) {
 		throw new Error(`Unsafe output path: ${outputPath}`);
 	}
-	const source = includeFrontmatter
+	const source = options.includeFrontmatter
 		? await readCorpusOutput(outputDir, outputPath)
 		: stripFrontmatter(await readCorpusOutput(outputDir, outputPath));
 	const lines = source.split(/\n/);
-	const from = Math.min(startLine - 1, lines.length);
-	const rest = lines.slice(from).join("\n");
-	const truncated = rest.length > maxChars;
-	const text = truncated ? rest.slice(0, maxChars) : rest;
+	const from = Math.min(options.startLine - 1, lines.length);
+	// optional end_line caps the slice to an exact line span before the char cap
+	const upto =
+		options.endLine !== undefined
+			? Math.min(Math.max(options.endLine, options.startLine), lines.length)
+			: lines.length;
+	const selected = lines.slice(from, upto).join("\n");
+	const truncated = selected.length > options.maxChars;
+	const text = truncated ? selected.slice(0, options.maxChars) : selected;
 	const lineCount = text ? text.split(/\n/).length : 1;
 	return {
 		record,
-		startLine,
-		endLine: startLine + lineCount - 1,
+		startLine: options.startLine,
+		endLine: options.startLine + lineCount - 1,
 		truncated,
 		text,
 	};
@@ -350,6 +361,8 @@ function parseManifestLine(line: string): CorpusPage {
 		page.failureKind = raw.failureKind as FailureKind;
 	}
 	if (typeof raw.error === "string") page.error = raw.error;
+	if (typeof raw.contentHash === "string") page.contentHash = raw.contentHash;
+	if (typeof raw.extractor === "string") page.extractor = raw.extractor;
 	return page;
 }
 
@@ -429,30 +442,6 @@ function stringValue(value: unknown, field: string) {
 	if (typeof value !== "string")
 		throw new Error(`Manifest record missing ${field}`);
 	return value;
-}
-
-function findQueryIndex(text: string, query: string) {
-	const exact = text.indexOf(query);
-	if (exact >= 0) return exact;
-	return (
-		query
-			.split(/\s+/)
-			.filter(Boolean)
-			.map((term) => text.indexOf(term))
-			.filter((index) => index >= 0)
-			.sort((a, b) => a - b)[0] ?? -1
-	);
-}
-
-function snippetAt(text: string, index: number, maxChars: number) {
-	const half = Math.floor(maxChars / 2);
-	const start = Math.max(0, index - half);
-	const end = Math.min(text.length, start + maxChars);
-	return { start, end, text: text.slice(start, end).trim() };
-}
-
-function lineNumberAt(text: string, index: number) {
-	return text.slice(0, index).split(/\n/).length;
 }
 
 function stripFrontmatter(text: string) {

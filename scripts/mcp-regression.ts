@@ -172,7 +172,11 @@ async function main(): Promise<void> {
 
 		const toolsList = assertObject(await client.request("tools/list", {}));
 		const tools = (toolsList as { tools: ListedTool[] }).tools;
-		assert(tools.length === 7, "expected seven tools");
+		assert(tools.length === 8, "expected eight tools");
+		assert(
+			tools.some((tool) => tool.name === "docsnap_context_pack"),
+			"context pack tool should be registered",
+		);
 		assert(tools.every((tool) => tool.name.startsWith("docsnap_")));
 		assert(!JSON.stringify(tools).includes("response_format"));
 		const descriptions = tools

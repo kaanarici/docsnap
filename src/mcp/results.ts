@@ -98,6 +98,18 @@ export function errorMessage(error: unknown): string {
 	return String(error);
 }
 
+// stable, content-anchored citation an agent can quote and re-resolve: path plus
+// line span plus a short content hash so the cite invalidates if the page changes
+export function citationId(
+	outputPath: string,
+	lineStart: number,
+	lineEnd: number,
+	contentHash: string,
+): string {
+	const hash = contentHash ? `@${contentHash.slice(0, 12)}` : "";
+	return `${outputPath}#L${lineStart}-L${lineEnd}${hash}`;
+}
+
 function corpusInfo(summary: RunSummary) {
 	return {
 		output_dir: summary.outDir,
