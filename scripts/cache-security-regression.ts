@@ -1,23 +1,23 @@
-import {
-	mkdir,
-	mkdtemp,
-	readdir,
-	readFile,
-	rm,
-	writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pruneCache } from "../src/cache/eviction.ts";
 import { cacheKey, cacheRequest, cacheSummary } from "../src/cache/store.ts";
 import { parseArgs } from "../src/cli/args.ts";
 import { runPipeline } from "../src/core/pipeline.ts";
-import type { Config } from "../src/core/types.ts";
 import { fetchText, setFetchTransportForTest } from "../src/fetch/fetcher.ts";
 import { callTool } from "../src/mcp/tools.ts";
+import {
+	assert,
+	assertConfig,
+	cacheMaxEnv,
+	config,
+	countEntries,
+	page,
+	response,
+	withCacheEnv,
+} from "./cache-fixtures.ts";
 
-const cacheDirEnv = "DOCSNAP_CACHE_DIR";
-const cacheMaxEnv = "DOCSNAP_CACHE_MAX_MB";
 const prose =
 	"Cache security regression prose is long enough to be extracted as a stable documentation page for assertions.";
 
@@ -290,91 +290,7 @@ await withCacheEnv("stale-lock", async (cacheDir) => {
 	}
 });
 
-function config(
-	url: string,
-	root: string,
-	name: string,
-	extra: string[] = [],
-	pageOnly = true,
-): Config {
-	const args = [url, "-o", join(root, name), "--clean", "--quiet", ...extra];
-	if (pageOnly) args.push("--page");
-	const parsed = parseArgs(args);
-	assertConfig(parsed);
-	return parsed;
-}
-
-async function withCacheEnv(
-	name: string,
-	run: (cacheDir: string) => Promise<void>,
-) {
-	const previousDir = process.env[cacheDirEnv];
-	const previousMax = process.env[cacheMaxEnv];
-	const cacheDir = await mkdtemp(
-		join(tmpdir(), `docsnap-cache-security-${name}-`),
-	);
-	process.env[cacheDirEnv] = cacheDir;
-	try {
-		await run(cacheDir);
-	} finally {
-		if (previousDir === undefined) delete process.env[cacheDirEnv];
-		else process.env[cacheDirEnv] = previousDir;
-		if (previousMax === undefined) delete process.env[cacheMaxEnv];
-		else process.env[cacheMaxEnv] = previousMax;
-		await rm(cacheDir, { recursive: true, force: true });
-	}
-}
-
-async function countEntries(cacheDir: string) {
-	try {
-		const entries = await readdir(join(cacheDir, "entries"));
-		return entries.filter((entry) => entry.endsWith(".json")).length;
-	} catch {
-		return 0;
-	}
-}
-
-function response(
-	url: string,
-	status: number,
-	body: string,
-	headers: Record<string, string> = {},
-	setCookies: readonly string[] = [],
-) {
-	const lower = new Map(
-		Object.entries({ "content-type": "text/html", ...headers }).map(
-			([key, value]) => [key.toLowerCase(), value],
-		),
-	);
-	return {
-		url,
-		status,
-		headers: {
-			get: (name: string) => lower.get(name.toLowerCase()) ?? null,
-			getSetCookie: () => [...setCookies],
-		},
-		body: new TextEncoder().encode(body),
-	};
-}
-
-function page(title: string, body: string) {
-	return `<html><head><title>${title}</title></head><body><main><h1>${title}</h1><p>${body}</p></main></body></html>`;
-}
-
 function toolJson(value: unknown) {
 	const result = value as { content: Array<{ text: string }> };
 	return JSON.parse(result.content[0]?.text ?? "{}") as { ok?: boolean };
-}
-
-function assertConfig(value: unknown): asserts value is Config {
-	assert(
-		typeof value === "object" &&
-			value !== null &&
-			!("help" in value) &&
-			!("version" in value),
-	);
-}
-
-function assert(condition: unknown): asserts condition {
-	if (!condition) throw new Error("assertion failed");
 }

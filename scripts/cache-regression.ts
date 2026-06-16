@@ -16,8 +16,17 @@ import {
 import { parseArgs } from "../src/cli/args.ts";
 import { dirLockOwnerFile } from "../src/core/dir-lock.ts";
 import { runPipeline } from "../src/core/pipeline.ts";
-import type { Config } from "../src/core/types.ts";
 import { fetchText, setFetchTransportForTest } from "../src/fetch/fetcher.ts";
+import {
+	assert,
+	assertConfig,
+	cacheMaxEnv,
+	config,
+	countEntries,
+	page,
+	response,
+	withCacheEnv,
+} from "./cache-fixtures.ts";
 import {
 	logSandboxNetworkSkip,
 	sandboxNetworkDisabled,
@@ -26,8 +35,6 @@ import {
 
 const text =
 	"Shared cache regression content has enough stable documentation prose for extraction, summary checks, and repeat fetch assertions.";
-const cacheDirEnv = "DOCSNAP_CACHE_DIR";
-const cacheMaxEnv = "DOCSNAP_CACHE_MAX_MB";
 type CliSummary = {
 	written: number;
 	failed: number;
@@ -377,85 +384,12 @@ async function runDocsnapProcess(
 	return summary;
 }
 
-function config(
-	url: string,
-	root: string,
-	name: string,
-	extra: string[] = [],
-): Config {
-	const parsed = parseArgs([
-		url,
-		"--page",
-		"-o",
-		join(root, name),
-		"--clean",
-		"--quiet",
-		...extra,
-	]);
-	assertConfig(parsed);
-	return parsed;
-}
-
-async function withCacheEnv(
-	name: string,
-	run: (cacheDir: string) => Promise<void>,
-) {
-	const previousDir = process.env[cacheDirEnv];
-	const previousMax = process.env[cacheMaxEnv];
-	const cacheDir = await mkdtemp(join(tmpdir(), `docsnap-cache-${name}-`));
-	process.env[cacheDirEnv] = cacheDir;
-	try {
-		await run(cacheDir);
-	} finally {
-		if (previousDir === undefined) delete process.env[cacheDirEnv];
-		else process.env[cacheDirEnv] = previousDir;
-		if (previousMax === undefined) delete process.env[cacheMaxEnv];
-		else process.env[cacheMaxEnv] = previousMax;
-		await rm(cacheDir, { recursive: true, force: true });
-	}
-}
-
-async function countEntries(cacheDir: string) {
-	try {
-		const entries = await readdir(join(cacheDir, "entries"));
-		return entries.filter((entry) => entry.endsWith(".json")).length;
-	} catch {
-		return 0;
-	}
-}
-
-function response(
-	url: string,
-	status: number,
-	body: string,
-	headers: Record<string, string> = {},
-) {
-	const lower = new Map(
-		Object.entries({ "content-type": "text/html", ...headers }).map(
-			([key, value]) => [key.toLowerCase(), value],
-		),
-	);
-	return {
-		url,
-		status,
-		headers: {
-			get: (name: string) => lower.get(name.toLowerCase()) ?? null,
-			getSetCookie: () => [],
-		},
-		body: new TextEncoder().encode(body),
-	};
-}
-
 function isRobots(url: string) {
 	return url.endsWith("/robots.txt");
 }
 
 function robots404(url: string) {
 	return response(url, 404, "not found", { "content-type": "text/plain" });
-}
-
-function page(title: string, body: string) {
-	return `<html><head><title>${title}</title></head><body><main><h1>${title}</h1><p>${body}</p></main></body></html>`;
 }
 
 function webResponse(
@@ -476,20 +410,4 @@ function cleanEnv(): Record<string, string> {
 		if (value !== undefined) env[key] = value;
 	}
 	return env;
-}
-
-function assertConfig(value: unknown): asserts value is Config {
-	assert(
-		typeof value === "object" &&
-			value !== null &&
-			!("help" in value) &&
-			!("version" in value),
-	);
-}
-
-function assert(
-	condition: unknown,
-	message = "assertion failed",
-): asserts condition {
-	if (!condition) throw new Error(message);
 }

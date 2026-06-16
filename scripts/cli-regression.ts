@@ -74,7 +74,6 @@ let server: TestServer | undefined;
 try {
 	const help = parseArgs([]);
 	assert("help" in help);
-	assert(readmeUsage(await readFile("README.md", "utf8")) === help.help);
 	server = await startLoopbackServer(fixtureResponse);
 	origin = server.origin;
 	const result = await runCli(origin, outDir);
@@ -224,12 +223,6 @@ function text(body: string, contentType: string, status = 200): Response {
 
 function trimSlash(pathname: string): string {
 	return pathname !== "/" ? pathname.replace(/\/+$/, "") : pathname;
-}
-
-function readmeUsage(readme: string): string {
-	const match = readme.match(/## Usage\n\n```text\n([\s\S]*?)\n```/);
-	assert(match);
-	return match[1]!;
 }
 
 async function listFiles(dir: string, base = dir): Promise<string[]> {

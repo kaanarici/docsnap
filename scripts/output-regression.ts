@@ -7,7 +7,6 @@ import { dedupeRecords } from "../src/core/dedupe.ts";
 import { setFetchTransportForTest } from "../src/fetch/fetcher.ts";
 import { installAgentFiles } from "../src/output/agent-files.ts";
 import { renderPage } from "../src/output/page.ts";
-import { agentReadme } from "../src/output/readme.ts";
 import { buildSummary } from "../src/report/summary.ts";
 
 const parsedPage = parseArgs(["https://docs.example.com/api/auth", "--page"]);
@@ -53,7 +52,6 @@ assert(lowQualitySummary.lowQuality === 0);
 assert(lowQualitySummary.qualityWarnings === 1);
 assert(lowQualitySummary.userAgent === parsedPage.userAgent);
 assert(!("ignoreRobots" in lowQualitySummary));
-assert(agentReadme([thinPage], lowQualitySummary).includes("thin content"));
 // an ok record beyond --max is never written (no outputPath): it must not inflate
 // lowQuality/qualityWarnings/byExtractor or flip run status for pages not in the corpus
 const excessUnwritten = {

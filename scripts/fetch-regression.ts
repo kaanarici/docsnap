@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { parseArgs } from "../src/cli/args.ts";
+import type { Config } from "../src/core/types.ts";
 import { discoverAssetPages } from "../src/discover/assets.ts";
 import { discover } from "../src/discover/index.ts";
 import { discoverSitemaps } from "../src/discover/sitemap.ts";
@@ -9,12 +10,18 @@ import {
 	setResolvePublicHttpUrlForTest,
 } from "../src/fetch/transport.ts";
 import { validatePublicHttpUrl } from "../src/security/url.ts";
+import { html, httpResponse, typed } from "./fetch-fixtures.ts";
 
-const config = parseArgs(["https://docs.example.com", "--page"]);
+const config = parseArgs(["https://docs.example.com", "--page"]) as Config;
 assert(!("help" in config) && !("version" in config));
 assert(config.maxBytes === 12 * 1024 * 1024);
 const discoverConfig = parseArgs(["https://docs.example.com/"]);
 assert(!("help" in discoverConfig) && !("version" in discoverConfig));
+const loopbackFallbackAddresses = [
+	{ address: "127.0.0.2", family: 4 },
+	{ address: "127.0.0.3", family: 4 },
+	{ address: "127.0.0.1", family: 4 },
+] satisfies Array<{ address: string; family: 4 }>;
 
 const server = createServer((_req, res) => {
 	res.writeHead(200, { "content-type": "text/plain" });
@@ -34,14 +41,8 @@ if (serverStarted) {
 			hostname: "multi.test",
 			address: "127.0.0.2",
 			family: 4,
-			addresses: [
-				{ address: "127.0.0.2", family: 4 },
-				{ address: "127.0.0.3", family: 4 },
-				{ address: "127.0.0.1", family: 4 },
-			],
+			addresses: loopbackFallbackAddresses,
 		}));
-		// dead loopback aliases (127.0.0.2/.3) drop rather than refuse on macOS,
-		// so a short timeout keeps address fallback from waiting full socket timeouts
 		const response = await requestPublicHttp(
 			raw,
 			{ accept: "text/plain", "user-agent": config.userAgent },
@@ -57,12 +58,8 @@ if (serverStarted) {
 	}
 }
 
-// a trickling server resets the idle socket timeout forever; the wall-clock
-// deadline (3x timeoutMs) must end the request anyway
 const trickleServer = createServer((_req, res) => {
 	res.writeHead(200, { "content-type": "text/plain" });
-	// bounded: Bun does not emit res "close" on client destroy, and an
-	// unbounded interval would pin the event loop after the test finishes
 	let writes = 0;
 	const timer = setInterval(() => {
 		res.write("x");
@@ -81,13 +78,13 @@ if (trickleStarted) {
 	try {
 		const address = trickleServer.address();
 		assert(address && typeof address !== "string");
-		const raw = `http://trickle.test:${address.port}/`;
+		const raw = `http://multi.test:${address.port}/`;
 		setResolvePublicHttpUrlForTest(async () => ({
 			url: new URL(raw),
-			hostname: "trickle.test",
-			address: "127.0.0.1",
+			hostname: "multi.test",
+			address: "127.0.0.2",
 			family: 4,
-			addresses: [{ address: "127.0.0.1", family: 4 }],
+			addresses: loopbackFallbackAddresses,
 		}));
 		const started = performance.now();
 		let failure = "";
@@ -101,7 +98,7 @@ if (trickleStarted) {
 			failure = error instanceof Error ? error.message : String(error);
 		}
 		assert(/deadline exceeded/.test(failure));
-		assert(performance.now() - started < 5_000);
+		assert(performance.now() - started < 2_000);
 	} finally {
 		setResolvePublicHttpUrlForTest(undefined);
 		await new Promise<void>((resolve, reject) =>
@@ -132,9 +129,7 @@ await withMockFetch(
 	},
 	async (_input, headers) => {
 		conditionalHeadersSeen.push(headers);
-		return new Response("Cached page", {
-			headers: { "content-type": "text/html" },
-		});
+		return html("Cached page");
 	},
 );
 await withMockFetch(
@@ -179,13 +174,8 @@ await withMockFetch(
 	async (input, headers) => {
 		redirectHeaders.push({ url: input, headers });
 		return input === "https://docs.example.com/start"
-			? new Response("", {
-					status: 302,
-					headers: { location: "https://other.example/target" },
-				})
-			: new Response("Redirect target", {
-					headers: { "content-type": "text/html" },
-				});
+			? Response.redirect("https://other.example/target", 302)
+			: html("Redirect target");
 	},
 );
 await withMockFetch(
@@ -214,9 +204,7 @@ await withMockFetch(
 	async (input) =>
 		input.endsWith(".html")
 			? new Response("missing", { status: 404 })
-			: new Response("<main>Recovered HTML route</main>", {
-					headers: { "content-type": "text/html" },
-				}),
+			: html("<main>Recovered HTML route</main>"),
 );
 await withMockFetch(
 	async () => {
@@ -225,9 +213,8 @@ await withMockFetch(
 		assert(result.finalUrl === "https://93.184.216.34/meta");
 	},
 	async () =>
-		new Response(
+		html(
 			`<noscript><meta http-equiv="refresh" content="0; URL=/fallback"></noscript><main>Readable docs page</main>`,
-			{ headers: { "content-type": "text/html" } },
 		),
 );
 await withMockFetch(
@@ -239,12 +226,9 @@ await withMockFetch(
 	},
 	async (input) =>
 		input.endsWith("/latest/")
-			? new Response("<main>Current docs</main>", {
-					headers: { "content-type": "text/html" },
-				})
-			: new Response(
+			? html("<main>Current docs</main>")
+			: html(
 					`<title>Redirecting</title><script>window.location.replace("latest/" + window.location.search + window.location.hash);</script>`,
-					{ headers: { "content-type": "text/html" } },
 				),
 );
 await withMockFetch(
@@ -255,12 +239,9 @@ await withMockFetch(
 	},
 	async (input) =>
 		input.endsWith("/intro/")
-			? new Response("# Intro", {
-					headers: { "content-type": "text/markdown" },
-				})
-			: new Response(
+			? typed("# Intro", "text/markdown")
+			: html(
 					`<p>If you are not redirected automatically please click here.</p><script>window.location = "/learn/intro/";</script>`,
-					{ headers: { "content-type": "text/html" } },
 				),
 );
 let refusedAttempts = 0;
@@ -289,6 +270,34 @@ await withMockFetch(
 		return new Response("unreachable");
 	},
 );
+await assertRedirectCookie(
+	"https://a.co.uk/start",
+	"https://b.co.uk/end",
+	"sid=bad; Domain=co.uk; Path=/",
+	undefined,
+);
+await assertRedirectCookie(
+	"https://docs.example.co.uk/start",
+	"https://www.example.co.uk/end",
+	"sid=good; Domain=example.co.uk; Path=/",
+	"sid=good",
+);
+let unsupportedSchemeCalls = 0;
+await withMockFetch(
+	async () => {
+		const result = await fetchText("https://docs.example.com/ftp", config);
+		assert(!result.ok);
+		assert(result.failureKind === "unsafe_url");
+		assert(unsupportedSchemeCalls === 1);
+	},
+	async (_input) => {
+		unsupportedSchemeCalls++;
+		return new Response("", {
+			status: 301,
+			headers: { location: "ftp://example.com/x" },
+		});
+	},
+);
 await withMockFetch(
 	async () => {
 		const result = await fetchText("https://docs.example.com/start", config);
@@ -298,9 +307,7 @@ await withMockFetch(
 	},
 	async (input) =>
 		input === "https://target.example/prompt"
-			? new Response("Redirect target", {
-					headers: { "content-type": "text/html" },
-				})
+			? html("Redirect target")
 			: Response.redirect("https://target.example/prompt", 302),
 );
 await withMockFetch(
@@ -312,12 +319,9 @@ await withMockFetch(
 	},
 	async (input) =>
 		input === "https://target.example/prompt"
-			? new Response("Redirect target", {
-					headers: { "content-type": "text/html" },
-				})
-			: new Response(
+			? html("Redirect target")
+			: html(
 					`<meta http-equiv="refresh" content="0; url=https://target.example/prompt">`,
-					{ headers: { "content-type": "text/html" } },
 				),
 );
 const assetFetches: string[] = [];
@@ -383,18 +387,18 @@ await withMockFetch(
 	async (input) => {
 		sitemapFetches.push(input);
 		if (input === "https://docs.example.com/sitemap.xml") {
-			return new Response(
+			return typed(
 				`<sitemapindex>
-					<sitemap><loc>https://evil.example/sitemap.xml</loc></sitemap>
-					<sitemap><loc>https://docs.example.com/docs/sitemap.xml</loc></sitemap>
-				</sitemapindex>`,
-				{ headers: { "content-type": "application/xml" } },
+						<sitemap><loc>https://evil.example/sitemap.xml</loc></sitemap>
+						<sitemap><loc>https://docs.example.com/docs/sitemap.xml</loc></sitemap>
+					</sitemapindex>`,
+				"application/xml",
 			);
 		}
 		if (input === "https://docs.example.com/docs/sitemap.xml") {
-			return new Response(
+			return typed(
 				`<urlset><url><loc>https://docs.example.com/docs/intro</loc></url></urlset>`,
-				{ headers: { "content-type": "application/xml" } },
+				"application/xml",
 			);
 		}
 		return new Response("not found", { status: 404 });
@@ -414,9 +418,9 @@ await withMockFetch(
 		input === "https://docs.example.com/sitemap.xml"
 			? Response.redirect("https://evil.example/sitemap.xml", 302)
 			: input === "https://evil.example/sitemap.xml"
-				? new Response(
+				? typed(
 						`<urlset><url><loc>https://docs.example.com/docs/intro</loc></url></urlset>`,
-						{ headers: { "content-type": "application/xml" } },
+						"application/xml",
 					)
 				: new Response("not found", { status: 404 }),
 );
@@ -427,17 +431,15 @@ await withMockFetch(
 	},
 	async (input) =>
 		input === "https://docs.example.com/llms.txt"
-			? new Response(
+			? typed(
 					Array.from(
 						{ length: 5 },
 						(_, index) => `- [Page ${index}](https://evil.example/${index}.md)`,
 					).join("\n"),
-					{ headers: { "content-type": "text/plain" } },
+					"text/plain",
 				)
 			: input === "https://docs.example.com/"
-				? new Response("<main>Seed docs</main>", {
-						headers: { "content-type": "text/html" },
-					})
+				? html("<main>Seed docs</main>")
 				: new Response("not found", { status: 404 }),
 );
 
@@ -467,21 +469,29 @@ async function withMockFetch(
 	}
 }
 
-function httpResponse(
-	url: string,
-	status: number,
-	body: string,
-	contentType = "text/html",
+async function assertRedirectCookie(
+	start: string,
+	target: string,
+	setCookie: string,
+	expectCookie: string | undefined,
 ) {
-	return {
-		url,
-		status,
-		headers: {
-			get: (name: string) => (name === "content-type" ? contentType : null),
-			getSetCookie: () => [],
+	const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+	await withMockFetch(
+		async () => {
+			const result = await fetchText(start, config);
+			const headers = calls.find((call) => call.url === target)?.headers;
+			assert(result.ok);
+			// biome-ignore lint/complexity/useLiteralKeys: tsconfig requires index access
+			assert(headers?.["cookie"] === expectCookie);
 		},
-		body: new TextEncoder().encode(body),
-	};
+		async (input, headers) => {
+			calls.push({ url: input, headers });
+			return input === start
+				? new Response("", {
+						status: 302,
+						headers: { location: target, "set-cookie": setCookie },
+					})
+				: html("Target");
+		},
+	);
 }
-
-await import("./fetch-hardening-regression.ts");

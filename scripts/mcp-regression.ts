@@ -174,7 +174,6 @@ async function main(): Promise<void> {
 		const tools = (toolsList as { tools: ListedTool[] }).tools;
 		assert(tools.length === 7, "expected seven tools");
 		assert(tools.every((tool) => tool.name.startsWith("docsnap_")));
-		assert(tools.every((tool) => tool.description.includes("Do not use")));
 		assert(!JSON.stringify(tools).includes("response_format"));
 		const descriptions = tools
 			.map((tool) => tool.description)

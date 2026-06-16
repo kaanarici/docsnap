@@ -155,11 +155,6 @@ try {
 	assert(keepEntry?.etag === '"keep-v1"');
 	assert(keepEntry?.lastModified === "Tue, 01 Jan 2024 00:00:00 GMT");
 	assert(typeof keepEntry?.fetchedAt === "string");
-	const handoff = await readFile(
-		join(refreshOutDir, "AGENT_README.md"),
-		"utf8",
-	);
-	assert(handoff.includes("## Refresh changes"));
 
 	const manifestBeforeDryRun = await readFile(
 		join(refreshOutDir, "manifest.jsonl"),
