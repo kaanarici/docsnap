@@ -107,7 +107,7 @@ function fetchLlmsText(
 	return fetched;
 }
 
-function isLlmsCorpus(contentType: string, body: string) {
+export function isLlmsCorpus(contentType: string, body: string) {
 	const text = body.trim();
 	if (!text) return false;
 	if (looksLikeHtml(text)) return false;
@@ -138,7 +138,10 @@ function looksLikeHtml(body: string) {
 
 function looksLikeCorpus(body: string) {
 	return (
-		/\[[^\]]+]\(([^)\s]+)[^)]*\)/.test(body) ||
+		// linear markdown-link probe: a single fixed first char + one greedy class
+		// avoids the catastrophic backtracking of two adjacent overlapping quantifiers
+		// on a crafted multi-MB llms.txt body with no closing paren (ReDoS)
+		/\[[^\]]+]\([^)\s][^)]*\)/.test(body) ||
 		/(^|\n)\s*#\s+\S/m.test(body) ||
 		/(^|\n)\s*[-*]\s+\S/m.test(body) ||
 		/(^|\n)\s*https?:\/\/\S+/m.test(body) ||

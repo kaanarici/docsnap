@@ -2,6 +2,7 @@ import {
 	markdownLinkHrefs,
 	replaceMarkdownLinks,
 } from "../src/core/markdown.ts";
+import { isLlmsCorpus } from "../src/discover/llms.ts";
 import { stripScriptStyleTags } from "../src/extract/html.ts";
 import {
 	extractSerializedText,
@@ -25,6 +26,17 @@ assert(globMatches("docs/*.md", "docs/intro.md"));
 assert(!globMatches("docs/*.md", "blog/intro.md"));
 assert(globMatches("a?c/*", "abc/x"));
 assert(!globMatches("a?c", "abcd"));
+
+// looksLikeCorpus scans the full (up to 12MB) llms.txt body fetched from an
+// attacker-controlled origin; its markdown-link probe must be linear, not a
+// regex that backtracks on `[a](` + a long non-')' run with no closing paren
+const corpusBody = `[a](${"x".repeat(1_000_000)}`;
+timed("llms corpus probe", () => {
+	assert(
+		isLlmsCorpus("application/octet-stream", corpusBody) === false,
+		"crafted llms.txt body must not be classified as corpus",
+	);
+});
 
 const markdownMs = timed("markdown links", () => {
 	assert(markdownLinkHrefs(`${"[".repeat(200_000)}](`).length === 0);
