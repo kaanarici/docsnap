@@ -17,8 +17,10 @@ import {
 	recoverPriorPage,
 } from "../output/prior.ts";
 import {
+	acquireOutputLock,
 	assertOutputRootSafe,
 	prepareOutput,
+	releaseOutputLock,
 	writePages,
 	writeRunFiles,
 } from "../output/writer.ts";
@@ -48,9 +50,20 @@ export async function runPipeline(
 	config: Config,
 	progress?: Progress,
 ): Promise<PipelineResult> {
+	assertOutputRootSafe(config);
+	const lock = await acquireOutputLock(config);
+	try {
+		return await runLocked(config, progress);
+	} finally {
+		await releaseOutputLock(lock);
+	}
+}
+async function runLocked(
+	config: Config,
+	progress?: Progress,
+): Promise<PipelineResult> {
 	const started = performance.now();
 	let firstPageMs: number | null = null;
-	assertOutputRootSafe(config);
 	const prior = await loadPrior(config);
 	const refresh = refreshCounters();
 	await prepareOutput(config);

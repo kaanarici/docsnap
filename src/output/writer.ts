@@ -10,6 +10,11 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, resolve } from "node:path";
 import {
+	acquireDirLock,
+	type DirLock,
+	releaseDirLock,
+} from "../core/dir-lock.ts";
+import {
 	assertInsideRoot,
 	assertRealPathInside,
 	isInsideOrSame,
@@ -64,6 +69,27 @@ export async function prepareOutput(config: Config): Promise<void> {
 export function assertOutputRootSafe(config: Config): void {
 	const outDir = resolve(config.outDir);
 	assertSafeOutputDir(outDir, config.outDir);
+}
+
+// Sibling lock so two concurrent non-dry runs cannot interleave page/manifest/summary
+// writes (or have one `--clean` rm wipe the other) in a shared output directory. It lives
+// outside outDir because `--clean` removes that tree.
+export async function acquireOutputLock(
+	config: Config,
+): Promise<DirLock | undefined> {
+	if (config.dryRun) return undefined;
+	const outDir = resolve(config.outDir);
+	return acquireDirLock({
+		path: `${join(dirname(outDir), `.${basename(outDir)}`)}.docsnap-lock`,
+		mode: "hard",
+		waitTimeoutMs: 30_000,
+		timeoutMessage: () =>
+			`Another docsnap run is writing to ${config.outDir}. Wait for it to finish or choose a different --out.`,
+	});
+}
+
+export function releaseOutputLock(lock: DirLock | undefined): Promise<void> {
+	return releaseDirLock(lock);
 }
 
 export async function writePages(
