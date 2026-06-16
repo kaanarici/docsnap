@@ -49,11 +49,14 @@ export async function prepareOutput(config: Config): Promise<void> {
 	assertOutputRootSafe(config);
 	if (config.dryRun) return;
 	const outDir = resolve(config.outDir);
+	// validate the path is writable (a relative --out must stay under cwd) BEFORE any
+	// destructive --clean rm; otherwise `--clean --out ../x` deletes ../x and only then
+	// refuses it
+	await assertSafeOutputRoot(outDir, config.outDir);
 	if (config.clean) {
 		assertSafeCleanDir(outDir, config.outDir);
 		await rm(outDir, { recursive: true, force: true });
 	}
-	await assertSafeOutputRoot(outDir, config.outDir);
 	await mkdir(outDir, { recursive: true });
 	await assertSafeOutputRoot(outDir, config.outDir);
 }

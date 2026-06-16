@@ -225,6 +225,29 @@ const rootConfig = parseArgs([
 assert(!("help" in rootConfig) && !("version" in rootConfig));
 await rejects(() => prepareOutput(rootConfig));
 
+// --clean must validate the path BEFORE the destructive rm: a relative --out pointing
+// outside cwd must be refused without deleting it (data-loss guard)
+const cleanBase = await mkdtemp(join(tmpdir(), "docsnap-clean-"));
+await mkdir(join(cleanBase, "work"));
+await mkdir(join(cleanBase, "victim"));
+await mkdir(join(cleanBase, "victim", "keep"));
+process.chdir(join(cleanBase, "work"));
+try {
+	const cleanConfig = parseArgs([
+		"https://docs.example.com/",
+		"-o",
+		"../victim",
+		"--clean",
+	]);
+	await rejects(() => prepareOutput(cleanConfig));
+	assert(
+		(await readdir(join(cleanBase, "victim"))).length === 1,
+		"--clean deleted an outside-cwd directory before refusing it",
+	);
+} finally {
+	process.chdir(originalCwd);
+}
+
 const nestedOut = await mkdtemp(join(tmpdir(), "docsnap-nested-out-"));
 const nestedTarget = await mkdtemp(join(tmpdir(), "docsnap-nested-target-"));
 await symlink(nestedTarget, join(nestedOut, "leak"));
