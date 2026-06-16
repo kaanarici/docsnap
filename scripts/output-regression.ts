@@ -39,6 +39,7 @@ assert(encodedDuplicate.records.length === 1);
 const thinPage = {
 	...page("https://docs.example.com/thin", "html", "short"),
 	qualityReasons: ["thin content"],
+	outputPath: "docs-example-com/thin.md",
 };
 const lowQualitySummary = buildSummary(
 	[thinPage],
@@ -53,6 +54,25 @@ assert(lowQualitySummary.qualityWarnings === 1);
 assert(lowQualitySummary.userAgent === parsedPage.userAgent);
 assert(!("ignoreRobots" in lowQualitySummary));
 assert(agentReadme([thinPage], lowQualitySummary).includes("thin content"));
+// an ok record beyond --max is never written (no outputPath): it must not inflate
+// lowQuality/qualityWarnings/byExtractor or flip run status for pages not in the corpus
+const excessUnwritten = {
+	...page("https://docs.example.com/excess", "html", "thin body"),
+	confidence: 0.5,
+	qualityReasons: ["thin content"],
+};
+const withExcess = buildSummary(
+	[thinPage, excessUnwritten],
+	parsedPage,
+	2,
+	0,
+	{ rootHash: "hash", files: 1, bytes: 1 },
+	1,
+);
+assert(withExcess.written === 1);
+assert(withExcess.lowQuality === 0);
+assert(withExcess.qualityWarnings === 1);
+assert(withExcess.byExtractor.html === 1);
 // a low-quality page is self-describing: its own frontmatter names the reason
 assert(renderPage(thinPage).includes('qualityReasons: ["thin content"]'));
 assert(

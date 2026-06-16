@@ -57,17 +57,20 @@ export function buildSummary(
 			}
 		}
 		if (record.ok) {
-			byExtractor[record.extractor]++;
-			if (record.inlineStateSource) {
-				byInlineStateSource[record.inlineStateSource] =
-					(byInlineStateSource[record.inlineStateSource] ?? 0) + 1;
+			// every summary count describes the written corpus; an ok record without
+			// an outputPath (e.g. a backfilled page beyond --max) is never written,
+			// so it must not inflate extractor/quality counts or flip run status
+			if (record.outputPath) {
+				byExtractor[record.extractor]++;
+				if (record.inlineStateSource) {
+					byInlineStateSource[record.inlineStateSource] =
+						(byInlineStateSource[record.inlineStateSource] ?? 0) + 1;
+				}
+				written++;
+				if (addRedirectedHosts(record, redirectedHosts)) hostRedirects++;
+				if (isLowQuality(record)) lowQuality++;
+				if (isQualityWarning(record)) qualityWarnings++;
 			}
-			if (record.outputPath) written++;
-			if (record.outputPath && addRedirectedHosts(record, redirectedHosts)) {
-				hostRedirects++;
-			}
-			if (isLowQuality(record)) lowQuality++;
-			if (isQualityWarning(record)) qualityWarnings++;
 			continue;
 		}
 		failed++;
