@@ -3,6 +3,7 @@ import type { Config, FetchResult } from "../src/core/types.ts";
 import { discoverAssetPages } from "../src/discover/assets.ts";
 import { crawlScoped } from "../src/discover/crawl.ts";
 import { discoverFeed, discoverRelNextPages } from "../src/discover/feed.ts";
+import { discover } from "../src/discover/index.ts";
 import { discoverLlms } from "../src/discover/llms.ts";
 import type { Robots } from "../src/discover/robots.ts";
 import { discoverSitemaps } from "../src/discover/sitemap.ts";
@@ -14,7 +15,51 @@ await discoveryFinalUrlRegression();
 await discoveryResourceGateRegression();
 await fetchRedirectGateRegression();
 await llmsRedirectGateRegression();
+await canonicalSeedRobotsGateRegression();
 await writersideTopicGateRegression();
+
+// apex refuses robots and redirects the seed to a related www that Disallows
+// everything: the canonical-origin probe must load and honor the www origin's
+// robots BEFORE any www content is fetched, never requesting the cross-origin
+// seed body under a Disallow.
+async function canonicalSeedRobotsGateRegression() {
+	const config = parsedConfig("https://apexblock.example/docs/");
+	const fetched: string[] = [];
+	await withTransport(
+		async (input) => {
+			const url = String(input);
+			fetched.push(url);
+			if (url === "https://apexblock.example/robots.txt") {
+				throw new Error("connect ECONNREFUSED apexblock.example:443");
+			}
+			if (url === "https://apexblock.example/docs/") {
+				return response(url, 301, "", "text/plain", {
+					location: "https://www.apexblock.example/docs/",
+				});
+			}
+			if (url === "https://www.apexblock.example/robots.txt") {
+				return response(url, 200, "User-agent: *\nDisallow: /", "text/plain");
+			}
+			if (url.startsWith("https://www.apexblock.example/")) {
+				throw new Error("disallowed www content fetched before robots gate");
+			}
+			return response(url, 404, "not found", "text/plain");
+		},
+		async () => {
+			const urls = await discover(config);
+			assert(urls.length === 1);
+			assert(urls[0]?.fetched?.ok === false);
+			assert(fetched.includes("https://www.apexblock.example/robots.txt"));
+			assert(
+				!fetched.some(
+					(url) =>
+						url.startsWith("https://www.apexblock.example/") &&
+						!url.endsWith("/robots.txt"),
+				),
+			);
+		},
+	);
+}
 
 async function discoveryFinalUrlRegression() {
 	const config = parsedConfig("https://docs.example.com/");

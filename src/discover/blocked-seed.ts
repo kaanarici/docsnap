@@ -1,6 +1,6 @@
 import type { Config, FetchResult } from "../core/types.ts";
 import { relatedHost } from "../core/url.ts";
-import { fetchText } from "../fetch/fetcher.ts";
+import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
 import type { Robots } from "./robots.ts";
 import { normalizeUrl } from "./url.ts";
 
@@ -10,11 +10,20 @@ import { normalizeUrl } from "./url.ts";
 // cross-origin redirect target counts — same-origin means genuinely closed.
 // When the seed itself fails, the fetch failure is returned so the run
 // reports the real network error instead of a robots block.
+// allowResource gates the probe so a cross-origin redirect target's body is
+// never fetched before that origin's robots policy is loaded and allows it.
 export async function canonicalOriginSeed(
 	inputSeed: string,
 	config: Config,
+	allowResource?: FetchUrlGate,
 ): Promise<{ moved?: string; failure?: FetchResult }> {
-	const response = await fetchText(inputSeed, config);
+	const response = await fetchText(
+		inputSeed,
+		config,
+		undefined,
+		undefined,
+		allowResource,
+	);
 	if (!response.ok) return { failure: response };
 	const finalUrl = normalizeUrl(response.finalUrl);
 	if (!finalUrl) return {};

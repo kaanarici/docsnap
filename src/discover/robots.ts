@@ -1,6 +1,14 @@
 import type { Config } from "../core/types.ts";
 import { fetchTextUncached } from "../fetch/fetcher.ts";
 
+// a public origin can serve a multi-MB robots.txt under the 12MB fetch cap;
+// bound every unbounded accumulator so a hostile file cannot exhaust memory or
+// the call stack before discovery starts. Excess input is ignored, not fatal.
+const MAX_ROBOTS_LINES = 100_000;
+const MAX_AGENTS_PER_GROUP = 1_000;
+const MAX_RULES = 50_000;
+const MAX_SITEMAPS = 10_000;
+
 export type Robots = {
 	sitemaps: string[];
 	allows: Rule[];
@@ -44,26 +52,38 @@ export function parseRobots(
 	const groups: Array<{ agents: string[]; allows: Rule[]; disallows: Rule[] }> =
 		[];
 	let group = newGroup();
+	let lines = 0;
+	let rules = 0;
 
 	for (const raw of body.split(/\r?\n/)) {
+		if (++lines > MAX_ROBOTS_LINES) break;
 		const line = raw.replace(/#.*/, "").trim();
 		if (!line) continue;
 		const [fieldRaw, ...rest] = line.split(":");
 		const field = fieldRaw?.trim().toLowerCase();
 		const value = rest.join(":").trim();
 		if (field === "sitemap" && value) {
+			if (sitemaps.length >= MAX_SITEMAPS) continue;
 			const sitemap = toUrl(value, origin);
 			if (sitemap) sitemaps.push(sitemap);
 			continue;
 		}
 		if (field === "user-agent") {
 			if (group.allows.length || group.disallows.length) flush();
-			group.agents.push(value.toLowerCase());
+			if (group.agents.length < MAX_AGENTS_PER_GROUP)
+				group.agents.push(value.toLowerCase());
 			continue;
 		}
 		if (field !== "allow" && field !== "disallow") continue;
-		if (field === "allow" && value) group.allows.push(toRule(value));
-		if (field === "disallow" && value) group.disallows.push(toRule(value));
+		if (rules >= MAX_RULES) continue;
+		if (field === "allow" && value) {
+			group.allows.push(toRule(value));
+			rules++;
+		}
+		if (field === "disallow" && value) {
+			group.disallows.push(toRule(value));
+			rules++;
+		}
 	}
 	flush();
 
@@ -119,9 +139,11 @@ function rulesForAgent(
 	let allows: Rule[] = [];
 	let disallows: Rule[] = [];
 	for (const group of groups) {
-		const match = Math.max(
-			...group.agents.map((agent) => agentSpecificity(agent, userAgent)),
-		);
+		let match = -1;
+		for (const agent of group.agents) {
+			const score = agentSpecificity(agent, userAgent);
+			if (score > match) match = score;
+		}
 		if (match < 0 || match < best) continue;
 		if (match > best) {
 			best = match;

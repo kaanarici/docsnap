@@ -3,6 +3,7 @@ import {
 	replaceMarkdownLinks,
 } from "../src/core/markdown.ts";
 import { isLlmsCorpus } from "../src/discover/llms.ts";
+import { parseRobots } from "../src/discover/robots.ts";
 import { stripScriptStyleTags } from "../src/extract/html.ts";
 import {
 	extractSerializedText,
@@ -112,10 +113,48 @@ const cssMs = timed("numeric css noise", () => {
 	assert(!extracted?.includes("12px"));
 });
 
+// a public origin can serve a multi-MB robots.txt within the 12MB fetch cap;
+// parsing must stay bounded and never overflow the stack. The prior
+// Math.max(...agents) spread crashed on ~850k User-agent lines (11.9MB).
+const hostileAgents: string[] = [];
+for (let index = 0; index < 850_000; index++)
+	hostileAgents.push("User-agent: x");
+hostileAgents.push("Disallow: /private");
+const hostileRobots = hostileAgents.join("\n");
+const robotsMs = timed("robots parse", () => {
+	const robots = parseRobots(
+		hostileRobots,
+		"https://hostile.example",
+		"docsnap",
+	);
+	assert(typeof robots.allowed === "function", "hostile robots must parse");
+});
+// normal robots semantics survive the bounds: specific Disallow/Allow and
+// declared sitemaps still resolve correctly for the matching agent.
+const normalRobots = parseRobots(
+	"User-agent: *\nDisallow: /private\nAllow: /private/ok\nSitemap: https://x.example/s.xml",
+	"https://x.example",
+	"docsnap",
+);
+assert(
+	normalRobots.allowed("https://x.example/private") === false,
+	"Disallow must still block",
+);
+assert(
+	normalRobots.allowed("https://x.example/private/ok") === true,
+	"more specific Allow must still win",
+);
+assert(
+	normalRobots.sitemaps[0] === "https://x.example/s.xml",
+	"declared sitemap must still parse",
+);
+
 console.log(
 	`redos regression passed: markdown=${markdownMs.toFixed(
 		1,
-	)}ms tags=${tagMs.toFixed(1)}ms css=${cssMs.toFixed(1)}ms`,
+	)}ms tags=${tagMs.toFixed(1)}ms css=${cssMs.toFixed(1)}ms robots=${robotsMs.toFixed(
+		1,
+	)}ms`,
 );
 
 function timed(name: string, run: () => void): number {

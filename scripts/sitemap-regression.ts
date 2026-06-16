@@ -369,6 +369,68 @@ try {
 	setFetchTransportForTest(undefined);
 }
 
+// allowed seed whose robots both Disallows a path and declares it as a Sitemap:
+// declaring a sitemap must not override the Disallow on the normal discovery
+// path, so the robots-disallowed sitemap resource is never fetched.
+const declaredBypassConfig = parseArgs([
+	"https://declbypass.example/public/",
+	"-m",
+	"6",
+]);
+assert(
+	!("help" in declaredBypassConfig) && !("version" in declaredBypassConfig),
+);
+const declaredBypassFetches: string[] = [];
+setFetchTransportForTest(async (input) => {
+	const url = String(input);
+	declaredBypassFetches.push(url);
+	if (url === "https://declbypass.example/robots.txt") {
+		return response(
+			url,
+			200,
+			[
+				"User-agent: *",
+				"Disallow: /",
+				"Allow: /public/",
+				"Sitemap: https://declbypass.example/secret-sitemap.xml",
+			].join("\n"),
+			"text/plain",
+		);
+	}
+	if (url === "https://declbypass.example/secret-sitemap.xml") {
+		throw new Error("robots-disallowed declared sitemap fetched");
+	}
+	if (url === "https://declbypass.example/public/") {
+		return response(
+			url,
+			200,
+			`<html><body><main><h1>Public</h1><p>Readable public docs.</p><a href="/public/page">More</a></main></body></html>`,
+		);
+	}
+	if (url === "https://declbypass.example/public/page") {
+		return response(
+			url,
+			200,
+			"<html><body><main><h1>Page</h1><p>Another readable public page.</p></main></body></html>",
+		);
+	}
+	return response(url, 404, "not found", "text/plain");
+});
+try {
+	const urls = await discover(declaredBypassConfig);
+	assert(
+		urls.some((item) => item.url === "https://declbypass.example/public/"),
+	);
+	assert(!urls.some((item) => item.url.includes("/secret")));
+	assert(
+		!declaredBypassFetches.includes(
+			"https://declbypass.example/secret-sitemap.xml",
+		),
+	);
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");
 }

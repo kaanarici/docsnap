@@ -57,7 +57,11 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 		: (url: string) => resourceAllowed(url, config, robotsByOrigin);
 	if (!seedRobots.allowed(inputSeed)) {
 		if (seedRobots.unreachable) {
-			const { moved, failure } = await canonicalOriginSeed(inputSeed, config);
+			const { moved, failure } = await canonicalOriginSeed(
+				inputSeed,
+				config,
+				allowResource,
+			);
 			if (moved) return discover({ ...config, seedUrl: moved });
 			return [
 				{
@@ -232,7 +236,7 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 		scope,
 		accept: (url) =>
 			!seen.has(url) && inScope(url, seed, scope) && allowed(url),
-		allowResource: sitemapResourceGate(robots.sitemaps, allowResource),
+		allowResource,
 	});
 	for (const url of sitemapUrls) {
 		add(url, "sitemap");
@@ -387,7 +391,12 @@ async function addLlms(
 	}
 }
 
-function sitemapResourceGate(
+// only for the robots-disallowed seed carve-out: on a Disallow:/ origin a
+// robots-declared sitemap is the site's own explicit invitation, so it may be
+// fetched even though its path is disallowed. The normal allowed-seed path must
+// NOT use this — there a declared sitemap stays subject to allowResource so a
+// robots Disallow is never overridden by also declaring the sitemap.
+function declaredSitemapInvitationGate(
 	declared: string[],
 	allowResource: ((url: string) => Promise<boolean>) | undefined,
 ) {
@@ -456,7 +465,10 @@ async function disallowedSeedDiscovery(
 				scope: "/",
 				declaredOnly: true,
 				accept: (url) => !seen.has(url) && robots.allowed(url),
-				allowResource: sitemapResourceGate(robots.sitemaps, allowResource),
+				allowResource: declaredSitemapInvitationGate(
+					robots.sitemaps,
+					allowResource,
+				),
 			},
 		);
 		for (const url of sitemapUrls) {
