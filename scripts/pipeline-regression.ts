@@ -240,10 +240,8 @@ try {
 		"--clean",
 	]);
 	await rejects(() => prepareOutput(cleanConfig));
-	assert(
-		(await readdir(join(cleanBase, "victim"))).length === 1,
-		"--clean deleted an outside-cwd directory before refusing it",
-	);
+	// the victim dir (outside cwd) must NOT have been deleted by the refused --clean
+	assert((await readdir(join(cleanBase, "victim"))).length === 1);
 } finally {
 	process.chdir(originalCwd);
 }
