@@ -239,6 +239,7 @@ try {
 		"../victim",
 		"--clean",
 	]);
+	assert(!("help" in cleanConfig) && !("version" in cleanConfig));
 	await rejects(() => prepareOutput(cleanConfig));
 	// the victim dir (outside cwd) must NOT have been deleted by the refused --clean
 	assert((await readdir(join(cleanBase, "victim"))).length === 1);
