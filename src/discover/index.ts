@@ -36,16 +36,17 @@ export async function discover(config: Config): Promise<DiscoveredUrl[]> {
 	const inputUrl = new URL(inputSeed);
 	const seedRobots = await loadRobots(inputUrl.origin, config);
 	if (config.pageOnly) {
-		if (!seedRobots.allowed(inputSeed)) {
+		const pageSeed = pageSeedUrl(config.seedUrl, inputSeed);
+		if (!seedRobots.allowed(pageSeed)) {
 			return [
 				{
-					url: inputSeed,
+					url: pageSeed,
 					source: "seed",
-					fetched: robotsBlockedResult(inputSeed),
+					fetched: robotsBlockedResult(pageSeed),
 				},
 			];
 		}
-		return [{ url: inputSeed, source: "seed" }];
+		return [{ url: pageSeed, source: "seed" }];
 	}
 	const robotsByOrigin: LlmsCorpusOptions["robotsByOrigin"] = new Map([
 		[inputUrl.origin, seedRobots],
@@ -338,6 +339,21 @@ function seedInputUrl(raw: string) {
 		return normalizeDiscoveryResourceUrl(raw) ?? raw;
 	}
 	return normalizeUrl(raw) ?? normalizeDiscoveryResourceUrl(raw) ?? raw;
+}
+
+// In --page mode the user asks for one exact public page; preserve any query so
+// query-addressed content (e.g. ?version=2) is fetched as requested rather than
+// collapsed to the bare path by seed normalization.
+function pageSeedUrl(raw: string, normalized: string) {
+	try {
+		const requested = new URL(raw);
+		if (!requested.search) return normalized;
+		const seed = new URL(normalized);
+		seed.search = requested.search;
+		return seed.href;
+	} catch {
+		return normalized;
+	}
 }
 
 function hasCorpus(out: DiscoveredUrl[], config: Config) {

@@ -51,6 +51,7 @@ function mergeRecord(target: PageSuccess, duplicate: PageSuccess) {
 		duplicate.url,
 		duplicate.finalUrl,
 		duplicate.canonicalUrl,
+		...(duplicate.aliases ?? []),
 	]) {
 		if (value && !primary.has(value)) aliases.add(value);
 	}

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { parseArgs } from "../src/cli/args.ts";
 import { runCli } from "../src/cli/index.ts";
 import { dedupeRecords } from "../src/core/dedupe.ts";
+import { identityKeys } from "../src/core/identity.ts";
 import { setFetchTransportForTest } from "../src/fetch/fetcher.ts";
 import { installAgentFiles } from "../src/output/agent-files.ts";
 import { renderPage } from "../src/output/page.ts";
@@ -35,6 +36,47 @@ const encodedDuplicate = dedupeRecords([
 ]);
 assert(encodedDuplicate.deduped === 1);
 assert(encodedDuplicate.records.length === 1);
+// query-addressed pages are distinct content, not path-variant duplicates
+const queryAddressed = dedupeRecords([
+	page("https://docs.example.com/page?version=1", "html", "v1 body"),
+	page("https://docs.example.com/page?version=2", "html", "v2 body"),
+]);
+assert(queryAddressed.deduped === 0);
+assert(queryAddressed.records.length === 2);
+// query order does not change identity; ?b=2&a=1 == ?a=1&b=2
+const queryOrder = dedupeRecords([
+	page("https://docs.example.com/p?a=1&b=2", "html", "first"),
+	page("https://docs.example.com/p?b=2&a=1", "markdown", "second"),
+]);
+assert(queryOrder.deduped === 1);
+assert(queryOrder.records.length === 1);
+// query-free path variants still merge: regression guard for legacy dedup
+assert(
+	identityKeys({ url: "https://docs.example.com/page?version=1" })[0] !==
+		identityKeys({ url: "https://docs.example.com/page?version=2" })[0],
+);
+// dedupe must keep transitive aliases and never lose content to a stale key:
+// a record accumulates an alias, a better survivor replaces it, then a new best
+// record matching the old alias must survive and absorb every alias.
+const aliasSeed = {
+	...page("https://docs.example.com/a.html", "html", "a body"),
+	aliases: ["https://docs.example.com/old-alias.html"],
+};
+const transitive = dedupeRecords([
+	aliasSeed,
+	page("https://docs.example.com/a.md", "markdown", "better via route"),
+	page(
+		"https://docs.example.com/old-alias.html",
+		"markdown",
+		"best content that must survive the stale alias key ".repeat(40),
+	),
+]);
+assert(transitive.records.length === 1);
+const merged = transitive.records[0];
+assert(merged?.ok === true);
+assert(merged.markdown.startsWith("best content that must survive"));
+assert(merged.aliases?.includes("https://docs.example.com/a.html") === true);
+assert(merged.aliases?.includes("https://docs.example.com/a.md") === true);
 const thinPage = {
 	...page("https://docs.example.com/thin", "html", "short"),
 	qualityReasons: ["thin content"],

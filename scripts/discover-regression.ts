@@ -418,6 +418,26 @@ try {
 	setFetchTransportForTest(undefined);
 }
 
+// --page must capture the exact public page the user asked for, query included.
+const pageQueryConfig = parseArgs([
+	"https://docs.example.com/page?version=2#frag",
+	"--page",
+]);
+assert(!("help" in pageQueryConfig) && !("version" in pageQueryConfig));
+setFetchTransportForTest(async (input) => {
+	const url = String(input);
+	if (url === "https://docs.example.com/robots.txt")
+		return response(url, 200, "User-agent: *\nAllow: /", "text/plain");
+	throw new Error(`unexpected fetch in --page discovery: ${url}`);
+});
+try {
+	const urls = await discover(pageQueryConfig);
+	assert(urls.length === 1);
+	assert(urls[0]?.url === "https://docs.example.com/page?version=2");
+} finally {
+	setFetchTransportForTest(undefined);
+}
+
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");
 }

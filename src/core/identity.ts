@@ -1,5 +1,4 @@
 import { safeDecode } from "./text.ts";
-import { dropFragmentAndQuery } from "./url.ts";
 
 export type IdentityInput = {
 	url?: string;
@@ -43,7 +42,9 @@ function urlKey(raw: string) {
 	const url = cleanUrl(raw);
 	if (!url) return undefined;
 	if (url.pathname !== "/") url.pathname = url.pathname.replace(/\/+$/, "");
-	return `url:${url.href}`;
+	const query = canonicalQuery(url);
+	url.search = "";
+	return `url:${url.href}${query}`;
 }
 
 function routeKey(raw: string) {
@@ -52,15 +53,29 @@ function routeKey(raw: string) {
 	let path = safeDecode(url.pathname).replace(/\/+$/, "");
 	path = path.replace(/\/index(?:\.(?:html?|mdx?|txt))?$/i, "");
 	path = path.replace(/\.(?:html?|mdx?|txt)$/i, "");
-	return `route:${url.origin}${path || "/"}`;
+	return `route:${url.origin}${path || "/"}${canonicalQuery(url)}`;
 }
 
 function cleanUrl(raw: string) {
 	try {
-		return dropFragmentAndQuery(new URL(raw));
+		const url = new URL(raw);
+		url.hash = "";
+		return url;
 	} catch {
 		return undefined;
 	}
+}
+
+// Query-addressed pages (e.g. ?version=2) are distinct content; fold a stable,
+// order-independent query suffix into both keys so they neither over-merge with
+// each other nor with the bare path. Query-free URLs keep the legacy bare keys
+// so existing path-variant dedup (.html/.md/trailing-slash) is untouched.
+function canonicalQuery(url: URL) {
+	if (!url.search) return "";
+	const params = [...url.searchParams.entries()].sort(([a], [b]) =>
+		a < b ? -1 : a > b ? 1 : 0,
+	);
+	return `?${new URLSearchParams(params).toString()}`;
 }
 
 function unique<T>(values: T[]): T[] {
