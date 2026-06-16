@@ -246,6 +246,35 @@ await withCacheEnv("lock", async () => {
 	}
 });
 
+await withCacheEnv("single-flight", async (cacheDir) => {
+	let calls = 0;
+	const url = "https://single-flight.example.com/page";
+	const parsed = parseArgs([url, "--page"]);
+	assertConfig(parsed);
+	setFetchTransportForTest(async (input) => {
+		calls++;
+		await Bun.sleep(400);
+		return response(String(input), 200, page("SingleFlight", text), {
+			"cache-control": "max-age=60",
+		});
+	});
+	try {
+		const [one, two, three] = await Promise.all([
+			fetchText(url, parsed),
+			fetchText(url, parsed),
+			fetchText(url, parsed),
+		]);
+		assert(one.ok && two.ok && three.ok, "concurrent fetches all succeed");
+		assert(calls === 1, `single upstream call, got ${calls}`);
+		assert((await countEntries(cacheDir)) === 1, "result cached once");
+		const after = await fetchText(url, parsed);
+		assert(after.ok, "follow-up fetch ok");
+		assert(calls === 1, `follow-up served from cache, got ${calls}`);
+	} finally {
+		setFetchTransportForTest(undefined);
+	}
+});
+
 await withCacheEnv("live-lock-not-reaped", async (cacheDir) => {
 	const url = "https://live-lock.example.com/page";
 	const parsed = parseArgs([url, "--page"]);

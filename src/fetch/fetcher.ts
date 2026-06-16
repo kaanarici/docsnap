@@ -135,7 +135,8 @@ async function fetchOnce(
 					accept,
 					"user-agent": config.userAgent,
 				};
-			Object.assign(headers, conditionalHeaders(conditional, requestUrl));
+			const sentConditional = conditionalHeaders(conditional, requestUrl);
+			Object.assign(headers, sentConditional);
 			const cookie = cookieHeader(cookies, requestUrl);
 			if (cookie) headers.cookie = cookie;
 			const response = await fetchTransport(requestUrl, headers, config);
@@ -210,7 +211,8 @@ async function fetchOnce(
 				...responseValidators(response, fetchedAt),
 				...responseCache(response),
 			};
-			if (response.status === 304) {
+			// 304 only counts as not-modified when we sent a validator for this URL.
+			if (response.status === 304 && Object.keys(sentConditional).length > 0) {
 				return {
 					...base,
 					status: 304,

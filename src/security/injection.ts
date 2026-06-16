@@ -31,11 +31,11 @@ const instructionPatterns: SignalPattern[] = [
 	],
 	[
 		"ai-directed-instruction",
-		/\b(?:the[^\S\r\n]+)?(?:ai|assistant|agent|llm|coding[^\S\r\n]+agent)\b[^\r\n]{0,80}\b(?:ignore|follow|obey|execute|treat|trust|read|send)\b[^\r\n]{0,80}\b(?:instructions?|prompts?|messages?|guidance|system|developer|this[^\S\r\n]+(?:page|document|content))\b/i,
+		/\b(?:the[^\S\r\n]+)?(?:ai|assistant|agent|llm|coding[^\S\r\n]+agent)\b[^\r\n]{0,80}\b(?:ignore|follow|obey|execute|treat|trust|read|send|reveal|show|print|dump|disclose|expose|leak)\b[^\r\n]{0,80}\b(?:instructions?|prompts?|messages?|guidance|system|developer|this[^\S\r\n]+(?:page|document|content))\b/i,
 	],
 	[
 		"ai-directed-instruction",
-		/\b(?:ignore|follow|obey|execute|treat|trust|read|send)\b[^\r\n]{0,80}\b(?:the[^\S\r\n]+)?(?:ai|assistant|agent|llm|coding[^\S\r\n]+agent)\b/i,
+		/\b(?:ignore|follow|obey|execute|treat|trust|read|send|reveal|show|print|dump|disclose|expose|leak)\b[^\r\n]{0,80}\b(?:the[^\S\r\n]+)?(?:ai|assistant|agent|llm|coding[^\S\r\n]+agent)\b/i,
 	],
 	[
 		"tool-exfiltration-language",
@@ -52,7 +52,7 @@ const roleLinePattern =
 const roleTagPattern =
 	/<\/?(?:system|assistant|developer|tool)(?:[^\S\r\n]|>)/gi;
 const roleActionPattern =
-	/\b(?:ignore|disregard|forget|bypass|override|follow|obey|execute|treat|trust|read|send|exfiltrate|upload|post|curl)\b/i;
+	/\b(?:ignore|disregard|forget|bypass|override|follow|obey|execute|treat|trust|read|send|exfiltrate|upload|post|curl|reveal|show|print|dump|disclose|expose|leak)\b/i;
 const roleTargetPattern =
 	/\b(?:previous|prior|above|earlier|system|developer|instructions?|prompts?|messages?|guidance|secrets?|tokens?|api(?:[-_]|[^\S\r\n])?keys?|environment[^\S\r\n]+variables?|env[^\S\r\n]+vars?|webhook|~\/\.ssh|\/etc\/passwd|operational[^\S\r\n]+guidance|this[^\S\r\n]+(?:page|document|content))\b/i;
 
@@ -347,7 +347,11 @@ function hidesText(style: string) {
 		/opacity[^\S\r\n]*:[^\S\r\n]*0(?:\.0+)?(?:\b|;|!)/.test(text) ||
 		/font-size[^\S\r\n]*:[^\S\r\n]*0(?:\b|;|!)/.test(text) ||
 		/clip(?:-path)?[^\S\r\n]*:/.test(text) ||
+		/content-visibility[^\S\r\n]*:[^\S\r\n]*hidden\b/.test(text) ||
 		/(?:left|right|top|bottom|margin-left|text-indent)[^\S\r\n]*:[^\S\r\n]*-\d{3,}(?:px|em|rem)?/.test(
+			text,
+		) ||
+		/transform[^\S\r\n]*:[^;]*(?:translate(?:x|y|3d)?\([^)]*-\d{3,}(?:px|em|rem|vw|vh)|scale(?:x|y)?\([^\S\r\n]*0(?:\.0+)?[^\S\r\n]*\))/.test(
 			text,
 		) ||
 		/color[^\S\r\n]*:[^\S\r\n]*transparent\b/.test(text) ||

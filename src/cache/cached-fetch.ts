@@ -2,7 +2,7 @@ import { releaseDirLock } from "../core/dir-lock.ts";
 import type { ConditionalRequest, Config, FetchResult } from "../core/types.ts";
 import { validatePublicHttpUrl } from "../security/url.ts";
 import { isNotModifiedResult } from "./policy.ts";
-import type { CacheLookup } from "./store.ts";
+import type { CacheLookup, CacheRequest } from "./store.ts";
 import {
 	acquireCacheLock,
 	cacheConditional,
@@ -22,6 +22,11 @@ export type UncachedFetch = (
 	conditional?: ConditionalRequest,
 	allowUrl?: UrlGate,
 ) => Promise<FetchResult>;
+
+// Process-local single-flight: concurrent same-key cold fetches share one
+// network request and cache write instead of stampeding the origin. Scoped per
+// Config (cache context) so unrelated runs never collide; cleared on settle.
+const inFlight = new WeakMap<Config, Map<string, Promise<FetchResult>>>();
 
 export async function fetchWithCache(
 	url: string,
@@ -54,6 +59,40 @@ export async function fetchWithCache(
 	if (first.state === "disabled")
 		return uncached(url, config, accept, undefined, allowUrl);
 
+	return singleFlight(config, first.key, () =>
+		fillCold(url, config, accept, request, first, uncached, allowUrl),
+	);
+}
+
+function singleFlight(
+	config: Config,
+	key: string,
+	run: () => Promise<FetchResult>,
+): Promise<FetchResult> {
+	let pending = inFlight.get(config);
+	if (!pending) {
+		pending = new Map();
+		inFlight.set(config, pending);
+	}
+	const existing = pending.get(key);
+	if (existing) return existing;
+	const promise = run().finally(() => {
+		pending?.delete(key);
+	});
+	pending.set(key, promise);
+	return promise;
+}
+
+async function fillCold(
+	url: string,
+	config: Config,
+	accept: string,
+	request: CacheRequest,
+	first: CacheLookup,
+	uncached: UncachedFetch,
+	allowUrl: UrlGate | undefined,
+): Promise<FetchResult> {
+	const started = performance.now();
 	const lock = await acquireCacheLock(config, first.key);
 	if (!lock) {
 		const afterWait = await readCache(config, request);
