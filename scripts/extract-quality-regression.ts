@@ -90,6 +90,38 @@ for (const value of Object.values(boilerplate)) {
 }
 pass("fast-path", fastPath);
 
+// fast path with NO semantic main/article container: structuredFallback finds the
+// content root on its own, so substantial confident prose in plain nested divs is
+// still captured structured (skipping Defuddle), not gated out by a missing main/article
+const noContainer = await page(
+	"no-container",
+	`<html><head><title>Config Reference</title></head><body>
+		<nav>${boilerplate.nav}</nav>
+		<div class="content"><div class="doc">
+			<h1>Config Reference</h1>
+			<p>${para}</p>
+			<h2>Options</h2>
+			<p>${para}</p>
+			<h2>Defaults</h2>
+			<p>${para}</p>
+		</div></div>
+		<footer>${boilerplate.footer}</footer>
+	</body></html>`,
+);
+assertOk(noContainer);
+assert(
+	noContainer.extractor === "structured",
+	`no-container page should fire the fast path, got ${noContainer.extractor}`,
+);
+assert(noContainer.markdown.includes("## Options"), "no-container lost h2");
+for (const value of Object.values(boilerplate)) {
+	assert(
+		!noContainer.markdown.includes(value),
+		`no-container leaked boilerplate: ${value}`,
+	);
+}
+pass("no-container", noContainer);
+
 const longAlt = [
 	"Mandatory Credit Stock Agency. A staged photograph of several smiling people looking at a laptop in a bright office while generic documents appear on the table.",
 	"Mandatory Credit Stock Agency. The same caption continues with location notes, licensing terms, background descriptions, and unrelated visual trivia.",

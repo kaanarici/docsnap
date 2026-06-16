@@ -233,9 +233,10 @@ function freshDocument(html: string) {
 }
 
 // Returns structured markdown only when it is confidently the page's real content
-// (a semantic main/article root, substantial prose, high quality score, not a
-// shell), so the caller can skip the costly Defuddle pass. Conservative on
-// purpose: anything short, low-confidence, or container-less defers to Defuddle.
+// (substantial prose, high quality score, not a shell), so the caller can skip the
+// costly Defuddle pass. structuredFallback already finds and gates the content root
+// (returning "" for weak/link-dominated roots), so no semantic-container requirement
+// is needed; conservative word/confidence/shell gates keep clutter on Defuddle.
 const fastPathMinWords = 200;
 const fastPathMinConfidence = 0.9;
 function strongStructuredFastPath(
@@ -244,7 +245,6 @@ function strongStructuredFastPath(
 	title: string | undefined,
 	html: string,
 ): string | undefined {
-	if (!document.querySelector("main, article")) return undefined;
 	const markdown = structuredFallback(document, baseUrl);
 	if (!markdown || wordCount(markdown) < fastPathMinWords) return undefined;
 	if (isShellPlaceholder(markdown, title, html)) return undefined;
