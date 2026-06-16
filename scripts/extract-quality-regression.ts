@@ -46,6 +46,50 @@ for (const value of Object.values(boilerplate)) {
 }
 pass("article", article);
 
+// fast path: a page with a semantic main/article root and substantial, confident
+// prose is captured by the cheap structured extractor (extractor "structured"),
+// skipping the costly Defuddle pass, with content and structure preserved
+const para =
+	"The deployment pipeline promotes a build through staging and production while " +
+	"recording every step so that an operator can audit what changed and when. " +
+	"Each release is immutable, addressed by content hash, and rolled out behind a " +
+	"health gate that watches latency and error rate before shifting more traffic. " +
+	"When a regression appears the gate halts the rollout and the previous release " +
+	"continues to serve requests without manual intervention or downtime for users.";
+const fastPath = await page(
+	"fast-path",
+	`<html><head><title>Deployment Guide</title></head><body>
+		<nav>${boilerplate.nav}</nav>
+		<main><article>
+			<h1>Deployment Guide</h1>
+			<p>${para}</p>
+			<h2>Prerequisites</h2>
+			<p>${para}</p>
+			<h2>Rollback</h2>
+			<p>${para} Read the <a href="/runbook">runbook</a> before you begin.</p>
+		</article></main>
+		<footer>${boilerplate.footer}</footer>
+	</body></html>`,
+);
+assertOk(fastPath);
+assert(
+	fastPath.extractor === "structured",
+	`fast path should skip Defuddle, got ${fastPath.extractor}`,
+);
+assert(fastPath.markdown.includes("## Prerequisites"), "fast path lost h2");
+assert(fastPath.markdown.includes("## Rollback"), "fast path lost h2");
+assert(
+	fastPath.links.some((link) => link.endsWith("/runbook")),
+	"fast path lost link",
+);
+for (const value of Object.values(boilerplate)) {
+	assert(
+		!fastPath.markdown.includes(value),
+		`fast path leaked boilerplate: ${value}`,
+	);
+}
+pass("fast-path", fastPath);
+
 const longAlt = [
 	"Mandatory Credit Stock Agency. A staged photograph of several smiling people looking at a laptop in a bright office while generic documents appear on the table.",
 	"Mandatory Credit Stock Agency. The same caption continues with location notes, licensing terms, background descriptions, and unrelated visual trivia.",

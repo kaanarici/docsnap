@@ -133,6 +133,26 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 		};
 	}
 
+	// Defuddle is ~90% of cold extraction time. When the page has a clear semantic
+	// main-content container, the cheap structured extractor already matches it
+	// (verified equivalent content on real docs), so skip the expensive pass when
+	// its result is strong and confident. Cluttered pages with no main/article, or
+	// a weak/low-confidence structured result, still fall through to Defuddle.
+	const fast = strongStructuredFastPath(
+		document,
+		result.finalUrl,
+		documentTitleText,
+		result.body,
+	);
+	if (fast) {
+		return {
+			...(documentTitleText ? { title: documentTitleText } : {}),
+			...(canonical ? { canonicalUrl: canonical } : {}),
+			markdown: fast,
+			extractor: "structured" as const,
+		};
+	}
+
 	const parsed = await parseWithDefuddle(document, result.finalUrl);
 	if (parsed?.content?.trim()) {
 		const title = parsed.title || documentTitleText;
@@ -210,6 +230,28 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 
 function freshDocument(html: string) {
 	return parseHTML(html).document;
+}
+
+// Returns structured markdown only when it is confidently the page's real content
+// (a semantic main/article root, substantial prose, high quality score, not a
+// shell), so the caller can skip the costly Defuddle pass. Conservative on
+// purpose: anything short, low-confidence, or container-less defers to Defuddle.
+const fastPathMinWords = 200;
+const fastPathMinConfidence = 0.9;
+function strongStructuredFastPath(
+	document: Document,
+	baseUrl: string,
+	title: string | undefined,
+	html: string,
+): string | undefined {
+	if (!document.querySelector("main, article")) return undefined;
+	const markdown = structuredFallback(document, baseUrl);
+	if (!markdown || wordCount(markdown) < fastPathMinWords) return undefined;
+	if (isShellPlaceholder(markdown, title, html)) return undefined;
+	if (scoreMarkdown(markdown, title).confidence < fastPathMinConfidence) {
+		return undefined;
+	}
+	return markdown;
 }
 
 function structuredOrFlat(
