@@ -128,6 +128,62 @@ export function readPageInput(value: unknown) {
 	};
 }
 
+export type FetchToolInput = {
+	url: string;
+	question?: string;
+	scope?: "page" | "site" | "auto";
+	output_dir?: string;
+	max_pages?: number;
+	freshness: "reuse" | "refresh" | "force";
+	context_chars: number;
+	safety: "exclude_injection" | "flag_all";
+};
+
+export function fetchInput(value: unknown): FetchToolInput {
+	const input = objectInput(value, [
+		"url",
+		"question",
+		"scope",
+		"output_dir",
+		"max_pages",
+		"freshness",
+		"context_chars",
+		"safety",
+	]);
+	const question = optionalString(input, "question");
+	if (question !== undefined && question.length > 500) {
+		throw new Error("question must be 500 characters or fewer");
+	}
+	const outputDir = optionalString(input, "output_dir");
+	const maxPages = optionalInt(input, "max_pages", 1, 500);
+	return {
+		url: stringInput(input, "url"),
+		...(question !== undefined ? { question } : {}),
+		...("scope" in input ? { scope: optionalScope(input) } : {}),
+		...(outputDir !== undefined ? { output_dir: outputDir } : {}),
+		...(maxPages !== undefined ? { max_pages: maxPages } : {}),
+		freshness: optionalFreshness(input),
+		context_chars: optionalInt(input, "context_chars", 120, 1200) ?? 500,
+		safety: optionalSafety(input),
+	};
+}
+
+function optionalScope(input: ObjectInput): "page" | "site" | "auto" {
+	const value = optionalString(input, "scope") ?? "auto";
+	if (value !== "page" && value !== "site" && value !== "auto") {
+		throw new Error('scope must be "page", "site", or "auto"');
+	}
+	return value;
+}
+
+function optionalFreshness(input: ObjectInput): "reuse" | "refresh" | "force" {
+	const value = optionalString(input, "freshness") ?? "reuse";
+	if (value !== "reuse" && value !== "refresh" && value !== "force") {
+		throw new Error('freshness must be "reuse", "refresh", or "force"');
+	}
+	return value;
+}
+
 export function contextPackInput(value: unknown) {
 	const input = objectInput(value, [
 		"output_dir",

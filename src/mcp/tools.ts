@@ -17,10 +17,12 @@ import {
 	searchCorpus,
 } from "./corpus.ts";
 import { exampleFor, toolDefinitions } from "./definitions.ts";
+import { runFetchTool } from "./fetch.ts";
 import {
 	captureInput,
 	contextPackInput,
 	corporaInput,
+	fetchInput,
 	pagesInput,
 	readPageInput,
 	refreshInput,
@@ -47,6 +49,7 @@ export async function callTool(
 	state: McpState,
 ): Promise<ToolResult> {
 	try {
+		if (name === "docsnap_fetch") return await fetch(args, state);
 		if (name === "docsnap_capture") return await capture(args, state);
 		if (name === "docsnap_refresh") return await refresh(args, state);
 		if (name === "docsnap_list_corpora") return await corpora(args, state);
@@ -60,6 +63,17 @@ export async function callTool(
 	} catch (error) {
 		return errorToolResult(name, error, exampleFor(name));
 	}
+}
+
+async function fetch(args: unknown, state: McpState) {
+	const input = fetchInput(args);
+	return jsonToolResult(
+		await runFetchTool(
+			input,
+			{ buildConfig: controlledConfig, progress: stderrProgress },
+			state,
+		),
+	);
 }
 
 async function capture(args: unknown, state: McpState) {
