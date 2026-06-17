@@ -100,6 +100,17 @@ docsnap keeps a shared fetch cache in `~/.cache/docsnap` so repeated captures ca
 claude mcp add docsnap -- docsnap mcp
 ```
 
+Tools:
+
+- `docsnap_fetch` — drop-in WebFetch replacement: capture (or reuse/refresh) a URL and return ranked Markdown context with citations, in one call
+- `docsnap_capture` — capture a public docs site or text-heavy page into a local corpus
+- `docsnap_refresh` — rerun a corpus's seed URL and report new/changed/removed pages
+- `docsnap_context_pack` — ranked, deduped answer-with-sources bundle for a query over one corpus
+- `docsnap_search_corpus` — BM25-ranked snippet search across a corpus
+- `docsnap_read_page` — read a bounded slice of one captured page
+- `docsnap_list_corpora` / `docsnap_list_pages` — discover captured corpora and their pages
+- `docsnap_get_corpus_summary` — corpus health: counts, failures, quality warnings, redirects
+
 ## Output
 
 - `AGENT_README.md`: guide for using the captured docs
