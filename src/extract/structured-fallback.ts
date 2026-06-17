@@ -386,20 +386,39 @@ function directListItems(list: Element) {
 	return items;
 }
 
+// Find the topmost ul/ol lists belonging to this <li>, including ones wrapped
+// in non-list elements like <div>/<section>. Stop descending at deeper list
+// items so we never reach into a child list's own contents.
 function directNestedLists(item: Element) {
 	const lists: Element[] = [];
-	const children = item.childNodes;
-	for (
-		let index = 0;
-		index < children.length && lists.length < maxListItems;
-		index++
+	const scan: Node[] = [];
+	pushChildrenInOrder(scan, item);
+	let scanned = 0;
+	while (
+		scan.length > 0 &&
+		lists.length < maxListItems &&
+		scanned < maxDirectChildScan
 	) {
-		const child = children[index];
-		if (!isElement(child)) continue;
-		const tag = tagName(child);
-		if (tag === "ul" || tag === "ol") lists.push(child);
+		const node = scan.shift()!;
+		scanned++;
+		if (!isElement(node)) continue;
+		const tag = tagName(node);
+		if (tag === "ul" || tag === "ol") {
+			lists.push(node);
+			continue;
+		}
+		if (tag === "li") continue;
+		pushChildrenInOrder(scan, node);
 	}
 	return lists;
+}
+
+function pushChildrenInOrder(scan: Node[], element: Element) {
+	const children = element.childNodes;
+	for (let index = 0; index < children.length; index++) {
+		const child = children[index];
+		if (child) scan.push(child);
+	}
 }
 
 function hasDirectBlockChild(element: Element) {

@@ -70,6 +70,16 @@ function inlineStateReason(
 ): InlineStateReason | undefined {
 	const result = input.result;
 	if (input.source === "asset" || !isHtmlResult(result)) return undefined;
+	// skip the app-shell DOM parse on the hot path: a confident html record can
+	// never trigger inline-state recovery (no reason below gates it), so probing
+	// its full body would be wasted work on every normal page in a crawl
+	if (
+		record.ok &&
+		record.confidence >= lowQualityConfidence &&
+		record.extractor === "html"
+	) {
+		return undefined;
+	}
 	const staticAppShell = looksLikeAppShell(result.body);
 	const emptyAppShell =
 		!record.ok &&

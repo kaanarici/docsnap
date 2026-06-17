@@ -25,9 +25,12 @@ export function failed(
 }
 
 export function failureKind(status: number, error: string): FailureKind {
+	// an explicit robots/challenge block wins over the upstream status: a route
+	// fallback denied by robots can carry the original 404, but the real cause is
+	// "do not fetch", not "stale URL"
+	if (/blocked|challenge/i.test(error)) return "blocked";
 	if (status === 404 || status === 410) return "not_found";
-	if ([401, 403, 429].includes(status) || /blocked|challenge/i.test(error))
-		return "blocked";
+	if ([401, 403, 429].includes(status)) return "blocked";
 	if (/exceeds/i.test(error)) return "too_large";
 	if (isUnsafeUrlError(error)) return "unsafe_url";
 	if (/timeout|timed out|abort/i.test(error)) return "timeout";

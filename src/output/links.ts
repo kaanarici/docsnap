@@ -11,10 +11,11 @@ export function rewriteLocalLinks(
 	if (!fromPath) return record.markdown;
 	return replaceMarkdownLinks(record.markdown, ({ text, href, suffix }) => {
 		try {
+			const resolved = new URL(href, record.finalUrl);
 			const path = map.get(urlWithoutFragmentAndQuery(href, record.finalUrl));
-			return path
-				? `[${text}](${relativeMarkdownLink(fromPath, path)}${suffix})`
-				: undefined;
+			if (!path) return undefined;
+			const local = relativeMarkdownLink(fromPath, path);
+			return `[${text}](${local}${resolved.hash}${suffix})`;
 		} catch {
 			return undefined;
 		}

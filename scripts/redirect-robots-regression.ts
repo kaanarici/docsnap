@@ -14,9 +14,36 @@ import { withWritersideTopic } from "../src/fetch/writerside.ts";
 await discoveryFinalUrlRegression();
 await discoveryResourceGateRegression();
 await fetchRedirectGateRegression();
+await routeFallbackBlockedRegression();
 await llmsRedirectGateRegression();
 await canonicalSeedRobotsGateRegression();
 await writersideTopicGateRegression();
+
+// a .md route fallback denied by robots must classify as "blocked", not as the
+// original 404's "not_found": the cause is "do not fetch", not "stale URL"
+async function routeFallbackBlockedRegression() {
+	const config = parsedConfig("https://docs.example.com/");
+	const allowResource = (url: string) => !url.includes("/docs/");
+	await withTransport(
+		async (url) => {
+			if (String(url).endsWith("/guide.md"))
+				return response(String(url), 404, "not found");
+			throw new Error(`unexpected fetch: ${url}`);
+		},
+		async () => {
+			const result = await fetchText(
+				"https://docs.example.com/guide.md",
+				config,
+				undefined,
+				undefined,
+				allowResource,
+			);
+			assert(!result.ok && result.error === "blocked by robots.txt");
+			assert(result.status === 404);
+			assert(result.failureKind === "blocked");
+		},
+	);
+}
 
 // apex refuses robots and redirects the seed to a related www that Disallows
 // everything: the canonical-origin probe must load and honor the www origin's

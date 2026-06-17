@@ -8,6 +8,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { freshUntilFor } from "../src/cache/policy.ts";
 import {
 	acquireCacheLock,
 	cacheKey,
@@ -32,6 +33,22 @@ import {
 	sandboxNetworkDisabled,
 	startLoopbackServer,
 } from "./local-fixture.ts";
+
+// s-maxage must override max-age for this shared cache regardless of header
+// order (RFC 7234 shared-cache semantics)
+function freshSeconds(cacheControl: string): number | undefined {
+	const until = freshUntilFor({
+		ok: true,
+		status: 200,
+		contentType: "text/html",
+		cacheControl,
+	} as Parameters<typeof freshUntilFor>[0]);
+	return until ? Math.round((until.getTime() - Date.now()) / 1000) : undefined;
+}
+assert(freshSeconds("s-maxage=0, max-age=600") === 0);
+assert(freshSeconds("max-age=600, s-maxage=0") === 0);
+assert(freshSeconds("max-age=600") === 600);
+assert(freshSeconds("s-maxage=300, max-age=600") === 300);
 
 const text =
 	"Shared cache regression content has enough stable documentation prose for extraction, summary checks, and repeat fetch assertions.";

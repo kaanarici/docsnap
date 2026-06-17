@@ -270,8 +270,29 @@ export function safeHref(value: string | null, baseUrl: string) {
 export function imageMarkdown(element: Element, baseUrl: string) {
 	const alt = linkText(element.getAttribute("alt") ?? "");
 	if (!alt) return "";
-	const src = safeHref(element.getAttribute("src"), baseUrl);
+	const src = imageSource(element, baseUrl);
 	return src ? `![${alt}](${src})` : alt;
+}
+
+// responsive images often omit src; recover the first usable srcset candidate
+function imageSource(element: Element, baseUrl: string) {
+	const direct = safeHref(element.getAttribute("src"), baseUrl);
+	if (direct) return direct;
+	for (const candidate of srcsetUrls(element.getAttribute("srcset"))) {
+		const safe = safeHref(candidate, baseUrl);
+		if (safe) return safe;
+	}
+	return undefined;
+}
+
+function srcsetUrls(value: string | null) {
+	if (!value) return [] as string[];
+	const urls: string[] = [];
+	for (const part of value.split(",")) {
+		const url = part.trim().split(/\s+/, 1)[0];
+		if (url) urls.push(url);
+	}
+	return urls;
 }
 
 export function stripControlChars(value: string) {

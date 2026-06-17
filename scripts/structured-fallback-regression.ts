@@ -22,7 +22,7 @@ const forum = await page(
 						<ul><li>Structured fallback keeps nested list items and heading boundaries visible for reviewers.</li></ul>
 					</li>
 					<li>Security notes
-						<ul><li>Unsafe links remain plain text while public http and mail links can stay clickable.</li></ul>
+						<div class="callout"><ul><li>Unsafe links remain plain text while public http and mail links can stay clickable.</li></ul></div>
 					</li>
 				</ul>
 			</section>
@@ -39,6 +39,8 @@ assert(forum.markdown.includes("# Forum Index"));
 assert(forum.markdown.includes("## Announcements"));
 assert(forum.markdown.includes("- Extraction notes"));
 assert(forum.markdown.includes("  - Structured fallback keeps nested"));
+// nested list wrapped in a <div> under the <li> must still be captured, not dropped
+assert(forum.markdown.includes("  - Unsafe links remain plain text"));
 assert(!forum.markdown.includes("Terms Privacy"));
 
 const product = await page(
@@ -205,6 +207,7 @@ const blockImage = await page(
 		<h1>Architecture</h1>
 		<p>Public architecture documentation describes the capture pipeline with a single explanatory diagram for downstream agents.</p>
 		<img src="/diagram.png" alt="Pipeline diagram showing fetch then extract then write stages">
+		<img srcset="/responsive-small.png 1x, /responsive-large.png 2x" alt="Topology">
 		<img src="/spacer.png" alt="">
 	</main></body></html>`,
 );
@@ -215,6 +218,8 @@ assert(
 	),
 	"content-bearing block image alt must be preserved",
 );
+// srcset-only image must resolve to its first candidate, not bare alt text
+assert(blockImage.markdown.includes("![Topology](/responsive-small.png)"));
 assert(
 	!blockImage.markdown.includes("/spacer.png"),
 	"decorative empty-alt image must be dropped",

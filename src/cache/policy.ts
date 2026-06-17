@@ -8,10 +8,11 @@ export function freshUntilFor(result: FetchResult): Date | undefined {
 	const now = Date.now();
 	const cacheControl = result.cacheControl?.toLowerCase();
 	if (cacheControl) {
-		const maxAge = cacheControl.match(
-			/(?:^|,)\s*(?:s-maxage|max-age)\s*=\s*(\d+)/,
-		)?.[1];
-		if (maxAge !== undefined) {
+		// docsnap's cache is shared across output dirs, so honor s-maxage over
+		// max-age regardless of header order (RFC 7234 shared-cache semantics).
+		const directives = parseCacheControl(cacheControl);
+		const maxAge = directives.get("s-maxage") ?? directives.get("max-age");
+		if (maxAge !== undefined && /^\d+$/.test(maxAge)) {
 			const ttl = Math.min(Number(maxAge) * 1000, maxFreshMs);
 			return new Date(now + ttl);
 		}
@@ -21,6 +22,16 @@ export function freshUntilFor(result: FetchResult): Date | undefined {
 		return new Date(now + defaultFreshMs);
 	}
 	return undefined;
+}
+
+function parseCacheControl(value: string): Map<string, string> {
+	const directives = new Map<string, string>();
+	for (const part of value.split(",")) {
+		const [name, ...rest] = part.trim().split("=");
+		const key = name?.trim();
+		if (key && !directives.has(key)) directives.set(key, rest.join("=").trim());
+	}
+	return directives;
 }
 
 function cacheableResponse(result: FetchResult): boolean {

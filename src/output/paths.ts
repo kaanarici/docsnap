@@ -92,6 +92,11 @@ function withSuffix(path: string, suffix: string) {
 	return path.replace(/\.md$/, `-${suffix}.md`);
 }
 
+// keep each path segment well under the common 255-byte filesystem component
+// limit; long segments are truncated with a stable hash suffix so distinct
+// long URLs still map to distinct, writable filenames
+const maxSlugChars = 120;
+
 function slug(value: string) {
 	const clean = safeDecode(value)
 		.toLowerCase()
@@ -99,7 +104,10 @@ function slug(value: string) {
 		.replace(/[^a-z0-9._-]+/g, "-")
 		.replace(/^-+|-+$/g, "");
 	if (/^\.+$/.test(clean)) return "page";
-	return clean || "page";
+	const safe = clean || "page";
+	if (safe.length <= maxSlugChars) return safe;
+	const head = safe.slice(0, maxSlugChars - 9).replace(/-+$/, "");
+	return `${head}-${shortHash(value)}`;
 }
 
 function shortHash(value: string) {

@@ -5,9 +5,12 @@ import { parseArgs } from "../src/cli/args.ts";
 import { runCli } from "../src/cli/index.ts";
 import { dedupeRecords } from "../src/core/dedupe.ts";
 import { identityKeys } from "../src/core/identity.ts";
+import type { PageSuccess } from "../src/core/types.ts";
 import { setFetchTransportForTest } from "../src/fetch/fetcher.ts";
 import { installAgentFiles } from "../src/output/agent-files.ts";
+import { rewriteLocalLinks } from "../src/output/links.ts";
 import { renderPage } from "../src/output/page.ts";
+import { assignOutputPaths } from "../src/output/paths.ts";
 import { buildSummary } from "../src/report/summary.ts";
 
 const parsedPage = parseArgs(["https://docs.example.com/api/auth", "--page"]);
@@ -175,6 +178,46 @@ const cliJson = JSON.parse(cli.stdout);
 assert(cliJson.userAgent === parsedPage.userAgent);
 assert(cliJson.ignoreRobots === true);
 assert(cli.stderr.includes("--ignore-robots"));
+
+// local-link rewriting must not mutate captured Markdown examples inside fenced
+// code blocks or inline code, must preserve #fragments, and must still rewrite
+// real prose links that map to captured pages
+const linkRecord = {
+	...page("https://docs.example.com/a", "html", ""),
+	outputPath: "a.md",
+	markdown: [
+		"See [Install](https://docs.example.com/b#install) and [Plain](https://docs.example.com/b).",
+		"",
+		"```md",
+		"[Example](https://docs.example.com/b)",
+		"```",
+		"",
+		"Inline `[code](https://docs.example.com/b)` stays.",
+	].join("\n"),
+};
+const rewritten = rewriteLocalLinks(
+	linkRecord,
+	new Map([["https://docs.example.com/b", "b.md"]]),
+);
+assert(rewritten.includes("[Install](./b.md#install)"));
+assert(rewritten.includes("[Plain](./b.md)"));
+assert(rewritten.includes("[Example](https://docs.example.com/b)"));
+assert(rewritten.includes("`[code](https://docs.example.com/b)`"));
+
+// long URL path segments must be capped well under the 255-byte filesystem
+// component limit while distinct long URLs still map to distinct filenames
+const longA = "a".repeat(300);
+const longB = `${"a".repeat(299)}b`;
+const longRecords: PageSuccess[] = [
+	page(`https://x.example.com/${longA}`, "html", "# t"),
+	page(`https://x.example.com/${longB}`, "html", "# t"),
+];
+assignOutputPaths(longRecords);
+const longPathA = longRecords[0]?.outputPath ?? "";
+const longPathB = longRecords[1]?.outputPath ?? "";
+const longSegment = longPathA.split("/").pop() ?? "";
+assert(longSegment.length <= 200);
+assert(longPathA !== longPathB);
 
 function assert(condition: unknown): asserts condition {
 	if (!condition) throw new Error("assertion failed");
