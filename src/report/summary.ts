@@ -1,3 +1,4 @@
+import { cacheSummary } from "../cache/store.ts";
 import { emptyRefreshSummary } from "../core/refresh.ts";
 import type { SnapshotStats } from "../core/snapshot.ts";
 import { snapshotSchemaVersion } from "../core/snapshot.ts";
@@ -17,8 +18,6 @@ import {
 	type RefreshSummary,
 	type RunSummary,
 } from "../core/types.ts";
-
-const cacheDirEnv = "DOCSNAP_CACHE_DIR";
 
 export function buildSummary(
 	records: PageRecord[],
@@ -135,21 +134,10 @@ export function buildSummary(
 	};
 }
 
+// Reflect the real (safe-root-validated) cache context so an unsafe configured
+// DOCSNAP_CACHE_DIR reports disabled, not enabled with a bogus dir.
 export function emptyCacheSummary(config: Config): CacheSummary {
-	const enabled =
-		config.cache && process.env[cacheDirEnv]?.trim().toLowerCase() !== "off";
-	return {
-		enabled,
-		dir: enabled ? process.env[cacheDirEnv]?.trim() || null : null,
-		hits: 0,
-		misses: 0,
-		stale: 0,
-		revalidated: 0,
-		written: 0,
-		bytesRead: 0,
-		bytesWritten: 0,
-		evictedBytes: 0,
-	};
+	return cacheSummary(config);
 }
 
 function addRedirectedHosts(

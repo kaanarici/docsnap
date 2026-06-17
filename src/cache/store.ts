@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
 	mkdir,
+	readdir,
 	readFile,
 	rename,
 	rm,
@@ -11,6 +12,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { acquireDirLock, type DirLock } from "../core/dir-lock.ts";
+import { assertSafeRoot } from "../core/fs-safety.ts";
 import type {
 	CacheSummary,
 	Config,
@@ -18,7 +20,14 @@ import type {
 	RedirectHop,
 } from "../core/types.ts";
 import { validatePublicHttpUrl } from "../security/url.ts";
-import { blobPath, entryPath, isCacheHex, lockPath, pathFor } from "./paths.ts";
+import {
+	blobPath,
+	entryKeyFromFileName,
+	entryPath,
+	isCacheHex,
+	lockPath,
+	pathFor,
+} from "./paths.ts";
 import { freshUntilFor, isNotModifiedResult } from "./policy.ts";
 
 const schemaVersion = "docsnap-cache-v1";
@@ -159,6 +168,8 @@ export async function writeCacheResult(
 	if (!entrySafe(entry)) return;
 	try {
 		await ensureDirs(context);
+		// Caller holds this key's lock, so the prior entry can't change under us.
+		const priorHash = await priorBodyHash(context, key);
 		const blob = blobPath(context, bodyHash);
 		if (!(await exists(blob))) {
 			await atomicWrite(blob, result.body);
@@ -169,9 +180,53 @@ export async function writeCacheResult(
 			`${JSON.stringify(entry, null, 2)}\n`,
 		);
 		context.stats.written++;
+		if (priorHash && priorHash !== bodyHash) {
+			await removeOrphanBlob(context, priorHash);
+		}
 	} catch (error) {
 		disableOnAccessError(context, error);
 	}
+}
+
+async function priorBodyHash(
+	context: CacheContext,
+	key: string,
+): Promise<string | undefined> {
+	try {
+		const prior = parseEntry(
+			await readFile(entryPath(context, key), "utf8"),
+			key,
+		);
+		return prior?.bodyHash;
+	} catch {
+		return undefined;
+	}
+}
+
+// Blobs are content-addressed and deduplicated across cache keys, so a replaced
+// blob may still back another live entry. Unlink it only when no surviving
+// entry references it. Re-fetch tolerates a lost blob (integrity check misses).
+async function removeOrphanBlob(context: CacheContext, hash: string) {
+	try {
+		if (await blobReferenced(context, hash)) return;
+		await rm(blobPath(context, hash), { force: true });
+	} catch (error) {
+		if (!isNotFound(error)) disableOnAccessError(context, error);
+	}
+}
+
+async function blobReferenced(
+	context: CacheContext,
+	hash: string,
+): Promise<boolean> {
+	const dir = pathFor(context, "entries");
+	for (const name of await readdir(dir)) {
+		const entryKey = entryKeyFromFileName(name);
+		if (!entryKey) continue;
+		const entry = parseEntry(await readFile(join(dir, name), "utf8"), entryKey);
+		if (entry?.bodyHash === hash) return true;
+	}
+	return false;
 }
 
 export async function refreshCacheEntry(
@@ -201,6 +256,7 @@ export async function refreshCacheEntry(
 		await ensureDirs(context);
 		if (!freshUntil) {
 			await removeEntry(context, key);
+			await removeOrphanBlob(context, entry.bodyHash);
 			return next;
 		}
 		await atomicWrite(
@@ -287,9 +343,22 @@ function cacheDir(config: Config): string | null {
 	if (!config.cache) return null;
 	const value = process.env[cacheDirEnv]?.trim();
 	if (value?.toLowerCase() === "off") return null;
-	if (value) return resolve(value);
+	if (value) return safeCacheRoot(resolve(value));
 	if (process.env[allowTestHostEnv]) return null;
 	return join(homedir(), ".cache", "docsnap");
+}
+
+// A configured cache root must obey the same safe-root rule as the output dir
+// (not the filesystem root, $HOME, or a protected $HOME child, before or after
+// symlink resolution). An unsafe root disables the cache rather than crashing
+// the run, since caching is best-effort.
+function safeCacheRoot(dir: string): string | null {
+	try {
+		assertSafeRoot(dir, "unsafe cache root");
+		return dir;
+	} catch {
+		return null;
+	}
 }
 
 function cacheMaxBytes() {

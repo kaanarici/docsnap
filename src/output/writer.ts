@@ -7,8 +7,7 @@ import {
 	rm,
 	writeFile,
 } from "node:fs/promises";
-import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, parse, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import {
 	acquireDirLock,
 	type DirLock,
@@ -17,6 +16,7 @@ import {
 import {
 	assertInsideRoot,
 	assertRealPathInside,
+	assertSafeRoot,
 	isInsideOrSame,
 	realPathIsInside,
 } from "../core/fs-safety.ts";
@@ -37,18 +37,6 @@ export type WriteStats = {
 	pageWrites: number;
 	skippedWrites: number;
 };
-
-const protectedHomeDirs = new Set([
-	"Applications",
-	"Desktop",
-	"Documents",
-	"Downloads",
-	"Library",
-	"Movies",
-	"Music",
-	"Pictures",
-	"Public",
-]);
 
 export async function prepareOutput(config: Config): Promise<void> {
 	assertOutputRootSafe(config);
@@ -209,11 +197,5 @@ function assertSafeCleanDir(outDir: string, raw: string) {
 }
 
 function assertSafeOutputDir(outDir: string, raw: string) {
-	const root = parse(outDir).root;
-	const home = resolve(homedir());
-	const isProtectedHomeDir =
-		dirname(outDir) === home && protectedHomeDirs.has(basename(outDir));
-	if (outDir === root || outDir === home || isProtectedHomeDir) {
-		throw new Error(`Refusing to use unsafe output directory: ${raw}`);
-	}
+	assertSafeRoot(outDir, `Refusing to use unsafe output directory: ${raw}`);
 }

@@ -1,15 +1,35 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import {
+	mkdir,
+	mkdtemp,
+	readdir,
+	readFile,
+	rm,
+	symlink,
+	writeFile,
+} from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { join, parse } from "node:path";
 import { pruneCache } from "../src/cache/eviction.ts";
-import { cacheKey, cacheRequest, cacheSummary } from "../src/cache/store.ts";
+import {
+	acquireCacheLock,
+	cacheContext,
+	cacheKey,
+	cacheRequest,
+	cacheSummary,
+	parseEntry,
+	refreshCacheEntry,
+	writeCacheResult,
+} from "../src/cache/store.ts";
 import { parseArgs } from "../src/cli/args.ts";
+import { releaseDirLock } from "../src/core/dir-lock.ts";
 import { runPipeline } from "../src/core/pipeline.ts";
+import type { FetchResult } from "../src/core/types.ts";
 import { fetchText, setFetchTransportForTest } from "../src/fetch/fetcher.ts";
 import { callTool } from "../src/mcp/tools.ts";
 import {
 	assert,
 	assertConfig,
+	cacheDirEnv,
 	cacheMaxEnv,
 	config,
 	countEntries,
@@ -288,6 +308,141 @@ await withCacheEnv("stale-lock", async (cacheDir) => {
 	} finally {
 		setFetchTransportForTest(undefined);
 	}
+});
+
+// An unsafe DOCSNAP_CACHE_DIR (filesystem root, $HOME, a protected $HOME child,
+// or a symlink resolving to one) must disable the cache, not manage files inside
+// the user's home tree. Mirrors the output-root safe-root rule.
+{
+	const previous = process.env[cacheDirEnv];
+	const linkBase = await mkdtemp(join(tmpdir(), "docsnap-cache-unsafe-"));
+	const symlinkToHome = join(linkBase, "looks-safe");
+	await symlink(homedir(), symlinkToHome);
+	try {
+		for (const dir of [
+			parse(homedir()).root,
+			homedir(),
+			join(homedir(), "Documents"),
+			symlinkToHome,
+		]) {
+			process.env[cacheDirEnv] = dir;
+			const parsed = parseArgs(["https://unsafe-root.example/page", "--page"]);
+			assertConfig(parsed);
+			const ctx = cacheContext(parsed);
+			assert(!ctx.enabled, `unsafe cache root must disable cache: ${dir}`);
+			assert(ctx.dir === null, `unsafe cache root must resolve null: ${dir}`);
+		}
+		process.env[cacheDirEnv] = linkBase;
+		const safe = parseArgs(["https://safe-root.example/page", "--page"]);
+		assertConfig(safe);
+		assert(
+			cacheContext(safe).enabled,
+			"a normal temp cache root stays enabled",
+		);
+		// a fresh, not-yet-created path under $HOME is a SAFE root: symlink
+		// resolution must not collapse it onto its nearest existing ancestor
+		// ($HOME) and wrongly disable the cache
+		process.env[cacheDirEnv] = join(
+			homedir(),
+			"docsnap-cache-fresh-nonexistent",
+		);
+		const fresh = parseArgs(["https://fresh-root.example/page", "--page"]);
+		assertConfig(fresh);
+		assert(
+			cacheContext(fresh).enabled,
+			"a fresh non-existent cache root under $HOME stays enabled",
+		);
+	} finally {
+		if (previous === undefined) delete process.env[cacheDirEnv];
+		else process.env[cacheDirEnv] = previous;
+		await rm(linkBase, { recursive: true, force: true });
+	}
+}
+
+// Replacing an entry's body must unlink the orphaned prior blob, but a blob that
+// is still referenced by another cache key (content-addressed dedup) must NOT be
+// removed. Also covers refresh-to-uncacheable, which drops the entry + blob.
+await withCacheEnv("orphan-blob", async (cacheDir) => {
+	const accept = "text/html";
+	const blobsDir = join(cacheDir, "blobs", "sha256");
+	const longBody = (tag: string) =>
+		`${prose} Orphan-blob regression body variant ${tag} with stable prose.`;
+	const result = (url: string, body: string): FetchResult => ({
+		url,
+		finalUrl: url,
+		status: 200,
+		contentType: "text/html",
+		body,
+		fetchMs: 1,
+		redirects: [],
+		cacheControl: "max-age=600",
+		fetchedAt: new Date().toISOString(),
+		ok: true,
+	});
+	const put = async (url: string, body: string) => {
+		const parsed = parseArgs([url, "--page"]);
+		assertConfig(parsed);
+		const request = cacheRequest(url, parsed, accept);
+		const key = cacheKey(request);
+		const lock = await acquireCacheLock(parsed, key);
+		assert(lock !== undefined, "cache lock acquired");
+		try {
+			await writeCacheResult(parsed, key, request, result(url, body));
+		} finally {
+			await releaseDirLock(lock);
+		}
+	};
+
+	const urlA = "https://orphan.example/a";
+	const urlB = "https://orphan.example/b";
+	// Same URL re-fetched with a changed body: prior blob is orphaned -> removed.
+	await put(urlA, longBody("one"));
+	await put(urlA, longBody("two"));
+	assert(
+		(await readdir(blobsDir)).length === 1,
+		"re-write removes orphan blob",
+	);
+
+	// A second key sharing the identical body must keep the shared blob alive.
+	const shared = longBody("shared");
+	await put(urlA, shared);
+	await put(urlB, shared);
+	assert((await readdir(blobsDir)).length === 1, "shared blob deduplicated");
+	// Re-write urlA only; urlB still references the shared blob, so it survives.
+	await put(urlA, longBody("after-shared"));
+	assert(
+		(await readdir(blobsDir)).length === 2,
+		"shared blob kept while urlB references it",
+	);
+
+	// Refresh that becomes uncacheable drops the entry and its now-orphan blob.
+	const parsedB = parseArgs([urlB, "--page"]);
+	assertConfig(parsedB);
+	const requestB = cacheRequest(urlB, parsedB, accept);
+	const keyB = cacheKey(requestB);
+	const lockB = await acquireCacheLock(parsedB, keyB);
+	assert(lockB !== undefined, "refresh lock acquired");
+	try {
+		const entryB = parseEntry(
+			await readFile(join(cacheDir, "entries", `${keyB}.json`), "utf8"),
+			keyB,
+		);
+		assert(entryB !== undefined, "urlB entry present before refresh");
+		await refreshCacheEntry(parsedB, keyB, entryB, {
+			...result(urlB, ""),
+			setCookie: true,
+		});
+	} finally {
+		await releaseDirLock(lockB);
+	}
+	assert(
+		(await countEntries(cacheDir)) === 1,
+		"uncacheable refresh removes urlB entry",
+	);
+	assert(
+		(await readdir(blobsDir)).length === 1,
+		"uncacheable refresh removes urlB orphan blob",
+	);
 });
 
 function toolJson(value: unknown) {

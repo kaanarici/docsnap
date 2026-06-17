@@ -22,6 +22,16 @@ const loopbackFallbackAddresses = [
 	{ address: "127.0.0.3", family: 4 },
 	{ address: "127.0.0.1", family: 4 },
 ] satisfies Array<{ address: string; family: 4 }>;
+const useMultiTestResolver = (raw: string) =>
+	setResolvePublicHttpUrlForTest(async () => ({
+		url: new URL(raw),
+		hostname: "multi.test",
+		address: "127.0.0.2",
+		family: 4 as const,
+		addresses: loopbackFallbackAddresses,
+	}));
+const closeServer = (target: ReturnType<typeof createServer>) =>
+	new Promise<void>((ok, no) => target.close((e) => (e ? no(e) : ok())));
 
 const server = createServer((_req, res) => {
 	res.writeHead(200, { "content-type": "text/plain" });
@@ -36,13 +46,7 @@ if (serverStarted) {
 		const address = server.address();
 		assert(address && typeof address !== "string");
 		const raw = `http://multi.test:${address.port}/`;
-		setResolvePublicHttpUrlForTest(async () => ({
-			url: new URL(raw),
-			hostname: "multi.test",
-			address: "127.0.0.2",
-			family: 4,
-			addresses: loopbackFallbackAddresses,
-		}));
+		useMultiTestResolver(raw);
 		const response = await requestPublicHttp(
 			raw,
 			{ accept: "text/plain", "user-agent": config.userAgent },
@@ -52,9 +56,7 @@ if (serverStarted) {
 		assert(new TextDecoder().decode(response.body) === "second address");
 	} finally {
 		setResolvePublicHttpUrlForTest(undefined);
-		await new Promise<void>((resolve, reject) =>
-			server.close((error) => (error ? reject(error) : resolve())),
-		);
+		await closeServer(server);
 	}
 }
 
@@ -79,13 +81,7 @@ if (trickleStarted) {
 		const address = trickleServer.address();
 		assert(address && typeof address !== "string");
 		const raw = `http://multi.test:${address.port}/`;
-		setResolvePublicHttpUrlForTest(async () => ({
-			url: new URL(raw),
-			hostname: "multi.test",
-			address: "127.0.0.2",
-			family: 4,
-			addresses: loopbackFallbackAddresses,
-		}));
+		useMultiTestResolver(raw);
 		const started = performance.now();
 		let failure = "";
 		try {
@@ -101,9 +97,7 @@ if (trickleStarted) {
 		assert(performance.now() - started < 2_000);
 	} finally {
 		setResolvePublicHttpUrlForTest(undefined);
-		await new Promise<void>((resolve, reject) =>
-			trickleServer.close((error) => (error ? reject(error) : resolve())),
-		);
+		await closeServer(trickleServer);
 	}
 }
 
@@ -158,23 +152,28 @@ await withMockFetch(
 );
 const redirectHeaders: Array<{ url: string; headers: Record<string, string> }> =
 	[];
+const start = "https://docs.example.com/start";
+const start304 = "https://docs.example.com/start-304";
+const cond = (url: string) => ({ etag: '"start"', urls: [url] });
 await withMockFetch(
 	async () => {
-		const result = await fetchText(
-			"https://docs.example.com/start",
-			config,
-			undefined,
-			{ etag: '"start"', urls: ["https://docs.example.com/start"] },
-		);
-		assert(result.ok);
-		assert(result.finalUrl === "https://other.example/target");
+		const ok = await fetchText(start, config, undefined, cond(start));
+		assert(ok.ok && ok.finalUrl === "https://other.example/ok");
 		assert(redirectHeaders[0]?.headers["if-none-match"] === '"start"');
+		// no validator is sent to the cross-host target, so its bogus 304 must fail
 		assert(!("if-none-match" in (redirectHeaders[1]?.headers ?? {})));
+		const bogus = await fetchText(start304, config, undefined, cond(start304));
+		assert(!bogus.ok && bogus.status === 304);
+		assert(!("notModified" in bogus) || bogus.notModified !== true);
 	},
 	async (input, headers) => {
 		redirectHeaders.push({ url: input, headers });
-		return input === "https://docs.example.com/start"
-			? Response.redirect("https://other.example/target", 302)
+		if (input === start)
+			return Response.redirect("https://other.example/ok", 302);
+		if (input === start304)
+			return Response.redirect("https://other.example/bogus", 302);
+		return input === "https://other.example/bogus"
+			? new Response(null, { status: 304, headers: { etag: '"target"' } })
 			: html("Redirect target");
 	},
 );
