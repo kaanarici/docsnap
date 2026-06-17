@@ -204,6 +204,20 @@ assert(rewritten.includes("[Plain](./b.md)"));
 assert(rewritten.includes("[Example](https://docs.example.com/b)"));
 assert(rewritten.includes("`[code](https://docs.example.com/b)`"));
 
+// a relative internal link to a page NOT in the corpus must be absolutized
+// against the page URL so an agent can still follow it; already-absolute
+// external links are left verbatim
+const danglingRecord = {
+	...page("https://docs.example.com/guide/intro", "html", ""),
+	outputPath: "guide/intro.md",
+	markdown:
+		"Relative [Next](../setup/install) and root [API](/api/v2), plus external [GitHub](https://github.com/o/r).",
+};
+const dangling = rewriteLocalLinks(danglingRecord, new Map());
+assert(dangling.includes("[Next](https://docs.example.com/setup/install)"));
+assert(dangling.includes("[API](https://docs.example.com/api/v2)"));
+assert(dangling.includes("[GitHub](https://github.com/o/r)"));
+
 // long URL path segments must be capped well under the 255-byte filesystem
 // component limit while distinct long URLs still map to distinct filenames
 const longA = "a".repeat(300);
