@@ -11,6 +11,7 @@ import {
 	injectionSignals,
 	inlineStateSources,
 	lowQualityConfidence,
+	type PageOutput,
 	type PageRecord,
 	type PageSuccess,
 	type PipelineConfig,
@@ -19,8 +20,14 @@ import {
 	type RunSummary,
 } from "../core/types.ts";
 
+// `records` is every attempted page (failures included) and drives source and
+// failure counts; `outputs` is the written corpus and drives every count that
+// must describe pages actually on disk. They are distinct inputs because a
+// success beyond --max never becomes a PageOutput, so it can be present in
+// `records` yet absent from `outputs`.
 export function buildSummary(
 	records: PageRecord[],
+	outputs: PageOutput[],
 	config: PipelineConfig,
 	discovered: number,
 	deduped: number,
@@ -49,32 +56,7 @@ export function buildSummary(
 
 	for (const record of records) {
 		bySource[record.source]++;
-		if (record.ok) {
-			// every written-corpus count describes pages actually on disk; an ok record
-			// without an outputPath (e.g. a backfilled page beyond --max) is never
-			// written, so it must not inflate extractor/quality/injection counts or flip
-			// run status. injection signals only matter for captured content: a failed
-			// or unwritten page contributes nothing an agent can read, so its raw-HTML
-			// signals must not trip --fail-on-injection-signal
-			if (record.outputPath) {
-				byExtractor[record.extractor]++;
-				if (record.inlineStateSource) {
-					byInlineStateSource[record.inlineStateSource] =
-						(byInlineStateSource[record.inlineStateSource] ?? 0) + 1;
-				}
-				written++;
-				if (addRedirectedHosts(record, redirectedHosts)) hostRedirects++;
-				if (isLowQuality(record)) lowQuality++;
-				if (isQualityWarning(record)) qualityWarnings++;
-				if (record.injectionSignals.length) {
-					injectionSignalPages++;
-					for (const signal of record.injectionSignals) {
-						byInjectionSignal[signal] = (byInjectionSignal[signal] ?? 0) + 1;
-					}
-				}
-			}
-			continue;
-		}
+		if (record.ok) continue;
 		failed++;
 		byFailureKind[record.failureKind] =
 			(byFailureKind[record.failureKind] ?? 0) + 1;
@@ -83,6 +65,29 @@ export function buildSummary(
 			error: record.error,
 			kind: record.failureKind,
 		});
+	}
+
+	// Every written-corpus count describes pages actually on disk. A success beyond
+	// --max never becomes a PageOutput, so it is absent here and cannot inflate
+	// extractor/quality/injection counts or flip run status. Injection signals only
+	// matter for captured content, so an unwritten page's raw-HTML signals never
+	// trip --fail-on-injection-signal.
+	for (const record of outputs) {
+		byExtractor[record.extractor]++;
+		if (record.inlineStateSource) {
+			byInlineStateSource[record.inlineStateSource] =
+				(byInlineStateSource[record.inlineStateSource] ?? 0) + 1;
+		}
+		written++;
+		if (addRedirectedHosts(record, redirectedHosts)) hostRedirects++;
+		if (isLowQuality(record)) lowQuality++;
+		if (isQualityWarning(record)) qualityWarnings++;
+		if (record.injectionSignals.length) {
+			injectionSignalPages++;
+			for (const signal of record.injectionSignals) {
+				byInjectionSignal[signal] = (byInjectionSignal[signal] ?? 0) + 1;
+			}
+		}
 	}
 	const reached = maxReached(config, discovered);
 

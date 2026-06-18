@@ -4,7 +4,6 @@ import {
 	readPriorOutput,
 } from "../output/prior.ts";
 import { identityKeys } from "./identity.ts";
-import { isMaterialized } from "./records.ts";
 import type {
 	DiscoveredUrl,
 	PageOutput,
@@ -33,6 +32,7 @@ export function refreshCounters(): RefreshCounters {
 export async function refreshSummary(
 	prior: PriorState,
 	records: PageRecord[],
+	outputs: PageOutput[],
 	attempted: DiscoveredUrl[],
 	config: PipelineConfig,
 	counters: RefreshCounters,
@@ -43,7 +43,7 @@ export async function refreshSummary(
 	let changed = 0;
 	let unchanged = 0;
 
-	for (const record of records.filter(isMaterialized)) {
+	for (const record of outputs) {
 		const previous = prior.find(record);
 		const change = previous
 			? (await existingOutputMatches(config, previous, record))

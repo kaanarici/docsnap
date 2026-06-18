@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { buildPipelineConfig, parseArgs } from "../src/cli/args.ts";
 import { runPipeline } from "../src/core/pipeline.ts";
+import { isWritten } from "../src/core/records.ts";
 import { setFetchTransportForTest } from "../src/fetch/fetcher.ts";
 import { prepareOutput, writePages } from "../src/output/writer.ts";
 
@@ -53,19 +54,16 @@ describe("pipeline capture outcomes", () => {
 		expect(result.summary.written).toBe(2);
 		expect(result.summary.failed).toBe(1);
 		expect(result.summary.discovered).toBe(3);
-		expect(
-			result.records.filter((record) => record.ok && record.outputPath),
-		).toHaveLength(2);
+		expect(result.records.filter(isWritten)).toHaveLength(2);
 		expect(
 			result.records.some(
 				(record) => !record.ok && record.url.endsWith("/bad"),
 			),
 		).toBe(true);
 		const recovered = result.records.find(
-			(record) => record.ok && record.finalUrl.endsWith("/good"),
+			(record) => isWritten(record) && record.finalUrl.endsWith("/good"),
 		);
-		expect(recovered?.ok && recovered.outputPath).toBeTruthy();
-		if (!recovered?.ok || !recovered.outputPath) {
+		if (!recovered || !isWritten(recovered)) {
 			throw new Error("expected recovered record");
 		}
 		const recoveredPage = await readFile(
@@ -181,10 +179,9 @@ describe("pipeline capture outcomes", () => {
 		expect(result.summary.written).toBe(2);
 		expect(result.summary.bySource.feed).toBe(2);
 		const dated = result.records.find(
-			(record) => record.ok && record.publishedAt && record.updatedAt,
+			(record) => isWritten(record) && record.publishedAt && record.updatedAt,
 		);
-		expect(dated?.ok && dated.outputPath).toBeTruthy();
-		if (!dated?.ok || !dated.outputPath) {
+		if (!dated || !isWritten(dated)) {
 			throw new Error("expected dated feed record");
 		}
 		const markdown = await readFile(join(feedOutDir, dated.outputPath), "utf8");

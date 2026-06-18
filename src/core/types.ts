@@ -228,14 +228,14 @@ export type PageSuccess = PageBase & {
 	inlineStateSource?: InlineStateSource;
 	confidence: number;
 	qualityReasons: string[];
-	outputPath?: string;
-	// Derived in-memory serialization (frontmatter + markdown). Populated only by
-	// the materialization step once an outputPath and final fetchedAt are settled;
-	// never persisted to manifest.jsonl. See PageOutput.
-	rendered?: string;
 };
 
-// A success record that has an outputPath assigned but is not yet serialized.
+// The three pipeline stages are distinct constructed types, not optional fields
+// promoted in place on one shared object. Each stage transition (assign paths,
+// materialize) builds a new value, so the type checker enforces stage ordering
+// and no caller can hold a pre-promotion reference that observes post-promotion
+// state. PageSuccess has no outputPath/rendered; PathedPage adds the assigned
+// path and link-rewritten markdown; PageOutput adds the settled serialization.
 export type PathedPage = PageSuccess & { outputPath: string };
 
 // A success record promoted to the output stage: it has a concrete outputPath
@@ -258,6 +258,12 @@ export type PageFailure = PageBase & {
 };
 
 export type PageRecord = PageSuccess | PageFailure;
+
+// The shape of a record after a full run: a written success is a PageOutput, a
+// success dropped beyond --max stays a PageSuccess, a failure stays a PageFailure.
+// runPipeline returns these and the manifest is built from them, so a written
+// success carries its outputPath/rendered without any union-narrowing dance.
+export type RunRecord = PageOutput | PageRecord;
 
 export type RunSummary = {
 	status: RunStatus;
@@ -337,6 +343,6 @@ export type RefreshSummary = {
 };
 
 export type PipelineResult = {
-	records: PageRecord[];
+	records: RunRecord[];
 	summary: RunSummary;
 };

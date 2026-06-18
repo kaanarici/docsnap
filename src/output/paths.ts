@@ -1,35 +1,43 @@
 import { createHash } from "node:crypto";
 import { relative } from "node:path";
-import { hasOutputPath, isPageSuccess } from "../core/records.ts";
 import { safeDecode } from "../core/text.ts";
-import type { PageRecord, PageSuccess } from "../core/types.ts";
+import type { PageSuccess, PathedPage } from "../core/types.ts";
 import { urlWithoutFragmentAndQuery } from "../core/url.ts";
 
-export function assignOutputPaths(records: PageRecord[]): void {
-	const ok = records.filter(isPageSuccess);
-	const prefix = pathPrefix(ok);
+// Pure stage transition: each input success becomes a new PathedPage carrying its
+// assigned outputPath. The source records are never mutated, so a reference held
+// before this call still sees a PageSuccess without an outputPath.
+export function assignOutputPaths(records: PageSuccess[]): PathedPage[] {
+	const prefix = pathPrefix(records);
 	const byBase = new Map<string, PageSuccess[]>();
-	for (const record of ok) {
+	for (const record of records) {
 		const base = basePath(record.finalUrl, prefix);
 		const group = byBase.get(base) ?? [];
 		group.push(record);
 		byBase.set(base, group);
 	}
 
+	const paths = new Map<PageSuccess, string>();
 	for (const [base, group] of byBase) {
 		const sorted = [...group].sort((a, b) =>
 			`${a.finalUrl}\0${a.url}`.localeCompare(`${b.finalUrl}\0${b.url}`),
 		);
 		for (const record of sorted) {
-			record.outputPath =
-				group.length === 1 ? base : withSuffix(base, shortHash(record.url));
+			paths.set(
+				record,
+				group.length === 1 ? base : withSuffix(base, shortHash(record.url)),
+			);
 		}
 	}
+	return records.map((record) => ({
+		...record,
+		outputPath: paths.get(record)!,
+	}));
 }
 
-export function pathMap(records: PageRecord[]): Map<string, string> {
+export function pathMap(records: PathedPage[]): Map<string, string> {
 	const map = new Map<string, string>();
-	for (const record of records.filter(hasOutputPath)) {
+	for (const record of records) {
 		for (const url of urlAliases(record)) {
 			map.set(urlWithoutFragmentAndQuery(url), record.outputPath);
 		}

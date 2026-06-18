@@ -6,7 +6,7 @@ import { buildPipelineConfig, parseArgs } from "../src/cli/args.ts";
 import { runCli } from "../src/cli/index.ts";
 import { dedupeRecords } from "../src/core/dedupe.ts";
 import { identityKeys } from "../src/core/identity.ts";
-import type { PageSuccess } from "../src/core/types.ts";
+import type { PageOutput, PageSuccess } from "../src/core/types.ts";
 import { setFetchTransportForTest } from "../src/fetch/fetcher.ts";
 import { installAgentFiles } from "../src/output/agent-files.ts";
 import { rewriteLocalLinks } from "../src/output/links.ts";
@@ -116,12 +116,12 @@ describe("record deduplication", () => {
 
 describe("summary quality accounting", () => {
 	test("counts low-quality warnings for written pages without exposing robots defaults", () => {
-		const thinPage = {
-			...page("https://docs.example.com/thin", "html", "short"),
+		const thinPage = output("https://docs.example.com/thin", {
 			qualityReasons: ["thin content"],
 			outputPath: "docs-example-com/thin.md",
-		};
+		});
 		const lowQualitySummary = buildSummary(
+			[thinPage],
 			[thinPage],
 			parsedPage,
 			1,
@@ -136,18 +136,20 @@ describe("summary quality accounting", () => {
 	});
 
 	test("ignores low-quality unwritten ok records beyond max", () => {
-		const thinPage = {
-			...page("https://docs.example.com/thin", "html", "short"),
+		const thinPage = output("https://docs.example.com/thin", {
 			qualityReasons: ["thin content"],
 			outputPath: "docs-example-com/thin.md",
-		};
+		});
 		const excessUnwritten = {
 			...page("https://docs.example.com/excess", "html", "thin body"),
 			confidence: 0.5,
 			qualityReasons: ["thin content"],
 		};
+		// excessUnwritten is in the attempted records but never became a PageOutput
+		// (beyond --max), so it must not inflate any written-corpus count.
 		const withExcess = buildSummary(
 			[thinPage, excessUnwritten],
+			[thinPage],
 			parsedPage,
 			2,
 			0,
@@ -161,12 +163,12 @@ describe("summary quality accounting", () => {
 	});
 
 	test("surfaces ignoreRobots only when requested", () => {
-		const thinPage = {
-			...page("https://docs.example.com/thin", "html", "short"),
+		const thinPage = output("https://docs.example.com/thin", {
 			qualityReasons: ["thin content"],
 			outputPath: "docs-example-com/thin.md",
-		};
+		});
 		const ignoreRobotsSummary = buildSummary(
+			[thinPage],
 			[thinPage],
 			{ ...parsedPage, ignoreRobots: true },
 			1,
@@ -180,11 +182,10 @@ describe("summary quality accounting", () => {
 
 describe("rendered page metadata", () => {
 	test("names low-quality reasons in frontmatter only when present", () => {
-		const thinPage = {
-			...page("https://docs.example.com/thin", "html", "short"),
+		const thinPage = output("https://docs.example.com/thin", {
 			qualityReasons: ["thin content"],
 			outputPath: "docs-example-com/thin.md",
-		};
+		});
 		expect(renderPage(thinPage)).toContain("thin content");
 		expect(
 			renderPage(page("https://docs.example.com/ok", "html", "clean body")),
@@ -194,12 +195,12 @@ describe("rendered page metadata", () => {
 
 describe("agent navigation files", () => {
 	test("updates an existing AGENTS.md with a docsnap pointer", async () => {
-		const thinPage = {
-			...page("https://docs.example.com/thin", "html", "short"),
+		const thinPage = output("https://docs.example.com/thin", {
 			qualityReasons: ["thin content"],
 			outputPath: "docs-example-com/thin.md",
-		};
+		});
 		const lowQualitySummary = buildSummary(
+			[thinPage],
 			[thinPage],
 			parsedPage,
 			1,
@@ -221,12 +222,12 @@ describe("agent navigation files", () => {
 	});
 
 	test("does not follow a symlinked AGENTS.md outside the output dir", async () => {
-		const thinPage = {
-			...page("https://docs.example.com/thin", "html", "short"),
+		const thinPage = output("https://docs.example.com/thin", {
 			qualityReasons: ["thin content"],
 			outputPath: "docs-example-com/thin.md",
-		};
+		});
 		const lowQualitySummary = buildSummary(
+			[thinPage],
 			[thinPage],
 			parsedPage,
 			1,
@@ -286,8 +287,7 @@ describe("CLI JSON output", () => {
 
 describe("local link rewriting", () => {
 	test("rewrites prose links without mutating code examples", () => {
-		const linkRecord = {
-			...page("https://docs.example.com/a", "html", ""),
+		const linkRecord = output("https://docs.example.com/a", {
 			outputPath: "a.md",
 			markdown: [
 				"See [Install](https://docs.example.com/b#install) and [Plain](https://docs.example.com/b).",
@@ -298,11 +298,11 @@ describe("local link rewriting", () => {
 				"",
 				"Inline `[code](https://docs.example.com/b)` stays.",
 			].join("\n"),
-		};
+		});
 		const rewritten = rewriteLocalLinks(
 			linkRecord,
 			new Map([["https://docs.example.com/b", "b.md"]]),
-		);
+		).markdown;
 		expect(rewritten).toContain("[Install](./b.md#install)");
 		expect(rewritten).toContain("[Plain](./b.md)");
 		expect(rewritten).toContain("[Example](https://docs.example.com/b)");
@@ -310,13 +310,12 @@ describe("local link rewriting", () => {
 	});
 
 	test("absolutizes uncaptured relative internal links", () => {
-		const danglingRecord = {
-			...page("https://docs.example.com/guide/intro", "html", ""),
+		const danglingRecord = output("https://docs.example.com/guide/intro", {
 			outputPath: "guide/intro.md",
 			markdown:
 				"Relative [Next](../setup/install) and root [API](/api/v2), plus external [GitHub](https://github.com/o/r).",
-		};
-		const dangling = rewriteLocalLinks(danglingRecord, new Map());
+		});
+		const dangling = rewriteLocalLinks(danglingRecord, new Map()).markdown;
 		expect(dangling).toContain(
 			"[Next](https://docs.example.com/setup/install)",
 		);
@@ -333,9 +332,9 @@ describe("output path assignment", () => {
 			page(`https://x.example.com/${longA}`, "html", "# t"),
 			page(`https://x.example.com/${longB}`, "html", "# t"),
 		];
-		assignOutputPaths(longRecords);
-		const longPathA = longRecords[0]?.outputPath ?? "";
-		const longPathB = longRecords[1]?.outputPath ?? "";
+		const longPathed = assignOutputPaths(longRecords);
+		const longPathA = longPathed[0]?.outputPath ?? "";
+		const longPathB = longPathed[1]?.outputPath ?? "";
 		const longSegment = longPathA.split("/").pop() ?? "";
 		expect(longSegment.length).toBeLessThanOrEqual(200);
 		expect(longPathA).not.toBe(longPathB);
@@ -384,5 +383,17 @@ function page(url: string, extractor: "html" | "markdown", markdown: string) {
 		extractor,
 		confidence: 1,
 		qualityReasons: [],
+	};
+}
+
+function output(
+	url: string,
+	overrides: Partial<PageOutput> & { outputPath: string },
+): PageOutput {
+	const base = page(url, "html", overrides.markdown ?? "short");
+	return {
+		...base,
+		rendered: renderPage({ ...base, ...overrides }),
+		...overrides,
 	};
 }

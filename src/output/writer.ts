@@ -20,11 +20,10 @@ import {
 	isInsideOrSame,
 	realPathIsInside,
 } from "../core/fs-safety.ts";
-import { isMaterialized } from "../core/records.ts";
 import type {
 	PageOutput,
-	PageRecord,
 	PipelineConfig,
+	RunRecord,
 	RunSummary,
 } from "../core/types.ts";
 import { installAgentFiles } from "./agent-files.ts";
@@ -35,6 +34,15 @@ import { agentReadme, treeText } from "./readme.ts";
 export type WriteStats = {
 	pageWrites: number;
 	skippedWrites: number;
+};
+
+// The write stage returns new PageOutput values with the measured writeMs settled
+// into timings, alongside the counts. The manifest is built from `outputs`, so the
+// persisted write timing is the value produced by the write rather than a field
+// back-patched onto an already-consumed record.
+export type WriteResult = {
+	outputs: PageOutput[];
+	stats: WriteStats;
 };
 
 export async function prepareOutput(config: PipelineConfig): Promise<void> {
@@ -80,23 +88,26 @@ export function releaseOutputLock(lock: DirLock | undefined): Promise<void> {
 }
 
 export async function writePages(
-	records: PageRecord[],
+	outputs: PageOutput[],
 	config: PipelineConfig,
 	onPageDone?: () => void,
-): Promise<WriteStats> {
-	if (config.dryRun) return { pageWrites: 0, skippedWrites: 0 };
+): Promise<WriteResult> {
 	const stats: WriteStats = { pageWrites: 0, skippedWrites: 0 };
-	await runWrites(records.filter(isMaterialized), async (record) => {
-		const wrote = await writePage(record, config);
+	if (config.dryRun) return { outputs, stats };
+	const settled = new Array<PageOutput>(outputs.length);
+	await runWrites([...outputs.entries()], async ([index, output]) => {
+		const { record, wrote } = await writePage(output, config);
+		settled[index] = record;
 		if (wrote) stats.pageWrites++;
 		else stats.skippedWrites++;
 		onPageDone?.();
 	});
-	return stats;
+	return { outputs: settled, stats };
 }
 
 export async function writeRunFiles(
-	records: PageRecord[],
+	records: RunRecord[],
+	outputs: PageOutput[],
 	summary: RunSummary,
 	config: PipelineConfig,
 ): Promise<void> {
@@ -106,8 +117,8 @@ export async function writeRunFiles(
 	const files: Array<readonly [file: string, body: string]> = [
 		[runFiles.manifest, manifestLines(records)],
 		[runFiles.summary, summaryJson(summary)],
-		[runFiles.agentReadme, agentReadme(records, summary)],
-		[runFiles.tree, treeText(records)],
+		[runFiles.agentReadme, agentReadme(outputs, summary)],
+		[runFiles.tree, treeText(outputs)],
 	];
 	await runWrites(files, ([file, body]) =>
 		atomicWrite(join(config.outDir, file), body, config.outDir),
@@ -136,8 +147,11 @@ async function writePage(record: PageOutput, config: PipelineConfig) {
 	const body = record.rendered;
 	const wrote = (await existingBody(path)) !== body;
 	if (wrote) await atomicWrite(path, body, config.outDir);
-	record.timings.writeMs = performance.now() - started;
-	return wrote;
+	const writeMs = performance.now() - started;
+	return {
+		wrote,
+		record: { ...record, timings: { ...record.timings, writeMs } },
+	};
 }
 
 async function existingBody(path: string) {

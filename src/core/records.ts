@@ -2,22 +2,17 @@ import type {
 	PageOutput,
 	PageRecord,
 	PageSuccess,
-	PathedPage,
+	RunRecord,
 } from "./types.ts";
 
 export function isPageSuccess(record: PageRecord): record is PageSuccess {
 	return record.ok;
 }
 
-// A success record that has been assigned an outputPath but not yet rendered.
-// Path-stage consumers (link map, fetchedAt preservation) use this; only the
-// materialization step promotes these to PageOutput by attaching `rendered`.
-export function hasOutputPath(record: PageRecord): record is PathedPage {
-	return record.ok && Boolean(record.outputPath);
-}
-
-export function isMaterialized(record: PageRecord): record is PageOutput {
-	return (
-		record.ok && Boolean(record.outputPath) && record.rendered !== undefined
-	);
+// Discriminates a finished run record: a written-to-disk page (PageOutput) from a
+// failure or a success dropped beyond --max. Unlike the removed stage predicates,
+// this gates a genuine union of distinct constructed values, not in-place field
+// promotion on one shared object.
+export function isWritten(record: RunRecord): record is PageOutput {
+	return record.ok && "rendered" in record;
 }

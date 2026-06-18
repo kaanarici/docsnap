@@ -1,20 +1,10 @@
-import { hasOutputPath } from "../core/records.ts";
-import type {
-	PageRecord,
-	PageSuccess,
-	PathedPage,
-	RunSummary,
-} from "../core/types.ts";
+import type { PageOutput, PathedPage, RunSummary } from "../core/types.ts";
 import { isLowQuality, isQualityWarning } from "../report/summary.ts";
 import { runFiles } from "./files.ts";
 
-export function agentReadme(
-	records: PageRecord[],
-	summary: RunSummary,
-): string {
+export function agentReadme(pages: PageOutput[], summary: RunSummary): string {
 	// quality lists describe the written corpus only — a page beyond --max that was
 	// never written must not appear under low-quality/quality-warning sections
-	const pages = records.filter(hasOutputPath);
 	const lowQuality = pages.filter(isLowQuality).slice(0, 10);
 	const qualityWarnings = pages.filter(isQualityWarning).slice(0, 10);
 	const errors = summary.errors.slice(0, 10);
@@ -93,13 +83,13 @@ ${section(
 	return `${body.trim().replace(/\n{3,}/g, "\n\n")}\n`;
 }
 
-export function treeText(records: PageRecord[]): string {
+export function treeText(pages: PageOutput[]): string {
 	const root = new Map<string, Node>();
 	for (const file of [
 		runFiles.agentReadme,
 		runFiles.manifest,
 		runFiles.summary,
-		...records.filter(hasOutputPath).map((record) => record.outputPath),
+		...pages.map((record) => record.outputPath),
 		runFiles.tree,
 	]) {
 		addPath(root, file);
@@ -115,10 +105,9 @@ function section(title: string, lines: string[]) {
 	return `## ${title}\n\n${lines.join("\n")}\n`;
 }
 
-function line(record: PageSuccess) {
-	const path = record.outputPath ? `${record.outputPath} ` : "";
+function line(record: PathedPage) {
 	const reasons = record.qualityReasons.join(", ") || "low confidence";
-	return `- ${path}${record.finalUrl}: ${reasons}`;
+	return `- ${record.outputPath} ${record.finalUrl}: ${reasons}`;
 }
 
 function largePages(records: PathedPage[]) {

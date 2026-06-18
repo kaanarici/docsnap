@@ -1,14 +1,23 @@
 import { replaceMarkdownLinks } from "../core/markdown.ts";
-import type { PageSuccess } from "../core/types.ts";
+import { hashContent } from "../core/snapshot.ts";
+import type { PathedPage } from "../core/types.ts";
 import { urlWithoutFragmentAndQuery } from "../core/url.ts";
 import { relativeMarkdownLink } from "./paths.ts";
 
+// Stage transition: returns a new PathedPage whose markdown has internal links
+// rewritten to local paths (trimmed) and whose contentHash matches that final
+// markdown. The input is not mutated, so the link map's view of every record is
+// stable while this runs across the whole set.
 export function rewriteLocalLinks(
-	record: PageSuccess,
+	record: PathedPage,
 	map: Map<string, string>,
-): string {
+): PathedPage {
+	const markdown = rewriteMarkdown(record, map).trim();
+	return { ...record, markdown, contentHash: hashContent(markdown) };
+}
+
+function rewriteMarkdown(record: PathedPage, map: Map<string, string>): string {
 	const fromPath = record.outputPath;
-	if (!fromPath) return record.markdown;
 	return replaceMarkdownLinks(record.markdown, ({ text, href, suffix }) => {
 		try {
 			const resolved = new URL(href, record.finalUrl);

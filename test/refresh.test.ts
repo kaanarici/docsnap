@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { buildPipelineConfig, parseArgs } from "../src/cli/args.ts";
 import { runPipeline } from "../src/core/pipeline.ts";
+import { isWritten } from "../src/core/records.ts";
 import { hashContent } from "../src/core/snapshot.ts";
 import type { PageOutput } from "../src/core/types.ts";
 import { setFetchTransportForTest } from "../src/fetch/fetcher.ts";
@@ -429,13 +430,12 @@ function outputFor(
 	suffix: string,
 ): PageOutput {
 	const record = records.find(
-		(item) => item.ok && item.finalUrl.endsWith(suffix),
+		(item) => isWritten(item) && item.finalUrl.endsWith(suffix),
 	);
-	expect(record?.ok && record.outputPath).toBeTruthy();
-	if (!record?.ok || !record.outputPath) {
+	if (!record || !isWritten(record)) {
 		throw new Error("expected output record");
 	}
-	return record as PageOutput;
+	return record;
 }
 
 async function rejectsWith(run: () => Promise<unknown>, pattern: RegExp) {

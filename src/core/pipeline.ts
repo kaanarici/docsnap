@@ -27,13 +27,13 @@ import {
 import { buildSummary } from "../report/summary.ts";
 import { dedupeRecords } from "./dedupe.ts";
 import { applyInlineState } from "./inline-state.ts";
-import { hasOutputPath, isMaterialized, isPageSuccess } from "./records.ts";
+import { isPageSuccess } from "./records.ts";
 import {
 	type RefreshCounters,
 	refreshCounters,
 	refreshSummary,
 } from "./refresh.ts";
-import { hashContent, snapshotStats } from "./snapshot.ts";
+import { snapshotStats } from "./snapshot.ts";
 import type {
 	DiscoveredUrl,
 	FetchedUrl,
@@ -88,14 +88,11 @@ async function runLocked(
 	}
 	const finalRecords = dedupe.records;
 
-	assignOutputPaths(outputCandidates(finalRecords, config));
-	const links = pathMap(finalRecords);
-	for (const record of finalRecords) {
-		if (!record.ok) continue;
-		record.markdown = rewriteLocalLinks(record, links).trim();
-		record.contentHash = hashContent(record.markdown);
-	}
-	const outputs = await materializeOutputs(finalRecords, prior, config);
+	const candidates = outputCandidates(finalRecords, config);
+	const pathed = assignOutputPaths(candidates);
+	const links = pathMap(pathed);
+	const rewritten = pathed.map((record) => rewriteLocalLinks(record, links));
+	const outputs = await materializeOutputs(rewritten, prior, config);
 	const snapshot = snapshotStats(
 		outputs.map((record) => ({
 			path: record.outputPath,
@@ -105,19 +102,29 @@ async function runLocked(
 	const refreshReport = await refreshSummary(
 		prior,
 		finalRecords,
+		outputs,
 		attempted,
 		config,
 		refresh,
 	);
 
 	progress?.(config.dryRun ? "docsnap: finalizing" : "docsnap: writing output");
-	const writeStats = await writePages(finalRecords, config, () => {
+	const written = await writePages(outputs, config, () => {
 		firstPageMs ??= performance.now() - started;
 	});
-	refreshReport.skippedWrites = writeStats.skippedWrites;
+	refreshReport.skippedWrites = written.stats.skippedWrites;
 	await pruneCache(config);
+	// Merge the settled outputs (rewritten markdown, settled writeMs, rendered)
+	// back onto the attempted-record list by source identity so the manifest and
+	// the returned records carry the materialized state without any in-place
+	// mutation of the original records.
+	const settled = settledBySource(candidates, written.outputs);
+	const manifestRecords = finalRecords.map(
+		(record) => settled.get(record) ?? record,
+	);
 	const summary = buildSummary(
 		finalRecords,
+		written.outputs,
 		config,
 		attempted.length,
 		dedupe.deduped,
@@ -127,8 +134,20 @@ async function runLocked(
 		refreshReport,
 		cacheSummary(config),
 	);
-	await writeRunFiles(finalRecords, summary, config);
-	return { records: finalRecords, summary };
+	await writeRunFiles(manifestRecords, written.outputs, summary, config);
+	return { records: manifestRecords, summary };
+}
+
+function settledBySource(
+	candidates: PageSuccess[],
+	outputs: PageOutput[],
+): Map<PageRecord, PageOutput> {
+	const map = new Map<PageRecord, PageOutput>();
+	candidates.forEach((source, index) => {
+		const output = outputs[index];
+		if (output) map.set(source, output);
+	});
+	return map;
 }
 async function fetchAndExtract(
 	discovered: DiscoveredUrl[],
@@ -253,55 +272,52 @@ function outputCandidates(records: PageRecord[], config: PipelineConfig) {
 	const ok = records.filter(isPageSuccess);
 	return config.maxExplicit ? ok.slice(0, config.max) : ok;
 }
-// The single point where a path-assigned success record becomes a PageOutput:
-// it settles fetchedAt (preserving the prior run's timestamp when the rendered
-// body is otherwise unchanged on disk) and attaches the canonical `rendered`
-// string in one pass. Every downstream consumer reads record.rendered, so the
-// snapshot hash, the written file, and the manifest outputHash are the same
-// bytes by construction rather than by call order.
+// The single stage transition where a PathedPage becomes a PageOutput: it settles
+// fetchedAt (preserving the prior run's timestamp when the rendered body is
+// otherwise unchanged on disk) and attaches the canonical `rendered` string in one
+// constructed value. Every downstream consumer reads record.rendered, so the
+// snapshot hash, the written file, and the manifest outputHash are the same bytes
+// by construction rather than by call order.
 async function materializeOutputs(
-	records: PageRecord[],
+	records: PathedPage[],
 	prior: PriorState,
 	config: PipelineConfig,
 ): Promise<PageOutput[]> {
-	const pathed = records.filter(hasOutputPath);
-	await Promise.all(
-		pathed.map(async (record) => {
-			record.rendered = await renderWithPreservedFetchedAt(
-				record,
-				prior,
-				config,
-			);
+	return Promise.all(
+		records.map(async (record) => {
+			const { fetchedAt, rendered } = await settleRender(record, prior, config);
+			return { ...record, fetchedAt, rendered };
 		}),
 	);
-	return pathed.filter(isMaterialized);
 }
 
-// Renders the record, preferring the prior run's fetchedAt when doing so yields a
-// body byte-identical to what is already on disk. The candidate render that wins
-// is the one returned, so the fetchedAt decision and the canonical serialization
-// can never disagree.
-async function renderWithPreservedFetchedAt(
+// Pure decision: prefer the prior run's fetchedAt when rendering with it yields a
+// body byte-identical to what is already on disk. Both candidate bodies are
+// computed without mutating the record, so no concurrent reader can observe an
+// intermediate fetchedAt across the disk read, and the winning fetchedAt always
+// matches the winning serialization.
+async function settleRender(
 	record: PathedPage,
 	prior: PriorState,
 	config: PipelineConfig,
-): Promise<string> {
+): Promise<{ fetchedAt: string; rendered: string }> {
 	const previous = prior.enabled ? prior.find(record) : undefined;
+	const current = { fetchedAt: record.fetchedAt, rendered: renderPage(record) };
 	if (
 		!previous?.fetchedAt ||
 		previous.outputPath !== record.outputPath ||
 		previous.contentHash !== record.contentHash
 	) {
-		return renderPage(record);
+		return current;
 	}
-	const fetchedAt = record.fetchedAt;
-	record.fetchedAt = previous.fetchedAt;
-	const preserved = renderPage(record);
-	if ((await readPriorOutput(config, previous.outputPath)) === preserved) {
-		return preserved;
-	}
-	record.fetchedAt = fetchedAt;
-	return renderPage(record);
+	const preserved = {
+		fetchedAt: previous.fetchedAt,
+		rendered: renderPage(record, previous.fetchedAt),
+	};
+	return (await readPriorOutput(config, previous.outputPath)) ===
+		preserved.rendered
+		? preserved
+		: current;
 }
 function candidateKey(raw: string) {
 	const url = new URL(urlWithoutFragmentAndQuery(raw));

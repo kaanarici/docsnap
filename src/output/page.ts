@@ -1,17 +1,19 @@
 import type { PageSuccess } from "../core/types.ts";
 
-export function renderPage(record: PageSuccess): string {
-	return `${frontmatter(record)}\n${record.markdown}\n`;
+// fetchedAt may be overridden so callers can render a candidate body for a prior
+// run's timestamp without mutating the record (see fetchedAt preservation).
+export function renderPage(record: PageSuccess, fetchedAt?: string): string {
+	return `${frontmatter(record, fetchedAt ?? record.fetchedAt)}\n${record.markdown}\n`;
 }
 
-function frontmatter(record: PageSuccess) {
+function frontmatter(record: PageSuccess, fetchedAt: string) {
 	const fields = {
 		title: record.title ?? "",
 		url: record.url,
 		finalUrl: record.finalUrl,
 		status: record.status,
 		source: record.source,
-		fetchedAt: record.fetchedAt,
+		fetchedAt,
 		extractor: record.extractor,
 		confidence: record.confidence,
 		...(record.qualityReasons.length

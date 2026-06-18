@@ -57,7 +57,11 @@ function freshSeconds(cacheControl: string): number | undefined {
 		contentType: "text/html",
 		cacheControl,
 	} as Parameters<typeof freshUntilFor>[0]);
-	return until ? Math.round((until.getTime() - Date.now()) / 1000) : undefined;
+	// clamp to non-negative: a sub-millisecond tick between freshUntilFor's
+	// internal Date.now() and this one can round to -0 for s-maxage=0.
+	return until
+		? Math.max(0, Math.round((until.getTime() - Date.now()) / 1000))
+		: undefined;
 }
 
 function parsePageConfig(url: string): PipelineConfig {

@@ -1,6 +1,11 @@
-import type { DiscoveredUrl, PipelineConfig } from "../core/types.ts";
+import type {
+	DiscoveredUrl,
+	DiscoverySource,
+	FetchResult,
+	PipelineConfig,
+} from "../core/types.ts";
 import { isLanguageSelector, looksLikeAppShell } from "../extract/app-shell.ts";
-import { fetchText } from "../fetch/fetcher.ts";
+import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
 import { filteredNonPageResult, robotsBlockedResult } from "../fetch/result.ts";
 import { discoverAssetPages } from "./assets.ts";
 import { canonicalOriginSeed, literalAllowPrefix } from "./blocked-seed.ts";
@@ -31,55 +36,199 @@ import {
 	scopeFromSeed,
 } from "./url.ts";
 
+// Discovery has two distinct stages. First the *resolution* stage decides which
+// public artifact a seed actually addresses: a single page, a robots-blocked
+// origin's carve-outs, an llms.txt corpus, a feed, or an ordinary HTML seed.
+// Each resolver either returns a complete corpus (short-circuit) or yields the
+// resolved HTML seed for the second stage. The second stage is the *probe
+// runner*: a fixed-order list of probes that accumulate scoped pages into a
+// shared DiscoveryContext until one declares the corpus complete or max is hit.
 export async function discover(
 	config: PipelineConfig,
 ): Promise<DiscoveredUrl[]> {
 	const inputSeed = seedInputUrl(config.seedUrl);
 	const inputUrl = new URL(inputSeed);
 	const seedRobots = await loadRobots(inputUrl.origin, config);
-	if (config.pageOnly) {
-		const pageSeed = pageSeedUrl(config.seedUrl, inputSeed);
-		if (!seedRobots.allowed(pageSeed)) {
-			return [
-				{
-					url: pageSeed,
-					source: "seed",
-					fetched: robotsBlockedResult(pageSeed),
-				},
-			];
-		}
-		return [{ url: pageSeed, source: "seed" }];
-	}
+
+	if (config.pageOnly) return pageOnlyDiscovery(config, inputSeed, seedRobots);
+
 	const robotsByOrigin: LlmsCorpusOptions["robotsByOrigin"] = new Map([
 		[inputUrl.origin, seedRobots],
 	]);
 	const llmsOptions: LlmsCorpusOptions = { cache: new Map(), robotsByOrigin };
-	const allowResource = config.ignoreRobots
+	const allowResource: FetchUrlGate | undefined = config.ignoreRobots
 		? undefined
-		: (url: string) => resourceAllowed(url, config, robotsByOrigin);
-	if (!seedRobots.allowed(inputSeed)) {
-		if (seedRobots.unreachable) {
-			const { moved, failure } = await canonicalOriginSeed(
-				inputSeed,
-				config,
-				allowResource,
-			);
-			if (moved) return discover({ ...config, seedUrl: moved });
-			return [
-				{
-					url: inputSeed,
-					source: "seed",
-					fetched: failure ?? robotsBlockedResult(inputSeed),
-				},
-			];
-		}
-		return disallowedSeedDiscovery(inputSeed, seedRobots, config, llmsOptions);
+		: (url) => resourceAllowed(url, config, robotsByOrigin);
+
+	const blocked = await resolveBlockedSeed(
+		config,
+		inputSeed,
+		seedRobots,
+		llmsOptions,
+		allowResource,
+	);
+	if (blocked) return blocked;
+
+	const corpus = await resolveLlmsCorpus(config, inputSeed, llmsOptions);
+	if ("done" in corpus) return corpus.done;
+
+	const seedResponse = await fetchText(
+		inputSeed,
+		config,
+		undefined,
+		undefined,
+		allowResource,
+	);
+	if (!seedResponse.ok) {
+		return [{ url: inputSeed, source: "seed", fetched: seedResponse }];
 	}
+
+	const feed = await resolveFeedSeed(
+		config,
+		inputSeed,
+		seedResponse,
+		robotsByOrigin,
+		allowResource,
+	);
+	if (feed) return feed;
+
+	const resolved = await resolveHtmlSeed(
+		config,
+		inputSeed,
+		seedResponse,
+		corpus.llmsOut,
+		llmsOptions,
+		robotsByOrigin,
+	);
+	if ("done" in resolved) return resolved.done;
+
+	return runProbes(resolved.context);
+}
+
+type DiscoveryContext = {
+	config: PipelineConfig;
+	inputSeed: string;
+	seed: string;
+	scope: string;
+	robots: Robots;
+	allowed: (url: string) => boolean;
+	allowResource: FetchUrlGate | undefined;
+	llmsOptions: LlmsCorpusOptions;
+	seedResponse: FetchResult;
+	seedLinks: string[];
+	feedLinks: string[];
+	seedIsShell: boolean;
+	seedIsLanguageSelector: boolean;
+	finalSeed: string | undefined;
+	out: DiscoveredUrl[];
+	seen: Set<string>;
+	// When true, add() refuses to exceed config.max. The initial seed/llms probes
+	// run with this off so a complete llms corpus is captured intact; the bounded
+	// probes that follow turn it on.
+	limitToMax: boolean;
+	// Set by the sitemap probe; a rich sitemap suppresses feed probing.
+	richSitemap: boolean;
+	add: AddDiscovered;
+	atMax: () => boolean;
+	remaining: () => number;
+};
+
+type AddDiscovered = (
+	raw: string | undefined,
+	source: DiscoverySource,
+	fetched?: DiscoveredUrl["fetched"],
+	metadata?: DiscoveredUrl["metadata"],
+) => boolean;
+
+// A probe inspects the context, adds scoped pages, and returns true to stop the
+// runner (the corpus is complete) or false to fall through to the next probe.
+type DiscoveryProbe = (ctx: DiscoveryContext) => Promise<boolean> | boolean;
+
+// Probe order IS the precedence hierarchy. Each entry runs in turn; the first
+// that returns true ends discovery. Each probe self-limits against config.max
+// (via ctx.add and its own guards), so the runner imposes no global cap — the
+// terminal asset/fallback probes must still run even once the corpus is full.
+const probes: DiscoveryProbe[] = [
+	addSeedPage,
+	probeLlmsOverNav,
+	probeNavAndCrawl,
+	probeSitemap,
+	probeFeeds,
+	probeLlmsBackfill,
+	probeRelNext,
+	probeScopedCrawl,
+	probeAssetMining,
+	ensureSeedFallback,
+];
+
+async function runProbes(ctx: DiscoveryContext): Promise<DiscoveredUrl[]> {
+	for (const probe of probes) {
+		if (await probe(ctx)) break;
+	}
+	return ctx.out;
+}
+
+function pageOnlyDiscovery(
+	config: PipelineConfig,
+	inputSeed: string,
+	seedRobots: Robots,
+): DiscoveredUrl[] {
+	const pageSeed = pageSeedUrl(config.seedUrl, inputSeed);
+	if (!seedRobots.allowed(pageSeed)) {
+		return [
+			{ url: pageSeed, source: "seed", fetched: robotsBlockedResult(pageSeed) },
+		];
+	}
+	return [{ url: pageSeed, source: "seed" }];
+}
+
+// Robots refuses the seed: either restart on a related canonical origin (apex →
+// www), or fall back to the disallowed-seed carve-out discovery. Returns a
+// complete corpus, or undefined when the seed is in fact allowed.
+async function resolveBlockedSeed(
+	config: PipelineConfig,
+	inputSeed: string,
+	seedRobots: Robots,
+	llmsOptions: LlmsCorpusOptions,
+	allowResource: FetchUrlGate | undefined,
+): Promise<DiscoveredUrl[] | undefined> {
+	if (seedRobots.allowed(inputSeed)) return undefined;
+	if (seedRobots.unreachable) {
+		const { moved, failure } = await canonicalOriginSeed(
+			inputSeed,
+			config,
+			allowResource,
+		);
+		if (moved) return discover({ ...config, seedUrl: moved });
+		return [
+			{
+				url: inputSeed,
+				source: "seed",
+				fetched: failure ?? robotsBlockedResult(inputSeed),
+			},
+		];
+	}
+	return disallowedSeedDiscovery(inputSeed, seedRobots, config, llmsOptions);
+}
+
+// llms.txt takes precedence over fetching the seed at all. The four shapes — an
+// explicit /llms.txt seed, scope-local corpus, root-fallback corpus, and the
+// "corpus is enough" cutoff — collapse here. Returns a complete corpus (done)
+// when an llms.txt corpus is strong enough to short-circuit, otherwise the
+// scope-local llmsOut so later redirect-fallback logic can compare against it.
+async function resolveLlmsCorpus(
+	config: PipelineConfig,
+	inputSeed: string,
+	llmsOptions: LlmsCorpusOptions,
+): Promise<{ done: DiscoveredUrl[] } | { llmsOut: DiscoveredUrl[] }> {
+	const inputUrl = new URL(inputSeed);
 	if (inputUrl.pathname.endsWith("/llms.txt")) {
-		return discoverLlmsCorpus(inputSeed, inputSeed, "/", config, {
-			...llmsOptions,
-			retryHttp: true,
-		});
+		return {
+			done: await discoverLlmsCorpus(inputSeed, inputSeed, "/", config, {
+				...llmsOptions,
+				retryHttp: true,
+			}),
+		};
 	}
 
 	const inputScope = scopeFromSeed(inputSeed);
@@ -103,45 +252,63 @@ export async function discover(
 			config,
 			llmsOptions,
 		);
-		if (rootLlmsOut.length > llmsOut.length) return rootLlmsOut;
+		if (rootLlmsOut.length > llmsOut.length) return { done: rootLlmsOut };
 	}
-	if (inputScope === "/" ? llmsOut.length > 0 : hasCorpus(llmsOut, config))
-		return llmsOut;
-	const seedResponse = await fetchText(
-		inputSeed,
+	if (inputScope === "/" ? llmsOut.length > 0 : hasCorpus(llmsOut, config)) {
+		return { done: llmsOut };
+	}
+	return { llmsOut };
+}
+
+// A seed that resolves to a feed (RSS/Atom) is its own corpus shape: walk the
+// feed entries rather than crawling. Returns the feed corpus, or undefined when
+// the seed is not a feed.
+async function resolveFeedSeed(
+	config: PipelineConfig,
+	inputSeed: string,
+	seedResponse: FetchResult,
+	robotsByOrigin: Map<string, Robots>,
+	allowResource: FetchUrlGate | undefined,
+): Promise<DiscoveredUrl[] | undefined> {
+	if (!isFeedResponse(seedResponse)) return undefined;
+	const feedSeed =
+		normalizeDiscoveryResourceUrl(seedResponse.finalUrl) ?? inputSeed;
+	const robots = await robotsForOrigin(
+		new URL(feedSeed).origin,
 		config,
-		undefined,
-		undefined,
-		allowResource,
+		robotsByOrigin,
 	);
-	if (!seedResponse.ok) {
-		return [{ url: inputSeed, source: "seed", fetched: seedResponse }];
+	const allowed = (url: string) => config.ignoreRobots || robots.allowed(url);
+	if (!allowed(feedSeed)) {
+		return [
+			{
+				url: feedSeed,
+				source: "seed",
+				fetched: robotsBlockedResult(seedResponse),
+			},
+		];
 	}
-	if (isFeedResponse(seedResponse)) {
-		const feedSeed =
-			normalizeDiscoveryResourceUrl(seedResponse.finalUrl) ?? inputSeed;
-		const robots = await robotsForOrigin(
-			new URL(feedSeed).origin,
-			config,
-			robotsByOrigin,
-		);
-		const allowed = (url: string) => config.ignoreRobots || robots.allowed(url);
-		if (!allowed(feedSeed)) {
-			return [
-				{
-					url: feedSeed,
-					source: "seed",
-					fetched: robotsBlockedResult(seedResponse),
-				},
-			];
-		}
-		return discoverFeed(feedSeed, feedSeed, scopeFromSeed(feedSeed), config, {
-			limit: config.max,
-			response: seedResponse,
-			accept: allowed,
-			allowResource,
-		});
-	}
+	return discoverFeed(feedSeed, feedSeed, scopeFromSeed(feedSeed), config, {
+		limit: config.max,
+		response: seedResponse,
+		accept: allowed,
+		allowResource,
+	});
+}
+
+// Resolve the final HTML seed: follow redirects, choose the crawl scope, gate on
+// robots, and try redirect-adjusted / root-fallback llms corpora that only
+// become reachable after the redirect. Either returns a complete corpus (done)
+// or the assembled DiscoveryContext for the probe runner.
+async function resolveHtmlSeed(
+	config: PipelineConfig,
+	inputSeed: string,
+	seedResponse: FetchResult,
+	llmsOut: DiscoveredUrl[],
+	llmsOptions: LlmsCorpusOptions,
+	robotsByOrigin: Map<string, Robots>,
+): Promise<{ done: DiscoveredUrl[] } | { context: DiscoveryContext }> {
+	const inputScope = scopeFromSeed(inputSeed);
 	const finalSeed = normalizeUrl(seedResponse.finalUrl);
 	const seed = finalSeed ?? inputSeed;
 	const seedLinks = discoverPageLinks(seedResponse.body, seedResponse.finalUrl);
@@ -160,14 +327,64 @@ export async function discover(
 	);
 	const allowed = (url: string) => config.ignoreRobots || robots.allowed(url);
 	if (!allowed(seed)) {
-		return [
-			{
-				url: seed,
-				source: "seed",
-				fetched: robotsBlockedResult(seedResponse),
-			},
-		];
+		return {
+			done: [
+				{
+					url: seed,
+					source: "seed",
+					fetched: robotsBlockedResult(seedResponse),
+				},
+			],
+		};
 	}
+
+	const redirected = await resolveRedirectAdjustedLlms(
+		config,
+		inputSeed,
+		inputScope,
+		seed,
+		scope,
+		llmsOut,
+		llmsOptions,
+	);
+	if (redirected) return { done: redirected };
+
+	const seedIsShell =
+		seedIsLanguageSelector || looksLikeAppShell(seedResponse.body);
+	const context = makeContext({
+		config,
+		seed,
+		scope,
+		robots,
+		allowed,
+		allowResource: config.ignoreRobots
+			? undefined
+			: (url) => resourceAllowed(url, config, robotsByOrigin),
+		llmsOptions,
+		seedResponse,
+		seedLinks,
+		feedLinks,
+		seedIsShell,
+		seedIsLanguageSelector,
+		finalSeed,
+		inputSeed,
+	});
+	return { context };
+}
+
+// After a redirect changes the effective seed or scope, an llms.txt corpus may
+// now resolve at the redirected location or the bare-product root. Returns that
+// corpus when it is strong enough to replace crawling, else undefined. llmsOut
+// is the original input-scope corpus the root fallback must beat.
+async function resolveRedirectAdjustedLlms(
+	config: PipelineConfig,
+	inputSeed: string,
+	inputScope: string,
+	seed: string,
+	scope: string,
+	llmsOut: DiscoveredUrl[],
+	llmsOptions: LlmsCorpusOptions,
+): Promise<DiscoveredUrl[] | undefined> {
 	if (seed !== inputSeed || scope !== inputScope) {
 		const redirectedLlmsOut = await discoverLlmsCorpus(
 			seed,
@@ -188,156 +405,237 @@ export async function discover(
 		);
 		if (rootLlmsOut.length > llmsOut.length) return rootLlmsOut;
 	}
-	const out: DiscoveredUrl[] = [];
-	const seen = new Set<string>(finalSeed ? [] : [inputSeed]);
-	let limitToMax = config.maxExplicit;
-	let seedIsShell = false;
+	return undefined;
+}
 
-	const add = (
-		raw: string | undefined,
-		source: DiscoveredUrl["source"],
-		fetched?: DiscoveredUrl["fetched"],
-		metadata?: DiscoveredUrl["metadata"],
-	) => {
-		if (limitToMax && out.length >= config.max) return false;
+function makeContext(
+	parts: Omit<
+		DiscoveryContext,
+		| "out"
+		| "seen"
+		| "limitToMax"
+		| "richSitemap"
+		| "add"
+		| "atMax"
+		| "remaining"
+	>,
+): DiscoveryContext {
+	const out: DiscoveredUrl[] = [];
+	const seen = new Set<string>(parts.finalSeed ? [] : [parts.inputSeed]);
+	const ctx = {
+		...parts,
+		out,
+		seen,
+		// Explicit max caps from the start; implicit max stays uncapped until the
+		// nav probe so a complete llms corpus is captured intact.
+		limitToMax: parts.config.maxExplicit,
+		richSitemap: false,
+	} as DiscoveryContext;
+	ctx.atMax = () => out.length >= ctx.config.max;
+	ctx.remaining = () => ctx.config.max - out.length;
+	ctx.add = (raw, source, fetched, metadata) => {
+		if (ctx.limitToMax && ctx.atMax()) return false;
 		const url = normalizeUrl(raw ?? "");
-		if (!url || !allowed(url)) return false;
+		if (!url || !ctx.allowed(url)) return false;
 		const before = out.length;
-		addDiscovered(out, seen, url, source, seed, scope, fetched, metadata);
+		addDiscovered(
+			out,
+			seen,
+			url,
+			source,
+			ctx.seed,
+			ctx.scope,
+			fetched,
+			metadata,
+		);
 		return out.length > before;
 	};
+	return ctx;
+}
 
-	seedIsShell = seedIsLanguageSelector || looksLikeAppShell(seedResponse.body);
-	if (!seedIsShell && finalSeed) add(seed, "seed", seedResponse);
-	if (!config.maxExplicit) {
-		const beforeLlms = out.length;
-		await addLlms(seed, config, add, llmsOptions);
-		if (out.length > beforeLlms) return out;
+function addSeedPage(ctx: DiscoveryContext): boolean {
+	if (!ctx.seedIsShell && ctx.finalSeed) {
+		ctx.add(ctx.seed, "seed", ctx.seedResponse);
 	}
+	return false;
+}
 
-	limitToMax = true;
-	if (seedResponse.ok) {
-		for (const url of discoverNav(seedResponse.body, seedResponse.finalUrl)) {
-			if (seedIsShell && normalizeUrl(url) === seed) continue;
-			add(url, "nav");
-			if (out.length >= config.max) break;
-		}
-		if (out.length < Math.min(config.max, 3)) {
-			for (const url of seedLinks) {
-				if (seedIsShell && normalizeUrl(url) === seed) continue;
-				add(url, "crawl");
-				if (out.length >= config.max) break;
-			}
+// llms.txt links that survive scope filtering outrank nav/crawl: when implicit
+// max gives no hard cap, a non-empty llms corpus is the whole answer.
+async function probeLlmsOverNav(ctx: DiscoveryContext): Promise<boolean> {
+	if (ctx.config.maxExplicit) return false;
+	const beforeLlms = ctx.out.length;
+	await addLlms(ctx);
+	ctx.limitToMax = true;
+	return ctx.out.length > beforeLlms;
+}
+
+function probeNavAndCrawl(ctx: DiscoveryContext): boolean {
+	ctx.limitToMax = true;
+	if (!ctx.seedResponse.ok) return false;
+	for (const url of discoverNav(
+		ctx.seedResponse.body,
+		ctx.seedResponse.finalUrl,
+	)) {
+		if (ctx.seedIsShell && normalizeUrl(url) === ctx.seed) continue;
+		ctx.add(url, "nav");
+		if (ctx.atMax()) break;
+	}
+	if (ctx.out.length < Math.min(ctx.config.max, 3)) {
+		for (const url of ctx.seedLinks) {
+			if (ctx.seedIsShell && normalizeUrl(url) === ctx.seed) continue;
+			ctx.add(url, "crawl");
+			if (ctx.atMax()) break;
 		}
 	}
+	return false;
+}
 
-	const beforeSitemap = out.length;
-	const sitemapRemaining = config.max - out.length;
-	const sitemapUrls = await discoverSitemaps(seed, robots.sitemaps, config, {
-		limit: config.max - out.length,
-		scope,
-		accept: (url) =>
-			!seen.has(url) && inScope(url, seed, scope) && allowed(url),
-		allowResource,
-	});
+async function probeSitemap(ctx: DiscoveryContext): Promise<boolean> {
+	const beforeSitemap = ctx.out.length;
+	const sitemapRemaining = ctx.remaining();
+	const sitemapUrls = await discoverSitemaps(
+		ctx.seed,
+		ctx.robots.sitemaps,
+		ctx.config,
+		{
+			limit: ctx.remaining(),
+			scope: ctx.scope,
+			accept: (url) =>
+				!ctx.seen.has(url) &&
+				inScope(url, ctx.seed, ctx.scope) &&
+				ctx.allowed(url),
+			allowResource: ctx.allowResource,
+		},
+	);
 	for (const url of sitemapUrls) {
-		add(url, "sitemap");
+		ctx.add(url, "sitemap");
 	}
-	const sitemapAdded = out.length - beforeSitemap;
+	const sitemapAdded = ctx.out.length - beforeSitemap;
 	const richSitemap =
 		sitemapRemaining > 0 &&
 		(sitemapAdded >= sitemapRemaining ||
 			sitemapAdded >= Math.min(sitemapRemaining, 5));
+	// Record richness for the feed probe; a rich sitemap suppresses feed probing.
+	ctx.richSitemap = richSitemap;
+	return false;
+}
 
-	if (!richSitemap && out.length < Math.min(config.max, 3)) {
-		for (const feedUrl of feedLinks.slice(0, 2)) {
-			if (allowResource && !(await allowResource(feedUrl))) continue;
-			const feedPages = await discoverFeed(feedUrl, seed, scope, config, {
-				limit: config.max - out.length,
-				accept: (url) => inScope(url, seed, scope) && allowed(url),
-				allowResource,
-			});
-			for (const page of feedPages) {
-				add(page.url, "feed", page.fetched, page.metadata);
-			}
-			if (out.length >= config.max) break;
-		}
+async function probeFeeds(ctx: DiscoveryContext): Promise<boolean> {
+	if (ctx.richSitemap || ctx.out.length >= Math.min(ctx.config.max, 3)) {
+		return false;
 	}
-
-	if (config.maxExplicit && out.length < config.max) {
-		await addLlms(seed, config, add, llmsOptions);
-	}
-
-	if (out.length < Math.min(config.max, 3)) {
-		for (const page of await discoverRelNextPages(
-			seedResponse.body,
-			seedResponse.finalUrl,
-			seed,
-			scope,
-			config,
+	for (const feedUrl of ctx.feedLinks.slice(0, 2)) {
+		if (ctx.allowResource && !(await ctx.allowResource(feedUrl))) continue;
+		const feedPages = await discoverFeed(
+			feedUrl,
+			ctx.seed,
+			ctx.scope,
+			ctx.config,
 			{
-				limit: config.max - out.length,
-				accept: (url) => inScope(url, seed, scope) && allowed(url),
-				allowResource,
-			},
-		)) {
-			add(page.url, page.source, page.fetched, page.metadata);
-		}
-	}
-
-	if (!seedIsLanguageSelector && out.length < config.max) {
-		for (const page of await crawlScoped(
-			seed,
-			scope,
-			config.max - out.length,
-			robots,
-			config,
-			seedResponse,
-			allowResource,
-		)) {
-			add(page.url, "crawl", page.fetched);
-		}
-	}
-
-	if (out.length <= 1 && seedResponse.ok) {
-		const assetPages = await discoverAssetPages(
-			seed,
-			seedResponse.body,
-			config,
-			{
-				limit: config.max,
-				scope,
-				accept: (url) =>
-					!seen.has(url) && inScope(url, seed, scope) && allowed(url),
-				allowResource,
+				limit: ctx.remaining(),
+				accept: (url) => inScope(url, ctx.seed, ctx.scope) && ctx.allowed(url),
+				allowResource: ctx.allowResource,
 			},
 		);
-		if (assetPages.length > 0) return assetPages;
-	}
-	if (out.length === 0) {
-		if (!finalSeed) {
-			return [
-				{
-					url: inputSeed,
-					source: "seed",
-					fetched: filteredNonPageResult(
-						seedResponse.url,
-						seedResponse.finalUrl,
-						{
-							redirects: seedResponse.redirects ?? [],
-							status: seedResponse.status,
-							contentType: seedResponse.contentType,
-							body: seedResponse.body,
-							fetchMs: seedResponse.fetchMs,
-						},
-					),
-				},
-			];
+		for (const page of feedPages) {
+			ctx.add(page.url, "feed", page.fetched, page.metadata);
 		}
-		add(seed, "seed", seedResponse);
+		if (ctx.atMax()) break;
 	}
+	return false;
+}
 
-	return out;
+// Under explicit max the llms corpus is not the whole answer (probeLlmsOverNav
+// skipped it), so backfill remaining slots from llms.txt after the primary
+// sources have run.
+async function probeLlmsBackfill(ctx: DiscoveryContext): Promise<boolean> {
+	if (ctx.config.maxExplicit && !ctx.atMax()) await addLlms(ctx);
+	return false;
+}
+
+async function probeRelNext(ctx: DiscoveryContext): Promise<boolean> {
+	if (ctx.out.length >= Math.min(ctx.config.max, 3)) return false;
+	for (const page of await discoverRelNextPages(
+		ctx.seedResponse.body,
+		ctx.seedResponse.finalUrl,
+		ctx.seed,
+		ctx.scope,
+		ctx.config,
+		{
+			limit: ctx.remaining(),
+			accept: (url) => inScope(url, ctx.seed, ctx.scope) && ctx.allowed(url),
+			allowResource: ctx.allowResource,
+		},
+	)) {
+		ctx.add(page.url, page.source, page.fetched, page.metadata);
+	}
+	return false;
+}
+
+async function probeScopedCrawl(ctx: DiscoveryContext): Promise<boolean> {
+	if (ctx.seedIsLanguageSelector || ctx.atMax()) return false;
+	for (const page of await crawlScoped(
+		ctx.seed,
+		ctx.scope,
+		ctx.remaining(),
+		ctx.robots,
+		ctx.config,
+		ctx.seedResponse,
+		ctx.allowResource,
+	)) {
+		ctx.add(page.url, "crawl", page.fetched);
+	}
+	return false;
+}
+
+// Last resort for app shells: mine JS asset text for route URLs. When it finds a
+// corpus it replaces everything (returns true) rather than mixing with the lone
+// seed page.
+async function probeAssetMining(ctx: DiscoveryContext): Promise<boolean> {
+	if (ctx.out.length > 1 || !ctx.seedResponse.ok) return false;
+	const assetPages = await discoverAssetPages(
+		ctx.seed,
+		ctx.seedResponse.body,
+		ctx.config,
+		{
+			limit: ctx.config.max,
+			scope: ctx.scope,
+			accept: (url) =>
+				!ctx.seen.has(url) &&
+				inScope(url, ctx.seed, ctx.scope) &&
+				ctx.allowed(url),
+			allowResource: ctx.allowResource,
+		},
+	);
+	if (assetPages.length === 0) return false;
+	ctx.out.length = 0;
+	ctx.out.push(...assetPages);
+	return true;
+}
+
+// Nothing matched. When the seed never resolved (no finalSeed), report an honest
+// filtered non-page result keyed to the original input seed so the run surfaces
+// the real reason. Otherwise re-add the resolved seed so the corpus is non-empty.
+function ensureSeedFallback(ctx: DiscoveryContext): boolean {
+	if (ctx.out.length > 0) return false;
+	if (!ctx.finalSeed) {
+		const r = ctx.seedResponse;
+		ctx.out.push({
+			url: ctx.inputSeed,
+			source: "seed",
+			fetched: filteredNonPageResult(r.url, r.finalUrl, {
+				redirects: r.redirects ?? [],
+				status: r.status,
+				contentType: r.contentType,
+				body: r.body,
+				fetchMs: r.fetchMs,
+			}),
+		});
+		return true;
+	}
+	ctx.add(ctx.seed, "seed", ctx.seedResponse);
+	return false;
 }
 
 function seedInputUrl(raw: string) {
@@ -382,14 +680,13 @@ function usesRootFallback(seed: string, inputSeed: string) {
 	);
 }
 
-async function addLlms(
-	seed: string,
-	config: PipelineConfig,
-	add: (raw: string | undefined, source: "llms") => boolean,
-	options: LlmsCorpusOptions,
-) {
-	for (const url of await discoverLlmsUrls(seed, config, options)) {
-		add(url, "llms");
+async function addLlms(ctx: DiscoveryContext) {
+	for (const url of await discoverLlmsUrls(
+		ctx.seed,
+		ctx.config,
+		ctx.llmsOptions,
+	)) {
+		ctx.add(url, "llms");
 	}
 }
 

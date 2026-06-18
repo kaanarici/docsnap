@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { buildPipelineConfig, parseArgs } from "../src/cli/args.ts";
+import type { PageOutput } from "../src/core/types.ts";
 import { sameSiteLabel } from "../src/core/url.ts";
 import { discover } from "../src/discover/index.ts";
 import { setFetchTransportForTest } from "../src/fetch/fetcher.ts";
@@ -159,6 +160,7 @@ describe("redirect summaries", () => {
 					failureKind: "unsafe_url",
 				},
 			],
+			[],
 			config,
 			1,
 			0,
@@ -167,34 +169,35 @@ describe("redirect summaries", () => {
 		);
 		expect(failedRedirectSummary.hostRedirects).toBe(0);
 		expect(failedRedirectSummary.redirectedHosts).toHaveLength(0);
-		const successfulRedirectSummary = buildSummary(
-			[
+		const successfulRedirect: PageOutput = {
+			ok: true,
+			url: "https://docs.example.com/start",
+			finalUrl: "https://target.example/guide",
+			redirects: [
 				{
-					ok: true,
-					url: "https://docs.example.com/start",
-					finalUrl: "https://target.example/guide",
-					redirects: [
-						{
-							from: "https://docs.example.com/start",
-							to: "https://target.example/guide",
-							type: "http",
-							status: 302,
-						},
-					],
-					fetchedAt: "2026-01-01T00:00:00.000Z",
-					injectionSignals: [],
-					status: 200,
-					source: "seed",
-					timings: { fetchMs: 1, extractMs: 1, writeMs: 0 },
-					markdown: "# Guide",
-					links: [],
-					contentHash: "hash",
-					extractor: "html",
-					confidence: 1,
-					qualityReasons: [],
-					outputPath: "guide.md",
+					from: "https://docs.example.com/start",
+					to: "https://target.example/guide",
+					type: "http",
+					status: 302,
 				},
 			],
+			fetchedAt: "2026-01-01T00:00:00.000Z",
+			injectionSignals: [],
+			status: 200,
+			source: "seed",
+			timings: { fetchMs: 1, extractMs: 1, writeMs: 0 },
+			markdown: "# Guide",
+			links: [],
+			contentHash: "hash",
+			extractor: "html",
+			confidence: 1,
+			qualityReasons: [],
+			outputPath: "guide.md",
+			rendered: "# Guide\n",
+		};
+		const successfulRedirectSummary = buildSummary(
+			[successfulRedirect],
+			[successfulRedirect],
 			config,
 			1,
 			0,
