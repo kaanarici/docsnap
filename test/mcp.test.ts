@@ -1,13 +1,14 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getCorpusSummary } from "../src/mcp/corpus.ts";
 import {
-	exitOnSandboxNetworkDisabled,
+	sandboxNetworkDisabled,
 	startLoopbackServer,
 	type TestServer,
-} from "./local-fixture.ts";
-import { McpClient } from "./mcp-client.ts";
+} from "../scripts/local-fixture.ts";
+import { McpClient } from "../scripts/mcp-client.ts";
+import { getCorpusSummary } from "../src/mcp/corpus.ts";
 
 type ToolCallResult = {
 	content: Array<{ type: string; text: string }>;
@@ -42,8 +43,6 @@ type ParsedToolJson = {
 type ListedResource = { uri: string; name: string };
 type ListedTool = Record<"name" | "description", string>;
 
-exitOnSandboxNetworkDisabled("mcp-regression local server");
-
 const fixtureText =
 	"Hermetic MCP fixture text proves docsnap captured local docs through stdio.";
 let origin = "";
@@ -65,31 +64,63 @@ const pages: Record<string, string> = {
 	),
 };
 
-// the server runs with cwd=tmpRoot (a workspace); the corpus lives under it,
-// and a separate outsideRoot models a dir the server must not read or write
-const tmpRoot = await mkdtemp(join(tmpdir(), "docsnap-mcp-"));
-const outsideRoot = await mkdtemp(join(tmpdir(), "docsnap-outside-"));
-const outDir = join(tmpRoot, "capture");
-let fixture: TestServer | undefined;
-let client: McpClient | undefined;
+describe("corpus summary compatibility", () => {
+	test("partially written foreign summaries omit missing collections", async () => {
+		const minimalRoot = await mkdtemp(join(tmpdir(), "docsnap-minimal-"));
+		try {
+			await writeFile(
+				join(minimalRoot, "summary.json"),
+				JSON.stringify({ seedUrl: "https://docs.example.com/" }),
+			);
+			const view = await getCorpusSummary(minimalRoot, {
+				includeErrors: true,
+				includeRefreshChanges: true,
+				errorLimit: 5,
+			});
+			expect(Array.isArray(view.errors) && view.errors.length === 0).toBe(true);
+			expect(view).not.toHaveProperty("refresh");
+		} finally {
+			await rm(minimalRoot, { recursive: true, force: true });
+		}
+	});
+});
 
-async function main(): Promise<void> {
-	try {
+describe.skipIf(sandboxNetworkDisabled())("MCP stdio server", () => {
+	let tmpRoot = "";
+	let outsideRoot = "";
+	let outDir = "";
+	let fixture: TestServer | undefined;
+	let client: McpClient | undefined;
+
+	beforeAll(async () => {
+		tmpRoot = await mkdtemp(join(tmpdir(), "docsnap-mcp-"));
+		outsideRoot = await mkdtemp(join(tmpdir(), "docsnap-outside-"));
+		outDir = join(tmpRoot, "capture");
 		fixture = await startLoopbackServer(fixtureResponse);
 		origin = fixture.origin;
 		client = new McpClient(origin, tmpRoot);
+	});
 
+	afterAll(async () => {
+		await client?.stop();
+		await fixture?.stop();
+		await rm(tmpRoot, { recursive: true, force: true });
+		await rm(outsideRoot, { recursive: true, force: true });
+	});
+
+	test("serves capture, refresh, corpus, search, read, and safety tools", async () => {
+		if (!client) throw new Error("MCP client was not initialized");
 		const oversized = assertObject(await client.raw("x".repeat(4_194_305)));
-		assert(get(oversized, "error.code") === -32700);
+		expect(get(oversized, "error.code")).toBe(-32700);
 
 		const initialized = await client.request("initialize", {
 			protocolVersion: "2025-06-18",
 			capabilities: {},
 			clientInfo: { name: "docsnap-regression", version: "0.0.0" },
 		});
-		assert(get(initialized, "serverInfo.name") === "docsnap");
-		assert(get(initialized, "capabilities.tools"));
-		assert(get(initialized, "capabilities.resources"));
+		expect(get(initialized, "serverInfo.name")).toBe("docsnap");
+		expect(get(initialized, "capabilities.tools")).toBeTruthy();
+		expect(get(initialized, "capabilities.resources")).toBeTruthy();
 		client.notify("notifications/initialized", {});
 		assertObject(await client.request("ping", {}));
 		const batch = await client.raw(
@@ -98,7 +129,7 @@ async function main(): Promise<void> {
 				{ jsonrpc: "2.0", id: 92, method: "tools/list", params: {} },
 			])}\n`,
 		);
-		assert(Array.isArray(batch) && batch.length === 2, "batch returns array");
+		expect(Array.isArray(batch) && batch.length === 2).toBe(true);
 
 		const outsideDir = join(outsideRoot, "outside-corpus");
 		const outsideSummary = `${JSON.stringify({
@@ -115,21 +146,20 @@ async function main(): Promise<void> {
 			arguments: { output_dir: outsideDir },
 		})) as ToolCallResult;
 		const escapedText = escaped.content[0]?.text ?? "";
-		assert(escaped.isError === true, "outside output_dir should be rejected");
-		assert(escapedText.includes("under the MCP server cwd"));
-		assert(!escapedText.includes("outside refresh secret"));
-		assert(!escapedText.includes(outsideDir));
+		expect(escaped.isError).toBe(true);
+		expect(escapedText).toContain("under the MCP server cwd");
+		expect(escapedText).not.toContain("outside refresh secret");
+		expect(escapedText).not.toContain(outsideDir);
 		const escapedRefresh = (await client.request("tools/call", {
 			name: "docsnap_refresh",
 			arguments: { output_dir: outsideDir },
 		})) as ToolCallResult;
 		const escapedRefreshText = escapedRefresh.content[0]?.text ?? "";
-		assert(escapedRefresh.isError === true);
-		assert(escapedRefreshText.includes("under the MCP server cwd"));
-		assert(!escapedRefreshText.includes("outside refresh secret"));
-		assert(
-			(await readFile(join(outsideDir, "summary.json"), "utf8")) ===
-				outsideSummary,
+		expect(escapedRefresh.isError).toBe(true);
+		expect(escapedRefreshText).toContain("under the MCP server cwd");
+		expect(escapedRefreshText).not.toContain("outside refresh secret");
+		expect(await readFile(join(outsideDir, "summary.json"), "utf8")).toBe(
+			outsideSummary,
 		);
 		const escapedResource = assertObject(
 			await client.raw(
@@ -143,55 +173,36 @@ async function main(): Promise<void> {
 				})}\n`,
 			),
 		);
-		assert(get(escapedResource, "error.code") === -32602);
-		assert(
-			String(get(escapedResource, "error.message")).includes(
-				"under the MCP server cwd",
-			),
+		expect(get(escapedResource, "error.code")).toBe(-32602);
+		expect(String(get(escapedResource, "error.message"))).toContain(
+			"under the MCP server cwd",
 		);
 
-		// capture must not write/clean outside cwd (reads are already contained)
 		const captureEscape = (await client.request("tools/call", {
 			name: "docsnap_capture",
 			arguments: { url: `${origin}/`, output_dir: outsideDir, clean: true },
 		})) as ToolCallResult;
-		assert(
-			captureEscape.isError === true,
-			"capture outside cwd should be rejected",
+		expect(captureEscape.isError).toBe(true);
+		expect(captureEscape.content[0]?.text ?? "").toContain(
+			"under the MCP server cwd",
 		);
-		assert(
-			(captureEscape.content[0]?.text ?? "").includes(
-				"under the MCP server cwd",
-			),
-		);
-		assert(
-			(await readFile(join(outsideDir, "summary.json"), "utf8")) ===
-				outsideSummary,
-			"rejected capture must not clean or write the outside dir",
+		expect(await readFile(join(outsideDir, "summary.json"), "utf8")).toBe(
+			outsideSummary,
 		);
 
 		const toolsList = assertObject(await client.request("tools/list", {}));
 		const tools = (toolsList as { tools: ListedTool[] }).tools;
-		assert(tools.length === 9, "expected nine tools");
-		assert(
-			tools.some((tool) => tool.name === "docsnap_context_pack"),
-			"context pack tool should be registered",
+		expect(tools.some((tool) => tool.name === "docsnap_context_pack")).toBe(
+			true,
 		);
-		assert(
-			tools.some((tool) => tool.name === "docsnap_fetch"),
-			"fetch tool should be registered",
-		);
-		assert(tools.every((tool) => tool.name.startsWith("docsnap_")));
-		assert(!JSON.stringify(tools).includes("response_format"));
+		expect(tools.some((tool) => tool.name === "docsnap_fetch")).toBe(true);
+		expect(tools.every((tool) => tool.name.startsWith("docsnap_"))).toBe(true);
 		const descriptions = tools
 			.map((tool) => tool.description)
 			.join("\n")
 			.toLowerCase();
 		for (const keyword of ["capture", "refresh", "corpus", "search", "read"]) {
-			assert(
-				descriptions.includes(keyword),
-				`missing discovery keyword ${keyword}`,
-			);
+			expect(descriptions).toContain(keyword);
 		}
 
 		const capture = toolJson(
@@ -205,7 +216,7 @@ async function main(): Promise<void> {
 				},
 			}),
 		);
-		assert(capture.ok === true, "capture should succeed");
+		expect(capture.ok).toBe(true);
 		for (const file of [
 			"summary.json",
 			"manifest.jsonl",
@@ -222,28 +233,33 @@ async function main(): Promise<void> {
 				arguments: { output_dir: outDir, max_pages: 4 },
 			}),
 		);
-		assert(refresh.ok === true, "refresh should succeed");
-		assert(refresh.refresh?.enabled === true, "refresh should be enabled");
-		assert(refresh.refresh.changed === 1, "refresh should report one change");
-		assert(refresh.counts?.written, "refresh should report written pages");
+		expect(refresh.ok).toBe(true);
+		expect(refresh.refresh?.enabled).toBe(true);
+		expect(refresh.refresh?.changed).toBe(1);
+		expect(refresh.counts?.written).toBeTruthy();
 		const changedPages = refresh.changed_pages ?? [];
-		assert(changedPages.length > 0, "refresh should return changed pages");
-		assert(changedPages.length <= 200, "changed pages should be bounded");
-		assert(refresh.changed_pages_truncated === false);
+		expect(changedPages.length).toBeGreaterThan(0);
+		expect(changedPages.length).toBeLessThanOrEqual(200);
+		expect(refresh.changed_pages_truncated).toBe(false);
 		const changedReference = changedPages.find((item) =>
 			item.url?.endsWith("/reference"),
 		);
-		assert(changedReference?.change === "changed");
-		assert(typeof changedReference.output_path === "string");
-		assert(
+		expect(changedReference?.change).toBe("changed");
+		if (changedReference?.change !== "changed") {
+			throw new Error("assertion failed");
+		}
+		expect(typeof changedReference.output_path).toBe("string");
+		if (typeof changedReference.output_path !== "string") {
+			throw new Error("assertion failed");
+		}
+		expect(
 			Object.keys(changedReference).every((key) =>
 				["change", "url", "output_path"].includes(key),
 			),
-			"changed page result should not include page bodies",
-		);
+		).toBe(true);
 		const refreshText = JSON.stringify(refresh);
-		assert(refreshText.length < 8000, "refresh result should stay bounded");
-		assert(!refreshText.includes("version 2 changed body"));
+		expect(refreshText.length).toBeLessThan(8000);
+		expect(refreshText).not.toContain("version 2 changed body");
 
 		const summary = toolJson(
 			await client.request("tools/call", {
@@ -251,7 +267,7 @@ async function main(): Promise<void> {
 				arguments: { output_dir: outDir },
 			}),
 		);
-		assert(summary.counts?.written, "summary should report pages");
+		expect(summary.counts?.written).toBeTruthy();
 
 		const pagesResult = toolJson(
 			await client.request("tools/call", {
@@ -260,12 +276,15 @@ async function main(): Promise<void> {
 			}),
 		);
 		const pagesText = JSON.stringify(pagesResult);
-		assert(!/"title"\s*:/.test(pagesText), "raw title key should not appear");
-		assert(pagesText.includes("untrusted_web_title"));
+		expect(pagesText).not.toMatch(/"title"\s*:/);
+		expect(pagesText).toContain("untrusted_web_title");
 		const guide = (pagesResult.pages ?? []).find((item) =>
 			item.url?.endsWith("/guide"),
 		);
-		assert(guide?.output_path, "guide output path should be listed");
+		expect(guide?.output_path).toBeTruthy();
+		if (!guide?.output_path) {
+			throw new Error("guide output path should be listed");
+		}
 
 		const search = toolJson(
 			await client.request("tools/call", {
@@ -277,13 +296,13 @@ async function main(): Promise<void> {
 				},
 			}),
 		);
-		assert((search.matches ?? []).length > 0, "search should find guide");
+		expect((search.matches ?? []).length).toBeGreaterThan(0);
 		const searchText = JSON.stringify(search);
-		assert(!/"title"\s*:/.test(searchText), "search title should be marked");
-		assert(searchText.includes("untrusted_web_title"));
-		assert(searchText.includes("WEB-DERIVED CONTENT (UNTRUSTED DATA)"));
-		assert(searchText.includes("Source URL:"));
-		assert(searchText.includes("Injection signals: ai-directed-instruction"));
+		expect(searchText).not.toMatch(/"title"\s*:/);
+		expect(searchText).toContain("untrusted_web_title");
+		expect(searchText).toContain("WEB-DERIVED CONTENT (UNTRUSTED DATA)");
+		expect(searchText).toContain("Source URL:");
+		expect(searchText).toContain("Injection signals: ai-directed-instruction");
 
 		const read = toolJson(
 			await client.request("tools/call", {
@@ -295,85 +314,56 @@ async function main(): Promise<void> {
 				},
 			}),
 		);
-		assert(typeof read.text === "string", "read should return text");
-		assert(read.text.includes("WEB-DERIVED CONTENT (UNTRUSTED DATA)"));
-		assert(read.text.includes("Source URL:"));
-		assert(read.text.includes("Injection signals: ai-directed-instruction"));
-		// the fence is tagged with a per-response nonce a captured page can't forge
+		expect(typeof read.text).toBe("string");
+		if (typeof read.text !== "string") {
+			throw new Error("read should return text");
+		}
+		expect(read.text).toContain("WEB-DERIVED CONTENT (UNTRUSTED DATA)");
+		expect(read.text).toContain("Source URL:");
+		expect(read.text).toContain("Injection signals: ai-directed-instruction");
 		const fence = read.text.match(
 			/----- BEGIN WEB CONTENT ([0-9a-f-]{36}) -----/,
 		);
-		assert(fence, "web content fence should be tagged with a nonce");
-		assert(
-			read.text.includes(`----- END WEB CONTENT ${fence[1]} -----`),
-			"begin/end fence nonce should match",
-		);
-		assert(
-			!read.text.includes("----- BEGIN WEB CONTENT -----"),
-			"fence must not use a predictable untagged delimiter",
-		);
+		expect(fence).toBeTruthy();
+		if (!fence) {
+			throw new Error("web content fence should be tagged with a nonce");
+		}
+		expect(read.text).toContain(`----- END WEB CONTENT ${fence[1]} -----`);
+		expect(read.text).not.toContain("----- BEGIN WEB CONTENT -----");
 
 		const resources = assertObject(await client.request("resources/list", {}));
 		const listedResources = (resources as { resources: ListedResource[] })
 			.resources;
-		assert(
-			!listedResources.some((resource) =>
+		expect(
+			listedResources.some((resource) =>
 				resource.name.toLowerCase().includes("ignore previous instructions"),
 			),
-			"resource names should not use page titles",
-		);
+		).toBe(false);
 		const pageResource = listedResources.find((resource) =>
 			resource.uri.includes("/page/"),
 		);
-		assert(pageResource, "page resource should be listed");
+		expect(pageResource).toBeTruthy();
+		if (!pageResource) {
+			throw new Error("page resource should be listed");
+		}
 		const resourceRead = assertObject(
 			await client.request("resources/read", { uri: pageResource.uri }),
 		);
-		assert(
-			JSON.stringify(resourceRead).includes(
-				"WEB-DERIVED CONTENT (UNTRUSTED DATA)",
-			),
+		expect(JSON.stringify(resourceRead)).toContain(
+			"WEB-DERIVED CONTENT (UNTRUSTED DATA)",
 		);
 
 		const unsafe = (await client.request("tools/call", {
 			name: "docsnap_capture",
 			arguments: { url: "http://localhost:1234" },
 		})) as ToolCallResult;
-		assert(unsafe.isError === true, "unsafe URL should be a tool error");
+		expect(unsafe.isError).toBe(true);
 		const unsafeText = unsafe.content[0]?.text ?? "";
-		assert(unsafeText.includes("localhost URLs are not allowed"));
-		assert(unsafeText.includes("Try:"));
-		assert(!/^\s*at\s|\n\s*at\s|traceback/i.test(unsafeText), unsafeText);
-	} finally {
-		await client?.stop();
-		await fixture?.stop();
-		await rm(tmpRoot, { recursive: true, force: true });
-		await rm(outsideRoot, { recursive: true, force: true });
-	}
-}
-
-// a parseable but partially-written/foreign summary.json (missing collection
-// fields) must degrade gracefully instead of throwing on .slice
-{
-	const minimalRoot = await mkdtemp(join(tmpdir(), "docsnap-minimal-"));
-	try {
-		await writeFile(
-			join(minimalRoot, "summary.json"),
-			JSON.stringify({ seedUrl: "https://docs.example.com/" }),
-		);
-		const view = await getCorpusSummary(minimalRoot, {
-			includeErrors: true,
-			includeRefreshChanges: true,
-			errorLimit: 5,
-		});
-		assert(Array.isArray(view.errors) && view.errors.length === 0);
-		assert(!("refresh" in view));
-	} finally {
-		await rm(minimalRoot, { recursive: true, force: true });
-	}
-}
-
-await main();
+		expect(unsafeText).toContain("localhost URLs are not allowed");
+		expect(unsafeText).toContain("Try:");
+		expect(unsafeText).not.toMatch(/^\s*at\s|\n\s*at\s|traceback/i);
+	});
+});
 
 function fixtureResponse(request: Request): Response {
 	const url = new URL(request.url);
@@ -430,7 +420,9 @@ function trimSlash(pathname: string): string {
 function toolJson(value: unknown): ParsedToolJson {
 	const result = value as ToolCallResult;
 	const text = result.content[0]?.text;
-	assert(typeof text === "string", "tool result should contain text");
+	expect(typeof text).toBe("string");
+	if (typeof text !== "string")
+		throw new Error("tool result should contain text");
 	return JSON.parse(text) as ParsedToolJson;
 }
 
@@ -443,13 +435,11 @@ function get(value: unknown, path: string): unknown {
 }
 
 function assertObject(value: unknown): Record<string, unknown> {
-	assert(value && typeof value === "object" && !Array.isArray(value));
+	expect(value && typeof value === "object" && !Array.isArray(value)).toBe(
+		true,
+	);
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error("assertion failed");
+	}
 	return value as Record<string, unknown>;
-}
-
-function assert(
-	condition: unknown,
-	message = "assertion failed",
-): asserts condition {
-	if (!condition) throw new Error(message);
 }

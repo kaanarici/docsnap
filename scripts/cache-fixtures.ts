@@ -1,8 +1,9 @@
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseArgs } from "../src/cli/args.ts";
-import type { Config } from "../src/core/types.ts";
+import type { ParsedRun } from "../src/cli/args.ts";
+import { buildPipelineConfig, parseArgs } from "../src/cli/args.ts";
+import type { PipelineConfig } from "../src/core/types.ts";
 
 export const cacheDirEnv = "DOCSNAP_CACHE_DIR";
 export const cacheMaxEnv = "DOCSNAP_CACHE_MAX_MB";
@@ -13,12 +14,12 @@ export function config(
 	name: string,
 	extra: string[] = [],
 	pageOnly = true,
-): Config {
+): PipelineConfig {
 	const args = [url, "-o", join(root, name), "--clean", "--quiet", ...extra];
 	if (pageOnly) args.push("--page");
 	const parsed = parseArgs(args);
-	assertConfig(parsed);
-	return parsed;
+	assertParsedRun(parsed);
+	return buildPipelineConfig(parsed.run);
 }
 
 export async function withCacheEnv(
@@ -76,7 +77,7 @@ export function page(title: string, body: string) {
 	return `<html><head><title>${title}</title></head><body><main><h1>${title}</h1><p>${body}</p></main></body></html>`;
 }
 
-export function assertConfig(value: unknown): asserts value is Config {
+export function assertParsedRun(value: unknown): asserts value is ParsedRun {
 	assert(
 		typeof value === "object" &&
 			value !== null &&

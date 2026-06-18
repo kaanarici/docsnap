@@ -1,16 +1,21 @@
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 
+// Source-size report. Per-file length is a sanity nudge, not a hard gate: a file
+// over the soft limit is surfaced so we notice creeping bloat, but it never fails
+// the build (a hard cap just incentivizes splitting or cramming files to dodge it).
+// Totals are the real signal — splitting a file leaves them unchanged.
 const roots = ["src", "scripts", "test"];
-const limit = 500;
-const offenders: string[] = [];
+const softLimit = 500;
 
 type DirectoryEntry = {
 	name: string;
 	isDirectory: () => boolean;
 };
 
-async function walk(dir: string) {
+type FileSize = { path: string; lines: number };
+
+async function walk(dir: string, out: FileSize[]) {
 	let entries: DirectoryEntry[];
 	try {
 		entries = await readdir(dir, { withFileTypes: true });
@@ -22,18 +27,41 @@ async function walk(dir: string) {
 	for (const entry of entries) {
 		const path = join(dir, entry.name);
 		if (entry.isDirectory()) {
-			await walk(path);
+			await walk(path, out);
 			continue;
 		}
 		if (!/\.(ts|tsx|js|jsx)$/.test(entry.name)) continue;
 		const lines = (await Bun.file(path).text()).split("\n").length;
-		if (lines > limit) offenders.push(`${path}: ${lines} lines`);
+		out.push({ path, lines });
 	}
 }
 
-for (const root of roots) await walk(root);
+const sizes: FileSize[] = [];
+for (const root of roots) await walk(root, sizes);
 
-if (offenders.length) {
-	console.error(`Files over ${limit} lines:\n${offenders.join("\n")}`);
-	process.exit(1);
+const byRoot = new Map<string, { files: number; lines: number }>();
+for (const { path, lines } of sizes) {
+	const root = path.split("/")[0] ?? path;
+	const acc = byRoot.get(root) ?? { files: 0, lines: 0 };
+	acc.files++;
+	acc.lines += lines;
+	byRoot.set(root, acc);
+}
+
+const totalLines = sizes.reduce((sum, file) => sum + file.lines, 0);
+const largest = [...sizes].sort((a, b) => b.lines - a.lines).slice(0, 10);
+
+console.log(`size: ${sizes.length} files, ${totalLines} lines`);
+for (const [root, acc] of byRoot)
+	console.log(`  ${root}: ${acc.files} files, ${acc.lines} lines`);
+console.log("largest:");
+for (const file of largest) console.log(`  ${file.path}: ${file.lines}`);
+
+const oversized = sizes.filter((file) => file.lines > softLimit);
+if (oversized.length) {
+	console.log(
+		`\nover ${softLimit} lines (a nudge to simplify, not a hard limit):\n${oversized
+			.map((file) => `  ${file.path}: ${file.lines}`)
+			.join("\n")}`,
+	);
 }

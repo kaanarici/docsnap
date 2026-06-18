@@ -1,12 +1,13 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { parseArgs } from "../src/cli/args.ts";
 import {
-	exitOnSandboxNetworkDisabled,
+	sandboxNetworkDisabled,
 	startLoopbackServer,
 	type TestServer,
-} from "./local-fixture.ts";
+} from "../scripts/local-fixture.ts";
+import { parseArgs } from "../src/cli/args.ts";
 
 type CliResult = Summary & {
 	ok: boolean;
@@ -37,7 +38,8 @@ type ManifestRecord = {
 
 const fixtureText =
 	"Hermetic CLI fixture text proves the real docsnap binary fetched local docs.";
-exitOnSandboxNetworkDisabled("cli-regression local server");
+
+let origin = "";
 
 const pages: Record<string, string> = {
 	"/": page(
@@ -66,74 +68,86 @@ const pages: Record<string, string> = {
 		<p>This page helps prove multiple local links can be discovered and fetched through the real CLI binary.</p>`,
 	),
 };
-const tmpRoot = await mkdtemp(join(tmpdir(), "docsnap-cli-"));
-const outDir = join(tmpRoot, "capture");
-let origin = "";
-let server: TestServer | undefined;
 
-try {
-	const help = parseArgs([]);
-	assert("help" in help);
-	server = await startLoopbackServer(fixtureResponse);
-	origin = server.origin;
-	const result = await runCli(origin, outDir);
-	assert(result.ok);
-	assert(result.written > 0);
-	assert(result.outDir === outDir);
-	assert(Boolean(result.paths));
+describe.skipIf(sandboxNetworkDisabled())("CLI capture", () => {
+	let outDir = "";
+	let server: TestServer | undefined;
+	let tmpRoot = "";
 
-	const [summaryText, manifestText] = await Promise.all([
-		readFile(join(outDir, "summary.json"), "utf8"),
-		readFile(join(outDir, "manifest.jsonl"), "utf8"),
-		readFile(join(outDir, "tree.txt"), "utf8"),
-		readFile(join(outDir, "AGENT_README.md"), "utf8"),
-	]);
-	const summary = JSON.parse(summaryText) as Summary;
-	const manifest = manifestText
-		.trim()
-		.split("\n")
-		.filter(Boolean)
-		.map((line) => JSON.parse(line) as ManifestRecord);
+	beforeAll(async () => {
+		tmpRoot = await mkdtemp(join(tmpdir(), "docsnap-cli-"));
+		outDir = join(tmpRoot, "capture");
+		server = await startLoopbackServer(fixtureResponse);
+		origin = server.origin;
+	});
 
-	assert(
-		summary.written === manifest.filter((record) => record.outputPath).length,
-	);
-	assert(summary.failed === manifest.filter((record) => !record.ok).length);
-	assert(summary.written + summary.failed === manifest.length);
-	assert(result.written === summary.written);
-	assert(result.failed === summary.failed);
-	assert(result.byExtractor.html === summary.byExtractor.html);
-	assert("byInlineStateSource" in result);
-	assert(
-		JSON.stringify(result.byInlineStateSource) ===
+	afterAll(async () => {
+		await server?.stop();
+		await rm(tmpRoot, { recursive: true, force: true });
+	});
+
+	test("captures local docs through the real binary", async () => {
+		const help = parseArgs([]);
+		expect("help" in help).toBe(true);
+
+		const result = await runCli(origin, outDir);
+		expect(result.ok).toBe(true);
+		expect(result.written).toBeGreaterThan(0);
+		expect(result.outDir).toBe(outDir);
+		expect(Boolean(result.paths)).toBe(true);
+
+		const [summaryText, manifestText] = await Promise.all([
+			readFile(join(outDir, "summary.json"), "utf8"),
+			readFile(join(outDir, "manifest.jsonl"), "utf8"),
+			readFile(join(outDir, "tree.txt"), "utf8"),
+			readFile(join(outDir, "AGENT_README.md"), "utf8"),
+		]);
+		const summary = JSON.parse(summaryText) as Summary;
+		const manifest = manifestText
+			.trim()
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => JSON.parse(line) as ManifestRecord);
+
+		expect(summary.written).toBe(
+			manifest.filter((record) => record.outputPath).length,
+		);
+		expect(summary.failed).toBe(manifest.filter((record) => !record.ok).length);
+		expect(summary.written + summary.failed).toBe(manifest.length);
+		expect(result.written).toBe(summary.written);
+		expect(result.failed).toBe(summary.failed);
+		expect(result.byExtractor.html).toBe(summary.byExtractor.html);
+		expect(result).toHaveProperty("byInlineStateSource");
+		expect(JSON.stringify(result.byInlineStateSource)).toBe(
 			JSON.stringify(summary.byInlineStateSource),
-	);
+		);
 
-	const missing = manifest.find((record) => record.url.endsWith("/missing"));
-	assert(missing?.ok === false);
-	assert(missing.failureKind === "not_found");
-	assert(summary.byFailureKind.not_found === 1);
-	assert(summary.errors.some((error) => error.url.endsWith("/missing")));
+		const missing = manifest.find((record) => record.url.endsWith("/missing"));
+		expect(missing?.ok).toBe(false);
+		if (!missing || missing.ok) throw new Error("expected missing record");
+		expect(missing.failureKind).toBe("not_found");
+		expect(summary.byFailureKind.not_found).toBe(1);
+		expect(summary.errors.some((error) => error.url.endsWith("/missing"))).toBe(
+			true,
+		);
 
-	const files = await listFiles(outDir);
-	for (const file of [
-		"summary.json",
-		"manifest.jsonl",
-		"tree.txt",
-		"AGENT_README.md",
-	]) {
-		assert(files.includes(file));
-	}
-	const pageFiles = files.filter(
-		(file) => file.endsWith(".md") && file !== "AGENT_README.md",
-	);
-	assert(pageFiles.length > 0);
-	const capturedPage = await readFile(join(outDir, pageFiles[0]!), "utf8");
-	assert(capturedPage.includes(fixtureText));
-} finally {
-	await server?.stop();
-	await rm(tmpRoot, { recursive: true, force: true });
-}
+		const files = await listFiles(outDir);
+		for (const file of [
+			"summary.json",
+			"manifest.jsonl",
+			"tree.txt",
+			"AGENT_README.md",
+		]) {
+			expect(files).toContain(file);
+		}
+		const pageFiles = files.filter(
+			(file) => file.endsWith(".md") && file !== "AGENT_README.md",
+		);
+		expect(pageFiles.length).toBeGreaterThan(0);
+		const capturedPage = await readFile(join(outDir, pageFiles[0]!), "utf8");
+		expect(capturedPage).toContain(fixtureText);
+	});
+});
 
 async function runCli(origin: string, output: string): Promise<CliResult> {
 	const subprocess = Bun.spawn({
@@ -156,12 +170,17 @@ async function runCli(origin: string, output: string): Promise<CliResult> {
 		new Response(subprocess.stdout).text(),
 		new Response(subprocess.stderr).text(),
 	]);
-	assert(exitCode === 0, stderr || stdout);
-	assert(stderr.trim() === "", stderr);
+	expect(exitCode, stderr || stdout).toBe(0);
+	expect(stderr.trim(), stderr).toBe("");
 	const trimmed = stdout.trim();
-	assert(trimmed.split(/\r?\n/).length === 1, stdout);
+	expect(trimmed.split(/\r?\n/)).toHaveLength(1);
 	const parsed = JSON.parse(trimmed);
-	assert(parsed && typeof parsed === "object" && !Array.isArray(parsed));
+	expect(parsed && typeof parsed === "object" && !Array.isArray(parsed)).toBe(
+		true,
+	);
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		throw new Error("assertion failed");
+	}
 	return parsed as CliResult;
 }
 
@@ -241,11 +260,4 @@ function cleanEnv(): Record<string, string> {
 		if (value !== undefined) env[key] = value;
 	}
 	return env;
-}
-
-function assert(
-	condition: unknown,
-	message = "assertion failed",
-): asserts condition {
-	if (!condition) throw new Error(message);
 }
