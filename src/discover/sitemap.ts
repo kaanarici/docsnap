@@ -1,6 +1,6 @@
 import { DOMParser } from "linkedom";
 import { escapeRegExp } from "../core/text.ts";
-import type { Config } from "../core/types.ts";
+import type { PipelineConfig } from "../core/types.ts";
 import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
 import { runBounded } from "../fetch/rate-limit.ts";
 import { normalizeUrl, pathInScope } from "./url.ts";
@@ -21,7 +21,7 @@ const SITEMAP_INDEX_CHILD_CONCURRENCY = 4;
 export async function discoverSitemaps(
 	seed: string,
 	sitemapUrls: string[],
-	config: Config,
+	config: PipelineConfig,
 	options: SitemapOptions = {},
 ): Promise<string[]> {
 	const limit = options.limit ?? Number.POSITIVE_INFINITY;
@@ -70,7 +70,7 @@ function scopedSitemapCandidates(base: URL) {
 
 async function readSitemap(
 	url: string,
-	config: Config,
+	config: PipelineConfig,
 	depth: number,
 	found: Set<string>,
 	options: Required<Pick<SitemapOptions, "limit" | "scope">> &

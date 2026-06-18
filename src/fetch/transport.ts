@@ -3,47 +3,43 @@ import { Agent as HttpAgent, request as httpRequest } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import type { LookupFunction } from "node:net";
 import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
-import type { Config } from "../core/types.ts";
+import type {
+	FetchTransport,
+	HeaderMap,
+	HttpResponse,
+	PipelineConfig,
+} from "../core/types.ts";
 import {
 	type PublicAddress,
 	type PublicHttpAddress,
 	resolvePublicHttpUrl,
 } from "../security/url.ts";
 
+export type { FetchTransport, HeaderMap, HttpResponse };
+
 const httpAgent = new HttpAgent({ keepAlive: true, maxSockets: 64 });
 const httpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 64 });
-let resolveForRequest = resolvePublicHttpUrl;
 
-export type HeaderMap = {
-	get(name: string): string | null;
-	getSetCookie?(): string[];
-};
+type Resolver = typeof resolvePublicHttpUrl;
 
-export type HttpResponse = {
-	url: string;
-	status: number;
-	headers: HeaderMap;
-	body: Uint8Array;
-};
-
-export type FetchTransport = (
-	raw: string,
-	headers: Record<string, string>,
-	config: Config,
-) => Promise<HttpResponse>;
+// requestPublicHttp performs real DNS resolution; the only thing tests need to
+// substitute is that resolution so they can drive the real transport against a
+// loopback server while presenting a public hostname. This is the sole test
+// seam left in the transport and it is reset between tests.
+let testResolver: Resolver | undefined;
 
 export function setResolvePublicHttpUrlForTest(
-	resolver: typeof resolvePublicHttpUrl | undefined,
+	resolver: Resolver | undefined,
 ): void {
-	resolveForRequest = resolver ?? resolvePublicHttpUrl;
+	testResolver = resolver;
 }
 
 export async function requestPublicHttp(
 	raw: string,
 	headers: Record<string, string>,
-	config: Config,
+	config: PipelineConfig,
 ): Promise<HttpResponse> {
-	const resolved = await resolveForRequest(raw);
+	const resolved = await (testResolver ?? resolvePublicHttpUrl)(raw);
 	const deadlineAt = Date.now() + config.timeoutMs * 3;
 	let lastError: unknown;
 	for (const address of resolved.addresses) {
@@ -68,7 +64,7 @@ export async function requestPublicHttp(
 function requestAddress(
 	raw: string,
 	headers: Record<string, string>,
-	config: Config,
+	config: PipelineConfig,
 	resolved: PublicHttpAddress,
 	address: PublicAddress,
 	deadlineMs: number,

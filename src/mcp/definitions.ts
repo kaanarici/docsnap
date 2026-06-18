@@ -211,10 +211,16 @@ export const toolDefinitions: ToolDefinition[] = [
 					description:
 						"Relative Markdown path from manifest.jsonl, for example guide/install.md.",
 				},
-				start_line: { type: "integer", minimum: 1, default: 1 },
+				start_line: {
+					type: "integer",
+					minimum: 1,
+					maximum: 1_000_000,
+					default: 1,
+				},
 				end_line: {
 					type: "integer",
 					minimum: 1,
+					maximum: 1_000_000,
 					description:
 						"Optional last line to include; caps the slice to an exact span before max_chars.",
 				},

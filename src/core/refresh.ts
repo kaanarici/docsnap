@@ -1,16 +1,15 @@
-import { renderPage } from "../output/page.ts";
 import {
 	type PriorPage,
 	type PriorState,
 	readPriorOutput,
 } from "../output/prior.ts";
 import { identityKeys } from "./identity.ts";
-import { hasOutputPath } from "./records.ts";
+import { isMaterialized } from "./records.ts";
 import type {
-	Config,
 	DiscoveredUrl,
+	PageOutput,
 	PageRecord,
-	PageSuccess,
+	PipelineConfig,
 	RefreshChangedPage,
 	RefreshSummary,
 } from "./types.ts";
@@ -35,7 +34,7 @@ export async function refreshSummary(
 	prior: PriorState,
 	records: PageRecord[],
 	attempted: DiscoveredUrl[],
-	config: Config,
+	config: PipelineConfig,
 	counters: RefreshCounters,
 ): Promise<RefreshSummary> {
 	const changedPages: RefreshChangedPage[] = [];
@@ -44,7 +43,7 @@ export async function refreshSummary(
 	let changed = 0;
 	let unchanged = 0;
 
-	for (const record of records.filter(hasOutputPath)) {
+	for (const record of records.filter(isMaterialized)) {
 		const previous = prior.find(record);
 		const change = previous
 			? (await existingOutputMatches(config, previous, record))
@@ -112,15 +111,14 @@ export function emptyRefreshSummary(
 }
 
 async function existingOutputMatches(
-	config: Config,
+	config: PipelineConfig,
 	previous: PriorPage,
-	current: PageSuccess & { outputPath: string },
+	current: PageOutput,
 ) {
 	if (previous.outputPath !== current.outputPath) return false;
 	try {
 		return (
-			(await readPriorOutput(config, previous.outputPath)) ===
-			renderPage(current)
+			(await readPriorOutput(config, previous.outputPath)) === current.rendered
 		);
 	} catch {
 		return false;
@@ -129,7 +127,7 @@ async function existingOutputMatches(
 
 function changeEntry(
 	change: "new" | "changed" | "unchanged",
-	record: PageSuccess & { outputPath: string },
+	record: PageOutput,
 	previous: PriorPage | undefined,
 ): RefreshChangedPage {
 	return {

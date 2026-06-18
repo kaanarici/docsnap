@@ -27,7 +27,7 @@ import {
 import { buildSummary } from "../report/summary.ts";
 import { dedupeRecords } from "./dedupe.ts";
 import { applyInlineState } from "./inline-state.ts";
-import { hasOutputPath, isPageSuccess } from "./records.ts";
+import { hasOutputPath, isMaterialized, isPageSuccess } from "./records.ts";
 import {
 	type RefreshCounters,
 	refreshCounters,
@@ -35,11 +35,13 @@ import {
 } from "./refresh.ts";
 import { hashContent, snapshotStats } from "./snapshot.ts";
 import type {
-	Config,
 	DiscoveredUrl,
 	FetchedUrl,
+	PageOutput,
 	PageRecord,
 	PageSuccess,
+	PathedPage,
+	PipelineConfig,
 	PipelineResult,
 } from "./types.ts";
 import { urlWithoutFragmentAndQuery } from "./url.ts";
@@ -47,7 +49,7 @@ import { urlWithoutFragmentAndQuery } from "./url.ts";
 type Progress = (message: string) => void;
 const backfillExtraLimit = 8;
 export async function runPipeline(
-	config: Config,
+	config: PipelineConfig,
 	progress?: Progress,
 ): Promise<PipelineResult> {
 	assertOutputRootSafe(config);
@@ -59,7 +61,7 @@ export async function runPipeline(
 	}
 }
 async function runLocked(
-	config: Config,
+	config: PipelineConfig,
 	progress?: Progress,
 ): Promise<PipelineResult> {
 	const started = performance.now();
@@ -93,11 +95,11 @@ async function runLocked(
 		record.markdown = rewriteLocalLinks(record, links).trim();
 		record.contentHash = hashContent(record.markdown);
 	}
-	await preserveFetchedAtForUnchangedOutput(finalRecords, prior, config);
+	const outputs = await materializeOutputs(finalRecords, prior, config);
 	const snapshot = snapshotStats(
-		finalRecords.filter(hasOutputPath).map((record) => ({
+		outputs.map((record) => ({
 			path: record.outputPath,
-			body: renderPage(record),
+			body: record.rendered,
 		})),
 	);
 	const refreshReport = await refreshSummary(
@@ -130,7 +132,7 @@ async function runLocked(
 }
 async function fetchAndExtract(
 	discovered: DiscoveredUrl[],
-	config: Config,
+	config: PipelineConfig,
 	prior: PriorState,
 	refresh: RefreshCounters,
 ): Promise<PageRecord[]> {
@@ -165,7 +167,7 @@ async function fetchAndExtract(
 }
 async function recoverNotModified(
 	item: FetchedUrl,
-	config: Config,
+	config: PipelineConfig,
 	prior: PriorState,
 	refresh: RefreshCounters,
 	allowUrl: ((url: string) => Promise<boolean>) | undefined,
@@ -198,7 +200,7 @@ async function recoverNotModified(
 }
 async function allowedByRobots(
 	url: string,
-	config: Config,
+	config: PipelineConfig,
 	robotsByOrigin: Map<string, Robots>,
 ) {
 	if (config.ignoreRobots) return true;
@@ -220,7 +222,7 @@ function mergeRecoveredDiscovery(
 	return renderPage(current) === renderPage(recovered) ? recovered : current;
 }
 function shouldBackfill(
-	config: Config,
+	config: PipelineConfig,
 	records: PageRecord[],
 	discovered: DiscoveredUrl[],
 ) {
@@ -232,7 +234,7 @@ function shouldBackfill(
 		records.some((record) => !record.ok && record.failureKind === "empty")
 	);
 }
-async function backfillCandidates(config: Config, seen: Set<string>) {
+async function backfillCandidates(config: PipelineConfig, seen: Set<string>) {
 	const discovered = await discover({
 		...config,
 		max: config.max + backfillExtraLimit,
@@ -247,36 +249,59 @@ async function backfillCandidates(config: Config, seen: Set<string>) {
 	}
 	return out;
 }
-function outputCandidates(records: PageRecord[], config: Config) {
+function outputCandidates(records: PageRecord[], config: PipelineConfig) {
 	const ok = records.filter(isPageSuccess);
 	return config.maxExplicit ? ok.slice(0, config.max) : ok;
 }
-async function preserveFetchedAtForUnchangedOutput(
+// The single point where a path-assigned success record becomes a PageOutput:
+// it settles fetchedAt (preserving the prior run's timestamp when the rendered
+// body is otherwise unchanged on disk) and attaches the canonical `rendered`
+// string in one pass. Every downstream consumer reads record.rendered, so the
+// snapshot hash, the written file, and the manifest outputHash are the same
+// bytes by construction rather than by call order.
+async function materializeOutputs(
 	records: PageRecord[],
 	prior: PriorState,
-	config: Config,
-) {
-	if (!prior.enabled) return;
+	config: PipelineConfig,
+): Promise<PageOutput[]> {
+	const pathed = records.filter(hasOutputPath);
 	await Promise.all(
-		records.filter(hasOutputPath).map(async (record) => {
-			const previous = prior.find(record);
-			if (
-				!previous?.fetchedAt ||
-				previous.outputPath !== record.outputPath ||
-				previous.contentHash !== record.contentHash
-			) {
-				return;
-			}
-			const fetchedAt = record.fetchedAt;
-			record.fetchedAt = previous.fetchedAt;
-			if (
-				(await readPriorOutput(config, previous.outputPath)) ===
-				renderPage(record)
-			)
-				return;
-			record.fetchedAt = fetchedAt;
+		pathed.map(async (record) => {
+			record.rendered = await renderWithPreservedFetchedAt(
+				record,
+				prior,
+				config,
+			);
 		}),
 	);
+	return pathed.filter(isMaterialized);
+}
+
+// Renders the record, preferring the prior run's fetchedAt when doing so yields a
+// body byte-identical to what is already on disk. The candidate render that wins
+// is the one returned, so the fetchedAt decision and the canonical serialization
+// can never disagree.
+async function renderWithPreservedFetchedAt(
+	record: PathedPage,
+	prior: PriorState,
+	config: PipelineConfig,
+): Promise<string> {
+	const previous = prior.enabled ? prior.find(record) : undefined;
+	if (
+		!previous?.fetchedAt ||
+		previous.outputPath !== record.outputPath ||
+		previous.contentHash !== record.contentHash
+	) {
+		return renderPage(record);
+	}
+	const fetchedAt = record.fetchedAt;
+	record.fetchedAt = previous.fetchedAt;
+	const preserved = renderPage(record);
+	if ((await readPriorOutput(config, previous.outputPath)) === preserved) {
+		return preserved;
+	}
+	record.fetchedAt = fetchedAt;
+	return renderPage(record);
 }
 function candidateKey(raw: string) {
 	const url = new URL(urlWithoutFragmentAndQuery(raw));

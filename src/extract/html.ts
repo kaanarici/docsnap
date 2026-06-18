@@ -379,7 +379,7 @@ export function stripScriptStyleTags(html: string): string {
 }
 
 async function parseWithDefuddle(document: Document, url: string) {
-	const restore = silenceDefuddleErrors();
+	activeDefuddleParses++;
 	try {
 		return await Defuddle(document, url, {
 			markdown: true,
@@ -389,27 +389,29 @@ async function parseWithDefuddle(document: Document, url: string) {
 	} catch {
 		return undefined;
 	} finally {
-		restore();
+		activeDefuddleParses--;
 	}
 }
 
-let defuddleCalls = 0;
-const consoleError = console.error.bind(console);
-const consoleWarn = console.warn.bind(console);
+// Defuddle logs parse warnings straight to console; we drop them while a parse
+// is in flight. The console wrappers are installed once at module load and never
+// reassigned, so concurrent extractPage calls cannot race a save/restore the way
+// a swap-and-restore would — they only adjust a depth counter. Anything emitted
+// outside a Defuddle parse passes through untouched, preserving real CLI stderr.
+let activeDefuddleParses = 0;
 
-function silenceDefuddleErrors() {
-	if (defuddleCalls++ === 0) {
-		console.error = () => {};
-		console.warn = () => {};
-	}
-	return () => {
-		defuddleCalls--;
-		if (defuddleCalls === 0) {
-			console.error = consoleError;
-			console.warn = consoleWarn;
-		}
+function installDefuddleConsoleFilter() {
+	const error = console.error.bind(console);
+	const warn = console.warn.bind(console);
+	console.error = (...args: unknown[]) => {
+		if (activeDefuddleParses === 0) error(...args);
+	};
+	console.warn = (...args: unknown[]) => {
+		if (activeDefuddleParses === 0) warn(...args);
 	};
 }
+
+installDefuddleConsoleFilter();
 
 function resolveCanonical(href: string | null | undefined, base: string) {
 	if (!href) return undefined;

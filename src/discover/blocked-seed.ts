@@ -1,4 +1,4 @@
-import type { Config, FetchResult } from "../core/types.ts";
+import type { FetchResult, PipelineConfig } from "../core/types.ts";
 import { relatedHost } from "../core/url.ts";
 import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
 import type { Robots } from "./robots.ts";
@@ -14,7 +14,7 @@ import { normalizeUrl } from "./url.ts";
 // never fetched before that origin's robots policy is loaded and allows it.
 export async function canonicalOriginSeed(
 	inputSeed: string,
-	config: Config,
+	config: PipelineConfig,
 	allowResource?: FetchUrlGate,
 ): Promise<{ moved?: string; failure?: FetchResult }> {
 	const response = await fetchText(

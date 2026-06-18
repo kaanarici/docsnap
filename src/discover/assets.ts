@@ -4,7 +4,11 @@ import {
 	uniqueByWhitespace,
 	whitespaceKey,
 } from "../core/text.ts";
-import type { Config, DiscoveredUrl, FetchResult } from "../core/types.ts";
+import type {
+	DiscoveredUrl,
+	FetchResult,
+	PipelineConfig,
+} from "../core/types.ts";
 import { looksLikeAppShell } from "../extract/app-shell.ts";
 import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
 import { runBounded } from "../fetch/rate-limit.ts";
@@ -45,7 +49,7 @@ const jsAccept = "application/javascript,text/javascript,*/*;q=0.8";
 export async function discoverAssetPages(
 	seed: string,
 	html: string,
-	config: Config,
+	config: PipelineConfig,
 	options: AssetOptions,
 ): Promise<DiscoveredUrl[]> {
 	if (options.limit <= 0 || !looksLikeAppShell(html)) return [];

@@ -20,17 +20,16 @@ import {
 	isInsideOrSame,
 	realPathIsInside,
 } from "../core/fs-safety.ts";
-import { hasOutputPath } from "../core/records.ts";
+import { isMaterialized } from "../core/records.ts";
 import type {
-	Config,
 	PageOutput,
 	PageRecord,
+	PipelineConfig,
 	RunSummary,
 } from "../core/types.ts";
 import { installAgentFiles } from "./agent-files.ts";
 import { runFiles } from "./files.ts";
 import { manifestLines, summaryJson } from "./manifest.ts";
-import { renderPage } from "./page.ts";
 import { agentReadme, treeText } from "./readme.ts";
 
 export type WriteStats = {
@@ -38,7 +37,7 @@ export type WriteStats = {
 	skippedWrites: number;
 };
 
-export async function prepareOutput(config: Config): Promise<void> {
+export async function prepareOutput(config: PipelineConfig): Promise<void> {
 	assertOutputRootSafe(config);
 	if (config.dryRun) return;
 	const outDir = resolve(config.outDir);
@@ -54,7 +53,7 @@ export async function prepareOutput(config: Config): Promise<void> {
 	await assertSafeOutputRoot(outDir, config.outDir);
 }
 
-export function assertOutputRootSafe(config: Config): void {
+export function assertOutputRootSafe(config: PipelineConfig): void {
 	const outDir = resolve(config.outDir);
 	assertSafeOutputDir(outDir, config.outDir);
 }
@@ -63,7 +62,7 @@ export function assertOutputRootSafe(config: Config): void {
 // writes (or have one `--clean` rm wipe the other) in a shared output directory. It lives
 // outside outDir because `--clean` removes that tree.
 export async function acquireOutputLock(
-	config: Config,
+	config: PipelineConfig,
 ): Promise<DirLock | undefined> {
 	if (config.dryRun) return undefined;
 	const outDir = resolve(config.outDir);
@@ -82,12 +81,12 @@ export function releaseOutputLock(lock: DirLock | undefined): Promise<void> {
 
 export async function writePages(
 	records: PageRecord[],
-	config: Config,
+	config: PipelineConfig,
 	onPageDone?: () => void,
 ): Promise<WriteStats> {
 	if (config.dryRun) return { pageWrites: 0, skippedWrites: 0 };
 	const stats: WriteStats = { pageWrites: 0, skippedWrites: 0 };
-	await runWrites(records.filter(hasOutputPath), async (record) => {
+	await runWrites(records.filter(isMaterialized), async (record) => {
 		const wrote = await writePage(record, config);
 		if (wrote) stats.pageWrites++;
 		else stats.skippedWrites++;
@@ -99,7 +98,7 @@ export async function writePages(
 export async function writeRunFiles(
 	records: PageRecord[],
 	summary: RunSummary,
-	config: Config,
+	config: PipelineConfig,
 ): Promise<void> {
 	if (config.dryRun) return;
 	if (config.agentFiles)
@@ -131,10 +130,10 @@ async function runWrites<T>(
 	);
 }
 
-async function writePage(record: PageOutput, config: Config) {
+async function writePage(record: PageOutput, config: PipelineConfig) {
 	const started = performance.now();
 	const path = join(config.outDir, record.outputPath);
-	const body = renderPage(record);
+	const body = record.rendered;
 	const wrote = (await existingBody(path)) !== body;
 	if (wrote) await atomicWrite(path, body, config.outDir);
 	record.timings.writeMs = performance.now() - started;

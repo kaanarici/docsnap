@@ -1,4 +1,8 @@
-import type { Config, DiscoveredUrl, FetchResult } from "../core/types.ts";
+import type {
+	DiscoveredUrl,
+	FetchResult,
+	PipelineConfig,
+} from "../core/types.ts";
 import {
 	relatedHost,
 	sameSharedHostPlatform,
@@ -19,7 +23,7 @@ export type LlmsCorpusOptions = LlmsDiscoveryOptions & {
 
 export async function discoverLlmsUrls(
 	seed: string,
-	config: Config,
+	config: PipelineConfig,
 	options: LlmsCorpusOptions,
 ) {
 	await cacheRobotsBlockedLlmsCandidates(seed, config, options);
@@ -30,7 +34,7 @@ export async function discoverLlmsUrls(
 
 export async function resourceAllowed(
 	url: string,
-	config: Config,
+	config: PipelineConfig,
 	robotsByOrigin: Map<string, Robots>,
 ) {
 	if (config.ignoreRobots) return true;
@@ -46,7 +50,7 @@ export async function discoverLlmsCorpus(
 	seed: string,
 	sourceSeed: string,
 	scope: string,
-	config: Config,
+	config: PipelineConfig,
 	options: LlmsCorpusOptions,
 ) {
 	const llmsUrls = await discoverLlmsUrls(seed, config, options);
@@ -86,7 +90,7 @@ export async function discoverLlmsCorpus(
 
 export async function robotsForOrigin(
 	origin: string,
-	config: Config,
+	config: PipelineConfig,
 	robotsByOrigin: Map<string, Robots>,
 ) {
 	let robots = robotsByOrigin.get(origin);
@@ -99,7 +103,7 @@ export async function robotsForOrigin(
 
 async function cacheRobotsBlockedLlmsCandidates(
 	seed: string,
-	config: Config,
+	config: PipelineConfig,
 	options: LlmsCorpusOptions,
 ) {
 	if (config.ignoreRobots) return;

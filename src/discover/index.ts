@@ -1,4 +1,4 @@
-import type { Config, DiscoveredUrl } from "../core/types.ts";
+import type { DiscoveredUrl, PipelineConfig } from "../core/types.ts";
 import { isLanguageSelector, looksLikeAppShell } from "../extract/app-shell.ts";
 import { fetchText } from "../fetch/fetcher.ts";
 import { filteredNonPageResult, robotsBlockedResult } from "../fetch/result.ts";
@@ -31,7 +31,9 @@ import {
 	scopeFromSeed,
 } from "./url.ts";
 
-export async function discover(config: Config): Promise<DiscoveredUrl[]> {
+export async function discover(
+	config: PipelineConfig,
+): Promise<DiscoveredUrl[]> {
 	const inputSeed = seedInputUrl(config.seedUrl);
 	const inputUrl = new URL(inputSeed);
 	const seedRobots = await loadRobots(inputUrl.origin, config);
@@ -360,7 +362,7 @@ function pageSeedUrl(raw: string, normalized: string) {
 	}
 }
 
-function hasCorpus(out: DiscoveredUrl[], config: Config) {
+function hasCorpus(out: DiscoveredUrl[], config: PipelineConfig) {
 	return out.length >= Math.min(config.max, config.maxExplicit ? 3 : 2);
 }
 
@@ -382,7 +384,7 @@ function usesRootFallback(seed: string, inputSeed: string) {
 
 async function addLlms(
 	seed: string,
-	config: Config,
+	config: PipelineConfig,
 	add: (raw: string | undefined, source: "llms") => boolean,
 	options: LlmsCorpusOptions,
 ) {
@@ -441,7 +443,7 @@ function parentScopes(scope: string) {
 async function disallowedSeedDiscovery(
 	inputSeed: string,
 	robots: Robots,
-	config: Config,
+	config: PipelineConfig,
 	llmsOptions: LlmsCorpusOptions,
 ): Promise<DiscoveredUrl[]> {
 	const out = await discoverLlmsCorpus(

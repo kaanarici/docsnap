@@ -1,5 +1,6 @@
+import type { ConfigInput } from "../cli/args.ts";
 import { runPipeline } from "../core/pipeline.ts";
-import type { Config, RunSummary } from "../core/types.ts";
+import type { PipelineConfig, RunSummary } from "../core/types.ts";
 import { runFiles } from "../output/files.ts";
 import {
 	type McpState,
@@ -16,14 +17,14 @@ import type { FetchToolInput } from "./inputs.ts";
 // cited context for a question. It is a thin orchestration over runPipeline,
 // readSummary, and the ranked context-pack path; it duplicates no capture or
 // ranking logic. MCP-mode safety is inherited from the caller-supplied config
-// (ignoreRobots:false set in controlledConfig) and from the context-pack /
+// (buildPipelineConfig defaults ignoreRobots:false) and from the context-pack /
 // frameWebContent fencing.
 
 export type FetchToolDeps = {
-	// builds a fully locked-down MCP capture Config (ignoreRobots:false, no
-	// agent files, quiet) from argv; supplied by tools.ts so fetch reuses the
-	// exact same safety contract as docsnap_capture.
-	buildConfig: (argv: string[]) => Config;
+	// builds an MCP capture PipelineConfig (ignoreRobots:false by default) from a
+	// typed ConfigInput; supplied by tools.ts so fetch reuses the exact same
+	// safety contract and invariants as docsnap_capture.
+	buildConfig: (input: ConfigInput) => PipelineConfig;
 	progress: (message: string) => void;
 };
 
@@ -73,12 +74,12 @@ export async function runFetchTool(
 
 async function capture(
 	input: FetchToolInput,
-	base: Config,
+	base: PipelineConfig,
 	outputDir: string,
 	action: FetchAction,
 	deps: FetchToolDeps,
 ): Promise<RunSummary> {
-	const config: Config = { ...base, outDir: outputDir };
+	const config: PipelineConfig = { ...base, outDir: outputDir };
 	// "force" recaptures from scratch; "refresh" lets prior pages reuse via
 	// ETag/Last-Modified because loadPrior reads the existing manifest in place.
 	if (action === "captured" && input.freshness === "force") config.clean = true;
@@ -114,19 +115,27 @@ function buildBaseConfig(
 	input: FetchToolInput,
 	scope: FetchScope,
 	deps: FetchToolDeps,
-): Config {
-	const config = deps.buildConfig([input.url]);
-	if (scope === "page") {
-		config.pageOnly = true;
-		config.max = 1;
-	} else if (input.max_pages !== undefined) {
-		config.max = input.max_pages;
-	} else if (input.scope === "auto" || input.scope === undefined) {
-		// auto site capture stays small to keep one-call fetch fast and polite.
-		config.max = Math.min(config.max, autoSiteCap);
-	}
-	config.maxExplicit = true;
-	return config;
+): PipelineConfig {
+	const max = captureMax(input, scope);
+	return deps.buildConfig({
+		seedUrl: input.url,
+		pageOnly: scope === "page",
+		...(max !== undefined ? { max } : {}),
+		maxExplicit: true,
+	});
+}
+
+// page: a single page; explicit max_pages wins; an auto-resolved site stays
+// capped small to keep one-call fetch fast and polite, while an explicit
+// scope:"site" keeps the full default budget.
+function captureMax(
+	input: FetchToolInput,
+	scope: FetchScope,
+): number | undefined {
+	if (scope === "page") return 1;
+	if (input.max_pages !== undefined) return input.max_pages;
+	if (input.scope === "auto" || input.scope === undefined) return autoSiteCap;
+	return undefined;
 }
 
 // auto: a URL that points at a specific document (file-like last segment or a

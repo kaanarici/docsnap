@@ -77,7 +77,30 @@ export const lowQualityConfidence = 0.6;
 export type RunStatus = "ok" | "partial" | "failed";
 export type MaxAppliesTo = "all" | "non-llms";
 
-export type Config = {
+export type HeaderMap = {
+	get(name: string): string | null;
+	getSetCookie?(): string[];
+};
+
+export type HttpResponse = {
+	url: string;
+	status: number;
+	headers: HeaderMap;
+	body: Uint8Array;
+};
+
+// The single network seam. The production transport (requestPublicHttp) is the
+// default carried on every PipelineConfig; tests inject an alternate so the
+// transport flows through the call stack instead of a mutable module global.
+export type FetchTransport = (
+	raw: string,
+	headers: Record<string, string>,
+	config: PipelineConfig,
+) => Promise<HttpResponse>;
+
+// Everything the capture pipeline consumes. It is the sole input to runPipeline
+// and the only config any programmatic caller (CLI, MCP) needs to build a run.
+export type PipelineConfig = {
 	seedUrl: string;
 	outDir: string;
 	max: number;
@@ -94,10 +117,21 @@ export type Config = {
 	timeoutMs: number;
 	retryHttp?: boolean;
 	maxBytes: number;
-	failOnLowQuality: boolean;
-	failOnInjectionSignal: boolean;
+	// Optional network seam: when set, every fetch for this run goes through it
+	// instead of the default public-HTTP transport. The pipeline resolves the
+	// effective transport per request, so cache policy and request routing depend
+	// on a config value rather than a mutable module global.
+	transport?: FetchTransport;
+};
+
+// CLI-only presentation/exit-code surface. The pipeline never reads these; the
+// CLI applies them after a run to choose output format and exit status. Keeping
+// them out of PipelineConfig means non-CLI callers cannot leak them in.
+export type CliOptions = {
 	json: boolean;
 	quiet: boolean;
+	failOnLowQuality: boolean;
+	failOnInjectionSignal: boolean;
 };
 
 type FetchBase = {
@@ -195,9 +229,21 @@ export type PageSuccess = PageBase & {
 	confidence: number;
 	qualityReasons: string[];
 	outputPath?: string;
+	// Derived in-memory serialization (frontmatter + markdown). Populated only by
+	// the materialization step once an outputPath and final fetchedAt are settled;
+	// never persisted to manifest.jsonl. See PageOutput.
+	rendered?: string;
 };
 
-export type PageOutput = PageSuccess & { outputPath: string };
+// A success record that has an outputPath assigned but is not yet serialized.
+export type PathedPage = PageSuccess & { outputPath: string };
+
+// A success record promoted to the output stage: it has a concrete outputPath
+// and its serialized form materialized exactly once. `rendered` is the single
+// source of truth for the bytes written to disk, hashed into the snapshot, and
+// emitted to the manifest — every consumer reads this field instead of
+// re-serializing, so the three hashes cannot diverge by call order.
+export type PageOutput = PathedPage & { rendered: string };
 
 export type PageFailure = PageBase & {
 	ok: false;

@@ -1,292 +1,127 @@
 import { resolvePriorOutputPath } from "../output/prior.ts";
 import { assertSafeProjectRoot } from "./corpus.ts";
+import { toolDefinitions } from "./definitions.ts";
 
-// Validated argument parsers for every MCP tool. Each rejects unknown fields and
-// enforces type/range bounds so untrusted JSON-RPC input cannot reach the
-// pipeline or filesystem without passing a strict allowlist.
+// Validated argument parsers for every MCP tool. Type, range, length, enum,
+// required, and unknown-field rejection are driven from each tool's published
+// inputSchema in definitions.ts, so the wire schema and the runtime guard cannot
+// drift (a maxLength declared for a client is also enforced here). Callers apply
+// their own defaults: validated() returns only fields that were actually
+// provided so absence-sensitive options — capture max_pages, which must stay
+// unset to leave maxExplicit false for llms.txt corpora — are not forced.
 
-type ObjectInput = Record<string, unknown>;
+type FetchScope = "page" | "site" | "auto";
+type Freshness = "reuse" | "refresh" | "force";
+type Safety = "exclude_injection" | "flag_all";
 
-export function captureInput(value: unknown) {
-	const input = objectInput(value, [
-		"url",
-		"output_dir",
-		"max_pages",
-		"page_only",
-		"clean",
-		"concurrency",
-	]);
-	return {
-		url: stringInput(input, "url"),
-		output_dir: optionalString(input, "output_dir"),
-		max_pages: optionalInt(input, "max_pages", 1, 500),
-		page_only: optionalBool(input, "page_only", false),
-		clean: optionalBool(input, "clean", false),
-		concurrency: optionalInt(input, "concurrency", 1, 64),
-	};
-}
-
-export function refreshInput(value: unknown) {
-	const input = objectInput(value, ["output_dir", "max_pages", "concurrency"]);
-	return {
-		output_dir: stringInput(input, "output_dir"),
-		max_pages: optionalInt(input, "max_pages", 1, 500),
-		concurrency: optionalInt(input, "concurrency", 1, 64),
-	};
-}
-
-export function corporaInput(value: unknown) {
-	const input = objectInput(value, ["root_dir", "page_size", "cursor"]);
-	const rootDir = optionalString(input, "root_dir") ?? "docsnap";
-	assertSafeProjectRoot(rootDir);
-	return {
-		root_dir: rootDir,
-		page_size: optionalInt(input, "page_size", 1, 100) ?? 25,
-		cursor: optionalCursor(input),
-	};
-}
-
-export function summaryInput(value: unknown) {
-	const input = objectInput(value, [
-		"output_dir",
-		"include_errors",
-		"include_refresh_changes",
-		"error_limit",
-	]);
-	return {
-		output_dir: stringInput(input, "output_dir"),
-		include_errors: optionalBool(input, "include_errors", true),
-		include_refresh_changes: optionalBool(
-			input,
-			"include_refresh_changes",
-			true,
-		),
-		error_limit: optionalInt(input, "error_limit", 0, 100) ?? 10,
-	};
-}
-
-export function pagesInput(value: unknown) {
-	const input = objectInput(value, [
-		"output_dir",
-		"page_size",
-		"cursor",
-		"include_failures",
-	]);
-	return {
-		output_dir: stringInput(input, "output_dir"),
-		page_size: optionalInt(input, "page_size", 1, 200) ?? 50,
-		cursor: optionalCursor(input),
-		include_failures: optionalBool(input, "include_failures", false),
-	};
-}
-
-export function searchInput(value: unknown) {
-	const input = objectInput(value, [
-		"output_dir",
-		"query",
-		"path_glob",
-		"max_results",
-		"snippet_chars",
-		"safety",
-	]);
-	return {
-		output_dir: stringInput(input, "output_dir"),
-		query: stringInput(input, "query"),
-		path_glob: optionalPathGlob(input),
-		max_results: optionalInt(input, "max_results", 1, 50) ?? 10,
-		snippet_chars: optionalInt(input, "snippet_chars", 120, 1200) ?? 350,
-		safety: optionalSafety(input),
-	};
-}
-
-export function readPageInput(value: unknown) {
-	const input = objectInput(value, [
-		"output_dir",
-		"output_path",
-		"start_line",
-		"end_line",
-		"max_chars",
-		"include_frontmatter",
-	]);
-	const output = stringInput(input, "output_dir");
-	const path = stringInput(input, "output_path");
-	if (!resolvePriorOutputPath({ outDir: output }, path)) {
-		throw new Error("output_path must be a safe relative manifest path");
-	}
-	const startLine = optionalInt(input, "start_line", 1, 1_000_000) ?? 1;
-	const endLine = optionalInt(input, "end_line", 1, 1_000_000);
-	if (endLine !== undefined && endLine < startLine) {
-		throw new Error("end_line must be greater than or equal to start_line");
-	}
-	return {
-		output_dir: output,
-		output_path: path,
-		start_line: startLine,
-		end_line: endLine,
-		max_chars: optionalInt(input, "max_chars", 500, 25_000) ?? 12_000,
-		include_frontmatter: optionalBool(input, "include_frontmatter", true),
-	};
-}
-
-export type FetchToolInput = {
-	url: string;
-	question?: string;
-	scope?: "page" | "site" | "auto";
+// The union of fields any tool can accept. Only the names and kinds live here;
+// the bounds that actually gate them live in definitions.ts. enum fields are
+// typed as their literal union because checkField rejects anything else.
+type ValidatedInput = {
+	url?: string;
 	output_dir?: string;
+	output_path?: string;
+	root_dir?: string;
+	query?: string;
+	question?: string;
+	cursor?: string;
+	path_glob?: string;
+	scope?: FetchScope;
+	freshness?: Freshness;
+	safety?: Safety;
 	max_pages?: number;
-	freshness: "reuse" | "refresh" | "force";
-	context_chars: number;
-	safety: "exclude_injection" | "flag_all";
+	concurrency?: number;
+	page_size?: number;
+	error_limit?: number;
+	max_results?: number;
+	snippet_chars?: number;
+	start_line?: number;
+	end_line?: number;
+	max_chars?: number;
+	max_snippets?: number;
+	context_chars?: number;
+	page_only?: boolean;
+	clean?: boolean;
+	include_errors?: boolean;
+	include_refresh_changes?: boolean;
+	include_failures?: boolean;
+	include_frontmatter?: boolean;
 };
 
-export function fetchInput(value: unknown): FetchToolInput {
-	const input = objectInput(value, [
-		"url",
-		"question",
-		"scope",
-		"output_dir",
-		"max_pages",
-		"freshness",
-		"context_chars",
-		"safety",
-	]);
-	const question = optionalString(input, "question");
-	if (question !== undefined && question.length > 500) {
-		throw new Error("question must be 500 characters or fewer");
-	}
-	const outputDir = optionalString(input, "output_dir");
-	const maxPages = optionalInt(input, "max_pages", 1, 500);
-	return {
-		url: stringInput(input, "url"),
-		...(question !== undefined ? { question } : {}),
-		...("scope" in input ? { scope: optionalScope(input) } : {}),
-		...(outputDir !== undefined ? { output_dir: outputDir } : {}),
-		...(maxPages !== undefined ? { max_pages: maxPages } : {}),
-		freshness: optionalFreshness(input),
-		context_chars: optionalInt(input, "context_chars", 120, 1200) ?? 500,
-		safety: optionalSafety(input),
-	};
-}
+type PropSchema = {
+	type: "string" | "integer" | "boolean";
+	minimum?: number;
+	maximum?: number;
+	maxLength?: number;
+	enum?: readonly string[];
+};
 
-function optionalScope(input: ObjectInput): "page" | "site" | "auto" {
-	const value = optionalString(input, "scope") ?? "auto";
-	if (value !== "page" && value !== "site" && value !== "auto") {
-		throw new Error('scope must be "page", "site", or "auto"');
-	}
-	return value;
-}
+type ToolSchema = {
+	required?: string[];
+	properties: Record<string, PropSchema>;
+};
 
-function optionalFreshness(input: ObjectInput): "reuse" | "refresh" | "force" {
-	const value = optionalString(input, "freshness") ?? "reuse";
-	if (value !== "reuse" && value !== "refresh" && value !== "force") {
-		throw new Error('freshness must be "reuse", "refresh", or "force"');
-	}
-	return value;
-}
+const schemas = new Map<string, ToolSchema>(
+	toolDefinitions.map((tool) => [
+		tool.name,
+		tool.inputSchema as unknown as ToolSchema,
+	]),
+);
 
-export function contextPackInput(value: unknown) {
-	const input = objectInput(value, [
-		"output_dir",
-		"query",
-		"max_snippets",
-		"context_chars",
-		"path_glob",
-		"safety",
-	]);
-	const output = stringInput(input, "output_dir");
-	const query = stringInput(input, "query");
-	if (query.length > 500) {
-		throw new Error("query must be 500 characters or fewer");
-	}
-	return {
-		output_dir: output,
-		query,
-		max_snippets: optionalInt(input, "max_snippets", 1, 25) ?? 8,
-		context_chars: optionalInt(input, "context_chars", 120, 1200) ?? 500,
-		path_glob: optionalPathGlob(input),
-		safety: optionalSafety(input),
-	};
-}
-
-function optionalSafety(input: ObjectInput): "exclude_injection" | "flag_all" {
-	const value = optionalString(input, "safety") ?? "flag_all";
-	if (value !== "exclude_injection" && value !== "flag_all") {
-		throw new Error('safety must be "exclude_injection" or "flag_all"');
-	}
-	return value;
-}
-
-function objectInput(value: unknown, allowed: string[]): ObjectInput {
-	if (!value || typeof value !== "object" || Array.isArray(value)) {
-		return {};
-	}
-	const input = value as ObjectInput;
+function validated(tool: string, value: unknown): ValidatedInput {
+	const schema = schemas.get(tool);
+	if (!schema) throw new Error(`Unknown tool: ${tool}`);
+	const input =
+		value && typeof value === "object" && !Array.isArray(value)
+			? (value as Record<string, unknown>)
+			: {};
 	for (const key of Object.keys(input)) {
-		if (!allowed.includes(key)) {
+		if (!(key in schema.properties)) {
 			throw new Error(`Unexpected input field: ${key}`);
 		}
 	}
-	return input;
+	const out: Record<string, unknown> = {};
+	for (const [key, prop] of Object.entries(schema.properties)) {
+		if (!(key in input)) {
+			if (schema.required?.includes(key)) throw new Error(`${key} is required`);
+			continue;
+		}
+		out[key] = checkField(key, input[key], prop);
+	}
+	return out as ValidatedInput;
 }
 
-function stringInput(input: ObjectInput, key: string): string {
-	const value = input[key];
-	if (
-		typeof value !== "string" ||
-		value.trim() === "" ||
-		value.includes("\0")
-	) {
+function checkField(key: string, raw: unknown, prop: PropSchema): unknown {
+	if (prop.type === "boolean") {
+		if (typeof raw !== "boolean") throw new Error(`${key} must be boolean`);
+		return raw;
+	}
+	if (prop.type === "integer") {
+		if (
+			!Number.isInteger(raw) ||
+			(prop.minimum !== undefined && (raw as number) < prop.minimum) ||
+			(prop.maximum !== undefined && (raw as number) > prop.maximum)
+		) {
+			throw new Error(
+				`${key} must be an integer from ${prop.minimum} to ${prop.maximum}`,
+			);
+		}
+		return raw;
+	}
+	if (typeof raw !== "string" || raw.trim() === "" || raw.includes("\0")) {
 		throw new Error(`${key} must be a non-empty string`);
 	}
-	return value;
-}
-
-function optionalString(input: ObjectInput, key: string): string | undefined {
-	if (!(key in input)) return undefined;
-	return stringInput(input, key);
-}
-
-function optionalInt(
-	input: ObjectInput,
-	key: string,
-	min: number,
-	max: number,
-): number | undefined {
-	if (!(key in input)) return undefined;
-	const value = input[key];
-	if (
-		!Number.isInteger(value) ||
-		(value as number) < min ||
-		(value as number) > max
-	) {
-		throw new Error(`${key} must be an integer from ${min} to ${max}`);
+	if (prop.maxLength !== undefined && raw.length > prop.maxLength) {
+		throw new Error(`${key} must be ${prop.maxLength} characters or fewer`);
 	}
-	return value as number;
-}
-
-function optionalBool(
-	input: ObjectInput,
-	key: string,
-	fallback: boolean,
-): boolean {
-	if (!(key in input)) return fallback;
-	if (typeof input[key] !== "boolean") {
-		throw new Error(`${key} must be boolean`);
+	if (prop.enum && !prop.enum.includes(raw)) {
+		throw new Error(`${key} must be one of: ${prop.enum.join(", ")}`);
 	}
-	return input[key];
+	return raw;
 }
 
-function optionalCursor(input: ObjectInput): string | undefined {
-	const cursor = optionalString(input, "cursor");
-	if (cursor !== undefined && !/^\d{1,8}$/.test(cursor)) {
-		throw new Error("cursor must be a pagination token returned by docsnap");
-	}
-	return cursor;
-}
-
-function optionalPathGlob(input: ObjectInput): string | undefined {
-	const glob = optionalString(input, "path_glob");
-	if (!glob) return undefined;
+function pathGlobOf(glob: string | undefined): string | undefined {
+	if (glob === undefined) return undefined;
 	if (
 		glob.length > 200 ||
 		glob.startsWith("/") ||
@@ -296,4 +131,135 @@ function optionalPathGlob(input: ObjectInput): string | undefined {
 		throw new Error("path_glob must be a simple relative glob");
 	}
 	return glob;
+}
+
+function cursorOf(cursor: string | undefined): string | undefined {
+	if (cursor === undefined) return undefined;
+	if (!/^\d{1,8}$/.test(cursor)) {
+		throw new Error("cursor must be a pagination token returned by docsnap");
+	}
+	return cursor;
+}
+
+export function captureInput(value: unknown) {
+	const v = validated("docsnap_capture", value);
+	return {
+		url: v.url as string,
+		output_dir: v.output_dir,
+		max_pages: v.max_pages,
+		page_only: v.page_only ?? false,
+		clean: v.clean ?? false,
+		concurrency: v.concurrency,
+	};
+}
+
+export function refreshInput(value: unknown) {
+	const v = validated("docsnap_refresh", value);
+	return {
+		output_dir: v.output_dir as string,
+		max_pages: v.max_pages,
+		concurrency: v.concurrency,
+	};
+}
+
+export function corporaInput(value: unknown) {
+	const v = validated("docsnap_list_corpora", value);
+	const rootDir = v.root_dir ?? "docsnap";
+	assertSafeProjectRoot(rootDir);
+	return {
+		root_dir: rootDir,
+		page_size: v.page_size ?? 25,
+		cursor: cursorOf(v.cursor),
+	};
+}
+
+export function summaryInput(value: unknown) {
+	const v = validated("docsnap_get_corpus_summary", value);
+	return {
+		output_dir: v.output_dir as string,
+		include_errors: v.include_errors ?? true,
+		include_refresh_changes: v.include_refresh_changes ?? true,
+		error_limit: v.error_limit ?? 10,
+	};
+}
+
+export function pagesInput(value: unknown) {
+	const v = validated("docsnap_list_pages", value);
+	return {
+		output_dir: v.output_dir as string,
+		page_size: v.page_size ?? 50,
+		cursor: cursorOf(v.cursor),
+		include_failures: v.include_failures ?? false,
+	};
+}
+
+export function searchInput(value: unknown) {
+	const v = validated("docsnap_search_corpus", value);
+	return {
+		output_dir: v.output_dir as string,
+		query: v.query as string,
+		path_glob: pathGlobOf(v.path_glob),
+		max_results: v.max_results ?? 10,
+		snippet_chars: v.snippet_chars ?? 350,
+		safety: v.safety ?? "flag_all",
+	};
+}
+
+export function readPageInput(value: unknown) {
+	const v = validated("docsnap_read_page", value);
+	const output = v.output_dir as string;
+	const path = v.output_path as string;
+	if (!resolvePriorOutputPath({ outDir: output }, path)) {
+		throw new Error("output_path must be a safe relative manifest path");
+	}
+	const startLine = v.start_line ?? 1;
+	const endLine = v.end_line;
+	if (endLine !== undefined && endLine < startLine) {
+		throw new Error("end_line must be greater than or equal to start_line");
+	}
+	return {
+		output_dir: output,
+		output_path: path,
+		start_line: startLine,
+		end_line: endLine,
+		max_chars: v.max_chars ?? 12_000,
+		include_frontmatter: v.include_frontmatter ?? true,
+	};
+}
+
+export type FetchToolInput = {
+	url: string;
+	question?: string;
+	scope?: FetchScope;
+	output_dir?: string;
+	max_pages?: number;
+	freshness: Freshness;
+	context_chars: number;
+	safety: Safety;
+};
+
+export function fetchInput(value: unknown): FetchToolInput {
+	const v = validated("docsnap_fetch", value);
+	return {
+		url: v.url as string,
+		...(v.question !== undefined ? { question: v.question } : {}),
+		...(v.scope !== undefined ? { scope: v.scope } : {}),
+		...(v.output_dir !== undefined ? { output_dir: v.output_dir } : {}),
+		...(v.max_pages !== undefined ? { max_pages: v.max_pages } : {}),
+		freshness: v.freshness ?? "reuse",
+		context_chars: v.context_chars ?? 500,
+		safety: v.safety ?? "flag_all",
+	};
+}
+
+export function contextPackInput(value: unknown) {
+	const v = validated("docsnap_context_pack", value);
+	return {
+		output_dir: v.output_dir as string,
+		query: v.query as string,
+		max_snippets: v.max_snippets ?? 8,
+		context_chars: v.context_chars ?? 500,
+		path_glob: pathGlobOf(v.path_glob),
+		safety: v.safety ?? "flag_all",
+	};
 }

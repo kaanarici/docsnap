@@ -2,7 +2,7 @@
 
 Browser-free CLI that turns public docs and text-heavy pages into clean Markdown corpora for coding agents.
 
-docsnap uses static fetches, `llms.txt`, sitemaps, regular links, and inline-state extraction. It does not launch a browser and has no `--render` mode.
+docsnap uses static fetches, `llms.txt`, sitemaps, RSS/Atom feeds, regular links, JS asset text mining, and inline-state extraction. It does not launch a browser and has no `--render` mode.
 
 ```bash
 bunx docsnap https://react.dev/reference -m 8 --clean

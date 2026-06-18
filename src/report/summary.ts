@@ -4,7 +4,6 @@ import type { SnapshotStats } from "../core/snapshot.ts";
 import { snapshotSchemaVersion } from "../core/snapshot.ts";
 import {
 	type CacheSummary,
-	type Config,
 	discoverySources,
 	type FailureKind,
 	type InjectionSignal,
@@ -14,6 +13,7 @@ import {
 	lowQualityConfidence,
 	type PageRecord,
 	type PageSuccess,
+	type PipelineConfig,
 	pageExtractors,
 	type RefreshSummary,
 	type RunSummary,
@@ -21,7 +21,7 @@ import {
 
 export function buildSummary(
 	records: PageRecord[],
-	config: Config,
+	config: PipelineConfig,
 	discovered: number,
 	deduped: number,
 	snapshot: SnapshotStats,
@@ -136,7 +136,7 @@ export function buildSummary(
 
 // Reflect the real (safe-root-validated) cache context so an unsafe configured
 // DOCSNAP_CACHE_DIR reports disabled, not enabled with a bogus dir.
-export function emptyCacheSummary(config: Config): CacheSummary {
+export function emptyCacheSummary(config: PipelineConfig): CacheSummary {
 	return cacheSummary(config);
 }
 
@@ -190,7 +190,7 @@ function orderedPartialCounts<T extends string>(
 	return out;
 }
 
-function maxReached(config: Config, discovered: number) {
+function maxReached(config: PipelineConfig, discovered: number) {
 	return config.maxExplicit
 		? discovered >= config.max
 		: discovered === config.max;

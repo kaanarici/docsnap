@@ -1,6 +1,6 @@
-import { parseArgs } from "../cli/args.ts";
+import { buildPipelineConfig } from "../cli/args.ts";
 import { runPipeline } from "../core/pipeline.ts";
-import type { Config } from "../core/types.ts";
+import type { PipelineConfig } from "../core/types.ts";
 import {
 	type McpState,
 	readableCorpusDir,
@@ -70,7 +70,7 @@ async function fetch(args: unknown, state: McpState) {
 	return jsonToolResult(
 		await runFetchTool(
 			input,
-			{ buildConfig: controlledConfig, progress: stderrProgress },
+			{ buildConfig: buildPipelineConfig, progress: stderrProgress },
 			state,
 		),
 	);
@@ -239,50 +239,41 @@ async function contextPack(args: unknown, state: McpState) {
 	);
 }
 
-function configForCapture(input: ReturnType<typeof captureInput>): Config {
-	const argv = [input.url];
-	if (input.output_dir) argv.push("-o", input.output_dir);
-	if (input.max_pages !== undefined) argv.push("-m", String(input.max_pages));
-	if (input.page_only) argv.push("--page");
-	if (input.clean) argv.push("--clean");
-	if (input.concurrency !== undefined) {
-		argv.push("--concurrency", String(input.concurrency));
-	}
-	return controlledConfig(argv);
+// MCP capture maps validated tool fields straight into the shared ConfigInput.
+// ignoreRobots/dryRun/agentFiles are never set, so the resulting config carries
+// the same safety contract as the CLI without an argv round-trip.
+function configForCapture(
+	input: ReturnType<typeof captureInput>,
+): PipelineConfig {
+	return buildPipelineConfig({
+		seedUrl: input.url,
+		...(input.output_dir ? { outDir: input.output_dir } : {}),
+		...(input.max_pages !== undefined ? { max: input.max_pages } : {}),
+		pageOnly: input.page_only,
+		clean: input.clean,
+		...(input.concurrency !== undefined
+			? { concurrency: input.concurrency }
+			: {}),
+	});
 }
 
+// Refresh keeps the prior run's max policy: a new max_pages forces maxExplicit,
+// otherwise it inherits whether the prior max applied to llms.txt pages too.
 function configForRefresh(
 	input: ReturnType<typeof refreshInput>,
 	priorMax: number,
 	maxAppliesTo: "all" | "non-llms",
 	seedUrl: string,
-): Config {
-	const config = controlledConfig([seedUrl, "-o", input.output_dir]);
-	config.max = input.max_pages ?? priorMax;
-	config.maxExplicit =
-		input.max_pages !== undefined ? true : maxAppliesTo === "all";
-	if (input.concurrency !== undefined) {
-		config.concurrency = input.concurrency;
-		config.perOrigin = Math.min(config.concurrency, config.perOrigin);
-	}
-	return config;
-}
-
-function controlledConfig(argv: string[]): Config {
-	const parsed = parseArgs(argv);
-	if ("help" in parsed || "version" in parsed) {
-		throw new Error("Invalid MCP capture configuration");
-	}
-	return {
-		...parsed,
-		dryRun: false,
-		agentFiles: false,
-		ignoreRobots: false,
-		failOnLowQuality: false,
-		failOnInjectionSignal: false,
-		json: false,
-		quiet: true,
-	};
+): PipelineConfig {
+	return buildPipelineConfig({
+		seedUrl,
+		outDir: input.output_dir,
+		max: input.max_pages ?? priorMax,
+		maxExplicit: input.max_pages !== undefined ? true : maxAppliesTo === "all",
+		...(input.concurrency !== undefined
+			? { concurrency: input.concurrency }
+			: {}),
+	});
 }
 
 function stderrProgress(message: string): void {

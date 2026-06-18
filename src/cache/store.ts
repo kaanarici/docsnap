@@ -15,8 +15,8 @@ import { acquireDirLock, type DirLock } from "../core/dir-lock.ts";
 import { assertSafeRoot } from "../core/fs-safety.ts";
 import type {
 	CacheSummary,
-	Config,
 	FetchResult,
+	PipelineConfig,
 	RedirectHop,
 } from "../core/types.ts";
 import { validatePublicHttpUrl } from "../security/url.ts";
@@ -36,7 +36,7 @@ const defaultMaxBytes = 2 * 1024 * 1024 * 1024;
 const cacheDirEnv = "DOCSNAP_CACHE_DIR";
 const cacheMaxEnv = "DOCSNAP_CACHE_MAX_MB";
 const allowTestHostEnv = "DOCSNAP_ALLOW_TEST_HOST";
-const contexts = new WeakMap<Config, CacheContext>();
+const contexts = new WeakMap<PipelineConfig, CacheContext>();
 
 export type CacheContext = {
 	enabled: boolean;
@@ -76,7 +76,7 @@ export type CacheLookup =
 
 export function cacheRequest(
 	url: string,
-	config: Config,
+	config: PipelineConfig,
 	accept: string,
 ): CacheRequest {
 	return { url, accept, userAgent: config.userAgent };
@@ -98,7 +98,7 @@ export function cacheKey(request: CacheRequest): string {
 }
 
 export async function readCache(
-	config: Config,
+	config: PipelineConfig,
 	request: CacheRequest,
 	options: { count?: boolean } = {},
 ): Promise<CacheLookup> {
@@ -136,7 +136,7 @@ export async function readCache(
 }
 
 export async function writeCacheResult(
-	config: Config,
+	config: PipelineConfig,
 	key: string,
 	request: CacheRequest,
 	result: FetchResult,
@@ -230,7 +230,7 @@ async function blobReferenced(
 }
 
 export async function refreshCacheEntry(
-	config: Config,
+	config: PipelineConfig,
 	key: string,
 	entry: CacheEntry,
 	result: FetchResult,
@@ -271,7 +271,7 @@ export async function refreshCacheEntry(
 }
 
 export async function acquireCacheLock(
-	config: Config,
+	config: PipelineConfig,
 	key: string,
 ): Promise<DirLock | undefined> {
 	const context = cacheContext(config);
@@ -300,7 +300,7 @@ export function cachedFetchResult(
 	);
 }
 
-export function cacheSummary(config: Config): CacheSummary {
+export function cacheSummary(config: PipelineConfig): CacheSummary {
 	const summary = cacheContext(config).stats;
 	return { ...summary };
 }
@@ -313,7 +313,7 @@ export function cacheConditional(entry: CacheEntry) {
 	};
 }
 
-export function cacheContext(config: Config): CacheContext {
+export function cacheContext(config: PipelineConfig): CacheContext {
 	const existing = contexts.get(config);
 	if (existing) return existing;
 	const dir = cacheDir(config);
@@ -339,7 +339,7 @@ export function cacheContext(config: Config): CacheContext {
 	return context;
 }
 
-function cacheDir(config: Config): string | null {
+function cacheDir(config: PipelineConfig): string | null {
 	if (!config.cache) return null;
 	const value = process.env[cacheDirEnv]?.trim();
 	if (value?.toLowerCase() === "off") return null;

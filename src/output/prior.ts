@@ -9,16 +9,16 @@ import {
 import { hashContent } from "../core/snapshot.ts";
 import type {
 	ConditionalRequest,
-	Config,
 	DiscoverySource,
 	PageExtractor,
 	PageSuccess,
+	PipelineConfig,
 } from "../core/types.ts";
 import { filterInjectionSignals } from "../core/types.ts";
 import { scanMarkdownForInjectionSignals } from "../security/injection.ts";
 import { runFiles } from "./files.ts";
 
-export type PriorPage = Omit<PageSuccess, "markdown"> & {
+export type PriorPage = Omit<PageSuccess, "markdown" | "rendered"> & {
 	outputPath: string;
 	outputHash?: string;
 	bytes?: number;
@@ -34,7 +34,7 @@ export type PriorState = {
 
 type OutputRoot = { outDir: string };
 
-export async function loadPrior(config: Config): Promise<PriorState> {
+export async function loadPrior(config: PipelineConfig): Promise<PriorState> {
 	if (config.clean) return disabled("clean");
 	try {
 		const text = await readFile(join(config.outDir, runFiles.manifest), "utf8");
@@ -63,7 +63,7 @@ export function conditionalForPrior(
 }
 
 export async function recoverPriorPage(
-	config: Config,
+	config: PipelineConfig,
 	prior: PriorPage,
 	updates: {
 		fetchMs: number;
@@ -151,7 +151,7 @@ function disabled(reason: NonNullable<PriorState["reason"]>): PriorState {
 	};
 }
 
-function parsePriorManifest(text: string, config: Config): PriorPage[] {
+function parsePriorManifest(text: string, config: PipelineConfig): PriorPage[] {
 	const lines = text.split(/\n/).filter((line) => line.trim());
 	const out: PriorPage[] = [];
 	for (const line of lines) {
@@ -168,7 +168,7 @@ function isManifestRecord(value: unknown): value is { ok: boolean } {
 
 function isReusablePrior(
 	value: { ok: boolean },
-	config: Config,
+	config: PipelineConfig,
 ): value is PriorPage {
 	const record = value as Partial<PriorPage>;
 	return (

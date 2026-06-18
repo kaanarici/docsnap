@@ -1,5 +1,9 @@
 import { DOMParser, parseHTML } from "linkedom";
-import type { Config, DiscoveredUrl, FetchResult } from "../core/types.ts";
+import type {
+	DiscoveredUrl,
+	FetchResult,
+	PipelineConfig,
+} from "../core/types.ts";
 import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
 import { discoverPageLinks } from "./nav.ts";
 import {
@@ -72,7 +76,7 @@ export async function discoverFeed(
 	feedUrl: string,
 	seed: string,
 	scope: string,
-	config: Config,
+	config: PipelineConfig,
 	options: FeedDiscoveryOptions = {},
 ): Promise<DiscoveredUrl[]> {
 	const limit = options.limit ?? Number.POSITIVE_INFINITY;
@@ -110,7 +114,7 @@ export async function discoverRelNextPages(
 	base: string,
 	seed: string,
 	scope: string,
-	config: Config,
+	config: PipelineConfig,
 	options: RelNextOptions = {},
 ): Promise<DiscoveredUrl[]> {
 	const limit = options.limit ?? Number.POSITIVE_INFINITY;

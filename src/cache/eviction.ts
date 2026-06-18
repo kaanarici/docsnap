@@ -1,6 +1,6 @@
 import { readdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
-import type { Config } from "../core/types.ts";
+import type { PipelineConfig } from "../core/types.ts";
 import { blobPath, entryKeyFromFileName, pathFor } from "./paths.ts";
 import {
 	type CacheContext,
@@ -13,7 +13,7 @@ import {
 
 const pruneTargetRatio = 0.8;
 
-export async function pruneCache(config: Config): Promise<void> {
+export async function pruneCache(config: PipelineConfig): Promise<void> {
 	const context = cacheContext(config);
 	if (!context.enabled) return;
 	try {

@@ -1,5 +1,5 @@
-import type { Config } from "../core/types.ts";
-import type { FetchTransport } from "./transport.ts";
+import type { PipelineConfig } from "../core/types.ts";
+import { effectiveTransport } from "./test-transport.ts";
 
 type RequestHeaders = { accept: string; "user-agent": string; cookie?: string };
 
@@ -7,8 +7,7 @@ export async function withWritersideTopic(
 	html: string,
 	base: string,
 	headers: RequestHeaders,
-	config: Config,
-	fetchTransport: FetchTransport,
+	config: PipelineConfig,
 	allowUrl?: (url: string) => boolean | Promise<boolean>,
 ): Promise<string> {
 	const topicUrl = writersideTopicUrl(html, base);
@@ -18,7 +17,7 @@ export async function withWritersideTopic(
 	if (allowUrl && !(await allowUrl(topicUrl))) return html;
 	try {
 		const cookie = headers.cookie;
-		const response = await fetchTransport(
+		const response = await effectiveTransport(config)(
 			topicUrl,
 			{
 				accept: "application/json,text/plain;q=0.9,*/*;q=0.8",

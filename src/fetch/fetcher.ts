@@ -1,10 +1,10 @@
 import { fetchWithCache } from "../cache/cached-fetch.ts";
 import type {
 	ConditionalRequest,
-	Config,
 	DiscoveredUrl,
 	FetchedUrl,
 	FetchResult,
+	PipelineConfig,
 	RedirectHop,
 } from "../core/types.ts";
 import { decodeResponseBody } from "./body.ts";
@@ -14,28 +14,30 @@ import { refreshUrl } from "./refresh.ts";
 import { failed, failureKind } from "./result.ts";
 import { isRetryableFetchError, retryDelayMs, shouldRetry } from "./retry.ts";
 import {
-	type FetchTransport,
-	type HttpResponse,
-	requestPublicHttp,
-} from "./transport.ts";
+	effectiveTransport,
+	setFetchTransportForTest,
+} from "./test-transport.ts";
+import { type HttpResponse, requestPublicHttp } from "./transport.ts";
 import { withWritersideTopic } from "./writerside.ts";
 
+export { setFetchTransportForTest };
+
 const cacheDirEnv = "DOCSNAP_CACHE_DIR";
-let fetchTransport: FetchTransport = requestPublicHttp;
 export type FetchUrlGate = (url: string) => boolean | Promise<boolean>;
-export function setFetchTransportForTest(
-	transport: FetchTransport | undefined,
-) {
-	fetchTransport = transport ?? requestPublicHttp;
-}
 export async function fetchText(
 	url: string,
-	config: Config,
+	config: PipelineConfig,
 	accept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 	conditional?: ConditionalRequest,
 	allowUrl?: FetchUrlGate,
 ): Promise<FetchResult> {
-	if (fetchTransport !== requestPublicHttp && !process.env[cacheDirEnv])
+	// A non-default transport bypasses the on-disk cache unless a test explicitly
+	// opts into caching with DOCSNAP_CACHE_DIR. Keyed on the resolved transport,
+	// not on a mutable module binding read at fetch time.
+	if (
+		effectiveTransport(config) !== requestPublicHttp &&
+		!process.env[cacheDirEnv]
+	)
 		return fetchTextUncached(url, config, accept, conditional, allowUrl);
 	return fetchWithCache(
 		url,
@@ -48,7 +50,7 @@ export async function fetchText(
 }
 export async function fetchTextUncached(
 	url: string,
-	config: Config,
+	config: PipelineConfig,
 	accept: string,
 	conditional?: ConditionalRequest,
 	allowUrl?: FetchUrlGate,
@@ -117,7 +119,7 @@ export async function fetchTextUncached(
 async function fetchOnce(
 	url: string,
 	currentUrl: string,
-	config: Config,
+	config: PipelineConfig,
 	accept: string,
 	conditional: ConditionalRequest | undefined,
 	started: number,
@@ -139,7 +141,11 @@ async function fetchOnce(
 			Object.assign(headers, sentConditional);
 			const cookie = cookieHeader(cookies, requestUrl);
 			if (cookie) headers.cookie = cookie;
-			const response = await fetchTransport(requestUrl, headers, config);
+			const response = await effectiveTransport(config)(
+				requestUrl,
+				headers,
+				config,
+			);
 			storeCookies(cookies, requestUrl, response);
 			const redirect = redirectUrl(response, requestUrl);
 			if (redirect) {
@@ -228,7 +234,6 @@ async function fetchOnce(
 				requestUrl,
 				headers,
 				config,
-				fetchTransport,
 				allowUrl,
 			);
 			const full = { ...base, body: text };
@@ -444,7 +449,7 @@ async function readBody(
 	response: HttpResponse,
 	url: string,
 	started: number,
-	config: Config,
+	config: PipelineConfig,
 	redirects: RedirectHop[],
 ) {
 	if (response.body.byteLength > config.maxBytes) {
@@ -463,7 +468,7 @@ function tooLarge(
 	url: string,
 	response: HttpResponse,
 	started: number,
-	config: Config,
+	config: PipelineConfig,
 	redirects: RedirectHop[],
 ) {
 	const error = `response exceeds ${config.maxBytes} bytes`;
@@ -471,7 +476,7 @@ function tooLarge(
 }
 export function fetchMany(
 	urls: DiscoveredUrl[],
-	config: Config,
+	config: PipelineConfig,
 	conditionalFor?: (item: DiscoveredUrl) => ConditionalRequest | undefined,
 	allowUrl?: FetchUrlGate,
 ): Promise<FetchedUrl[]> {

@@ -1,7 +1,7 @@
 import { runPipeline } from "../core/pipeline.ts";
-import type { Config, RunSummary } from "../core/types.ts";
+import type { CliOptions, PipelineConfig, RunSummary } from "../core/types.ts";
 import { runFiles } from "../output/files.ts";
-import { flagTakesValue, parseArgs } from "./args.ts";
+import { buildPipelineConfig, flagTakesValue, parseArgs } from "./args.ts";
 import { logLine, printSummary } from "./progress.ts";
 
 export async function runCli(argv: string[]): Promise<void> {
@@ -20,17 +20,19 @@ export async function runCli(argv: string[]): Promise<void> {
 			process.stdout.write(`${await version()}\n`);
 			return;
 		}
-		const progress = parsed.quiet || parsed.json ? undefined : logLine;
-		if (parsed.ignoreRobots)
+		const { run, cli } = parsed;
+		const config = buildPipelineConfig(run);
+		const progress = cli.quiet || cli.json ? undefined : logLine;
+		if (config.ignoreRobots)
 			logLine("docsnap: warning: --ignore-robots bypasses robots.txt rules");
-		const result = await runPipeline(parsed, progress);
-		const ok = runOk(result.summary, parsed);
-		if (parsed.json) {
+		const result = await runPipeline(config, progress);
+		const ok = runOk(result.summary, cli);
+		if (cli.json) {
 			process.stdout.write(
-				`${JSON.stringify(jsonResult(result.summary, parsed, ok))}\n`,
+				`${JSON.stringify(jsonResult(result.summary, config, ok))}\n`,
 			);
 		}
-		if (!parsed.quiet && !parsed.json) printSummary(result.summary);
+		if (!cli.quiet && !cli.json) printSummary(result.summary);
 		if (!ok) {
 			process.exitCode = 1;
 		}
@@ -85,15 +87,15 @@ function hasSeedArg(argv: string[]) {
 	return false;
 }
 
-function runOk(summary: RunSummary, config: Config) {
+function runOk(summary: RunSummary, cli: CliOptions) {
 	return (
 		summary.written > 0 &&
-		(!config.failOnLowQuality || summary.lowQuality === 0) &&
-		(!config.failOnInjectionSignal || summary.injectionSignalPages === 0)
+		(!cli.failOnLowQuality || summary.lowQuality === 0) &&
+		(!cli.failOnInjectionSignal || summary.injectionSignalPages === 0)
 	);
 }
 
-function jsonResult(summary: RunSummary, config: Config, ok: boolean) {
+function jsonResult(summary: RunSummary, config: PipelineConfig, ok: boolean) {
 	return {
 		ok,
 		...summary,

@@ -1,5 +1,9 @@
 import { releaseDirLock } from "../core/dir-lock.ts";
-import type { ConditionalRequest, Config, FetchResult } from "../core/types.ts";
+import type {
+	ConditionalRequest,
+	FetchResult,
+	PipelineConfig,
+} from "../core/types.ts";
 import { validatePublicHttpUrl } from "../security/url.ts";
 import { isNotModifiedResult } from "./policy.ts";
 import type { CacheLookup, CacheRequest } from "./store.ts";
@@ -17,7 +21,7 @@ type UrlGate = (url: string) => boolean | Promise<boolean>;
 
 export type UncachedFetch = (
 	url: string,
-	config: Config,
+	config: PipelineConfig,
 	accept: string,
 	conditional?: ConditionalRequest,
 	allowUrl?: UrlGate,
@@ -25,12 +29,15 @@ export type UncachedFetch = (
 
 // Process-local single-flight: concurrent same-key cold fetches share one
 // network request and cache write instead of stampeding the origin. Scoped per
-// Config (cache context) so unrelated runs never collide; cleared on settle.
-const inFlight = new WeakMap<Config, Map<string, Promise<FetchResult>>>();
+// PipelineConfig (cache context) so unrelated runs never collide; cleared on settle.
+const inFlight = new WeakMap<
+	PipelineConfig,
+	Map<string, Promise<FetchResult>>
+>();
 
 export async function fetchWithCache(
 	url: string,
-	config: Config,
+	config: PipelineConfig,
 	accept: string,
 	conditional: ConditionalRequest | undefined,
 	uncached: UncachedFetch,
@@ -65,7 +72,7 @@ export async function fetchWithCache(
 }
 
 function singleFlight(
-	config: Config,
+	config: PipelineConfig,
 	key: string,
 	run: () => Promise<FetchResult>,
 ): Promise<FetchResult> {
@@ -85,7 +92,7 @@ function singleFlight(
 
 async function fillCold(
 	url: string,
-	config: Config,
+	config: PipelineConfig,
 	accept: string,
 	request: CacheRequest,
 	first: CacheLookup,
@@ -173,7 +180,7 @@ async function cachedAllowed(
 
 async function writeThroughCache(
 	url: string,
-	config: Config,
+	config: PipelineConfig,
 	accept: string,
 	result: FetchResult,
 ) {

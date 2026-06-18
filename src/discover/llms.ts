@@ -1,5 +1,5 @@
 import { markdownLinkHrefs } from "../core/markdown.ts";
-import type { Config, FetchResult } from "../core/types.ts";
+import type { FetchResult, PipelineConfig } from "../core/types.ts";
 import { fetchText } from "../fetch/fetcher.ts";
 import {
 	normalizeUrl,
@@ -17,7 +17,7 @@ export type LlmsDiscoveryOptions = {
 
 export async function discoverLlms(
 	seed: string,
-	config: Config,
+	config: PipelineConfig,
 	options: LlmsDiscoveryOptions = {},
 ): Promise<string[]> {
 	const requestedScope = scopeFromSeed(seed);
@@ -83,7 +83,7 @@ export function llmsCandidateUrls(seed: string): string[] {
 
 function fetchLlmsText(
 	url: string,
-	config: Config,
+	config: PipelineConfig,
 	options: LlmsDiscoveryOptions,
 ) {
 	const cached = options.cache?.get(url);
@@ -224,7 +224,7 @@ function shouldExpandIndex(
 	base: string,
 	seen: Set<string>,
 	urls: Set<string>,
-	config: Config,
+	config: PipelineConfig,
 ) {
 	const url = new URL(raw);
 	return (

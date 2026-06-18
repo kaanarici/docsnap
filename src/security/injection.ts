@@ -355,7 +355,7 @@ function hidesText(style: string) {
 			text,
 		) ||
 		/color[^\S\r\n]*:[^\S\r\n]*transparent\b/.test(text) ||
-		(whiteColor("color", text) && whiteColor("background(?:-color)?", text))
+		(whiteColorText.test(text) && whiteColorBackground.test(text))
 	);
 }
 
@@ -379,11 +379,16 @@ function hiddenSelectorsFromCss(css: string) {
 	return selectors;
 }
 
-function whiteColor(property: string, text: string) {
+function whiteColorPattern(property: string) {
 	const gap = "[^\\S\\r\\n]*";
 	const white = `(?:#fff(?:fff)?|white|rgb\\(${gap}255${gap},${gap}255${gap},${gap}255${gap}\\))`;
-	return new RegExp(`${property}${gap}:${gap}${white}\\b`).test(text);
+	return new RegExp(`${property}${gap}:${gap}${white}\\b`);
 }
+
+// Compiled once: hidesText runs per styled element, so building these per call
+// recompiled two regexes on every element of every page.
+const whiteColorText = whiteColorPattern("color");
+const whiteColorBackground = whiteColorPattern("background(?:-color)?");
 
 function unique<T>(values: T[]): T[] {
 	return [...new Set(values)];

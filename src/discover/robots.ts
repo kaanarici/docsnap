@@ -1,4 +1,4 @@
-import type { Config } from "../core/types.ts";
+import type { PipelineConfig } from "../core/types.ts";
 import { fetchTextUncached } from "../fetch/fetcher.ts";
 
 // a public origin can serve a multi-MB robots.txt under the 12MB fetch cap;
@@ -28,7 +28,7 @@ type Rule = {
 
 export async function loadRobots(
 	origin: string,
-	config: Config,
+	config: PipelineConfig,
 ): Promise<Robots> {
 	if (config.ignoreRobots) return openRobots();
 	const response = await fetchTextUncached(

@@ -1,8 +1,8 @@
 import { hasOutputPath } from "../core/records.ts";
 import type {
-	PageOutput,
 	PageRecord,
 	PageSuccess,
+	PathedPage,
 	RunSummary,
 } from "../core/types.ts";
 import { isLowQuality, isQualityWarning } from "../report/summary.ts";
@@ -121,7 +121,7 @@ function line(record: PageSuccess) {
 	return `- ${path}${record.finalUrl}: ${reasons}`;
 }
 
-function largePages(records: PageOutput[]) {
+function largePages(records: PathedPage[]) {
 	return records
 		.filter((record) => record.markdown.length > 20_000)
 		.sort((a, b) => b.markdown.length - a.markdown.length)
