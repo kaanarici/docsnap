@@ -421,7 +421,7 @@ describe("cache blobs stay content-addressed", () => {
 				const key = cacheKey(request);
 				const lock = await acquireCacheLock(parsed, key);
 				expect(lock).not.toBeUndefined();
-				if (lock === undefined) throw new Error("cache lock acquired");
+				if (lock === undefined) throw new Error("cache lock not acquired");
 				try {
 					await writeCacheResult(parsed, key, request, result(url, body));
 				} finally {
@@ -447,7 +447,7 @@ describe("cache blobs stay content-addressed", () => {
 			const keyB = cacheKey(requestB);
 			const lockB = await acquireCacheLock(parsedB, keyB);
 			expect(lockB).not.toBeUndefined();
-			if (lockB === undefined) throw new Error("refresh lock acquired");
+			if (lockB === undefined) throw new Error("refresh lock not acquired");
 			try {
 				const entryB = parseEntry(
 					await readFile(join(cacheDir, "entries", `${keyB}.json`), "utf8"),

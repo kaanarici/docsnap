@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { captureOutput } from "../scripts/capture-output.ts";
 import { buildPipelineConfig, parseArgs } from "../src/cli/args.ts";
 import { runCli } from "../src/cli/index.ts";
 import { dedupeRecords } from "../src/core/dedupe.ts";
@@ -340,31 +341,6 @@ describe("output path assignment", () => {
 		expect(longPathA).not.toBe(longPathB);
 	});
 });
-
-async function captureOutput(run: () => Promise<void>) {
-	const originalStdout = process.stdout.write;
-	const originalStderr = process.stderr.write;
-	const originalExitCode = process.exitCode;
-	let stdout = "";
-	let stderr = "";
-	process.stdout.write = ((chunk: string | Uint8Array) => {
-		stdout += chunk.toString();
-		return true;
-	}) as typeof process.stdout.write;
-	process.stderr.write = ((chunk: string | Uint8Array) => {
-		stderr += chunk.toString();
-		return true;
-	}) as typeof process.stderr.write;
-	process.exitCode = undefined;
-	try {
-		await run();
-		return { stdout, stderr, exitCode: process.exitCode };
-	} finally {
-		process.stdout.write = originalStdout;
-		process.stderr.write = originalStderr;
-		process.exitCode = originalExitCode;
-	}
-}
 
 function page(url: string, extractor: "html" | "markdown", markdown: string) {
 	return {

@@ -378,8 +378,35 @@ export function stripScriptStyleTags(html: string): string {
 	);
 }
 
+// Defuddle logs parse warnings straight to console. We silence console.error /
+// console.warn only WHILE a parse is in flight, then restore the real methods —
+// so importing this module leaves the host's console untouched and stderr is
+// pristine whenever extraction is idle (it is not mutated at module load). A
+// depth counter handles concurrent worker-pool parses: the first parse saves and
+// replaces the real methods, the last to finish restores them.
+let activeDefuddleParses = 0;
+let restoreConsole: (() => void) | undefined;
+
+function silenceConsoleDuringParse() {
+	if (activeDefuddleParses++ > 0) return;
+	const error = console.error;
+	const warn = console.warn;
+	console.error = () => {};
+	console.warn = () => {};
+	restoreConsole = () => {
+		console.error = error;
+		console.warn = warn;
+	};
+}
+
+function endDefuddleParse() {
+	if (--activeDefuddleParses > 0) return;
+	restoreConsole?.();
+	restoreConsole = undefined;
+}
+
 async function parseWithDefuddle(document: Document, url: string) {
-	activeDefuddleParses++;
+	silenceConsoleDuringParse();
 	try {
 		return await Defuddle(document, url, {
 			markdown: true,
@@ -389,29 +416,9 @@ async function parseWithDefuddle(document: Document, url: string) {
 	} catch {
 		return undefined;
 	} finally {
-		activeDefuddleParses--;
+		endDefuddleParse();
 	}
 }
-
-// Defuddle logs parse warnings straight to console; we drop them while a parse
-// is in flight. The console wrappers are installed once at module load and never
-// reassigned, so concurrent extractPage calls cannot race a save/restore the way
-// a swap-and-restore would — they only adjust a depth counter. Anything emitted
-// outside a Defuddle parse passes through untouched, preserving real CLI stderr.
-let activeDefuddleParses = 0;
-
-function installDefuddleConsoleFilter() {
-	const error = console.error.bind(console);
-	const warn = console.warn.bind(console);
-	console.error = (...args: unknown[]) => {
-		if (activeDefuddleParses === 0) error(...args);
-	};
-	console.warn = (...args: unknown[]) => {
-		if (activeDefuddleParses === 0) warn(...args);
-	};
-}
-
-installDefuddleConsoleFilter();
 
 function resolveCanonical(href: string | null | undefined, base: string) {
 	if (!href) return undefined;
