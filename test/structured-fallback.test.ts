@@ -369,7 +369,9 @@ describe("structured fallback keeps output bounded", () => {
 			),
 		);
 		expect(deep.markdown).toContain("Deep public documentation content");
-	}, 30_000);
+		// Pathological 5k-level nesting is ~48s on slower CI runners; the old
+		// standalone script had no per-test timeout, so keep a generous one.
+	}, 120_000);
 
 	test("wide sibling scans stay linear", () => {
 		const wideSiblings = Array.from(
