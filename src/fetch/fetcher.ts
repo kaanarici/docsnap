@@ -1,4 +1,5 @@
 import { fetchWithCache } from "../cache/cached-fetch.ts";
+import { runBounded } from "../core/parallel.ts";
 import type {
 	ConditionalRequest,
 	DiscoveredUrl,
@@ -9,20 +10,11 @@ import type {
 } from "../core/types.ts";
 import { decodeResponseBody } from "./body.ts";
 import { type Cookie, cookieHeader, storeCookies } from "./cookies.ts";
-import { runBounded } from "./rate-limit.ts";
 import { refreshUrl } from "./refresh.ts";
 import { failed, failureKind } from "./result.ts";
 import { isRetryableFetchError, retryDelayMs, shouldRetry } from "./retry.ts";
-import {
-	effectiveTransport,
-	setFetchTransportForTest,
-} from "./test-transport.ts";
 import { type HttpResponse, requestPublicHttp } from "./transport.ts";
 import { withWritersideTopic } from "./writerside.ts";
-
-export { setFetchTransportForTest };
-
-const cacheDirEnv = "DOCSNAP_CACHE_DIR";
 export type FetchUrlGate = (url: string) => boolean | Promise<boolean>;
 export async function fetchText(
 	url: string,
@@ -31,14 +23,6 @@ export async function fetchText(
 	conditional?: ConditionalRequest,
 	allowUrl?: FetchUrlGate,
 ): Promise<FetchResult> {
-	// A non-default transport bypasses the on-disk cache unless a test explicitly
-	// opts into caching with DOCSNAP_CACHE_DIR. Keyed on the resolved transport,
-	// not on a mutable module binding read at fetch time.
-	if (
-		effectiveTransport(config) !== requestPublicHttp &&
-		!process.env[cacheDirEnv]
-	)
-		return fetchTextUncached(url, config, accept, conditional, allowUrl);
 	return fetchWithCache(
 		url,
 		config,
@@ -141,11 +125,7 @@ async function fetchOnce(
 			Object.assign(headers, sentConditional);
 			const cookie = cookieHeader(cookies, requestUrl);
 			if (cookie) headers.cookie = cookie;
-			const response = await effectiveTransport(config)(
-				requestUrl,
-				headers,
-				config,
-			);
+			const response = await requestPublicHttp(requestUrl, headers, config);
 			storeCookies(cookies, requestUrl, response);
 			const redirect = redirectUrl(response, requestUrl);
 			if (redirect) {
@@ -190,7 +170,7 @@ async function fetchOnce(
 			if (contentLength > config.maxBytes) {
 				return tooLarge(url, response, started, config, redirects);
 			}
-			if (shouldRetry(response.status, attempt, config.retryHttp !== false)) {
+			if (shouldRetry(response.status, attempt)) {
 				await Bun.sleep(
 					retryDelayMs(attempt, response.headers.get("retry-after")),
 				);
@@ -409,6 +389,7 @@ function routeFallback(
 	} catch {
 		return undefined;
 	}
+	if (result.ok && result.notModified) return undefined;
 	if (url.pathname.endsWith(".html") && [404, 410].includes(result.status))
 		return withoutExtension(url, ".html");
 	if (!url.pathname.endsWith(".md")) return undefined;
@@ -489,6 +470,7 @@ export function fetchMany(
 		},
 		async (item): Promise<FetchedUrl> => ({
 			source: item.source,
+			...(item.wasSeed ? { wasSeed: true as const } : {}),
 			...(item.metadata ? { metadata: item.metadata } : {}),
 			result:
 				item.fetched ??

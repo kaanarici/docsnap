@@ -1,4 +1,4 @@
-import { identityKeys } from "./identity.ts";
+import { identityKeys, identityUrls } from "./identity.ts";
 import { wordCount } from "./text.ts";
 import type { PageRecord, PageSuccess } from "./types.ts";
 
@@ -37,22 +37,17 @@ export function dedupeRecords(records: PageRecord[]): DedupeResult {
 		for (const key of keys) byKey.set(key, record);
 	}
 
-	return { records: out, deduped };
+	const retained = out.filter((record) => {
+		if (record.ok || record.failureKind !== "empty") return true;
+		return !identityKeys(record).some((key) => byKey.has(key));
+	});
+	return { records: retained, deduped: deduped + out.length - retained.length };
 }
 
 function mergeRecord(target: PageSuccess, duplicate: PageSuccess) {
 	const aliases = new Set(target.aliases ?? []);
-	const primary = new Set(
-		[target.url, target.finalUrl, target.canonicalUrl].filter(
-			(value): value is string => Boolean(value),
-		),
-	);
-	for (const value of [
-		duplicate.url,
-		duplicate.finalUrl,
-		duplicate.canonicalUrl,
-		...(duplicate.aliases ?? []),
-	]) {
+	const primary = new Set(identityUrls(target));
+	for (const value of identityUrls(duplicate)) {
 		if (value && !primary.has(value)) aliases.add(value);
 	}
 	if (aliases.size) target.aliases = [...aliases].sort();
@@ -65,6 +60,12 @@ function mergeRecord(target: PageSuccess, duplicate: PageSuccess) {
 		target.publishedAt = duplicate.publishedAt;
 	if (!target.updatedAt && duplicate.updatedAt)
 		target.updatedAt = duplicate.updatedAt;
+	if (duplicate.wasSeed) {
+		target.wasSeed = true;
+		target.source = duplicate.source;
+		if (target.redirects.length === 0 && duplicate.redirects.length > 0)
+			target.redirects = duplicate.redirects;
+	}
 }
 
 function betterRecord(a: PageSuccess, b: PageSuccess) {
@@ -73,8 +74,9 @@ function betterRecord(a: PageSuccess, b: PageSuccess) {
 
 function recordScore(record: PageSuccess) {
 	return (
-		sourceScore[record.source] * 10_000 +
-		extractorScore[record.extractor] * 1_000 +
+		extractorScore[record.extractor] * 10_000 +
+		sourceScore[record.source] * 1_000 +
+		(record.wasSeed ? 500 : 0) +
 		record.confidence * 100 +
 		Math.min(wordCount(record.markdown), 2_000) / 100
 	);

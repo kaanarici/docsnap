@@ -16,12 +16,8 @@ export function retryDelayMs(
 	return Math.min(250 * 2 ** attempt + Math.floor(Math.random() * 80), 2500);
 }
 
-export function shouldRetry(
-	status: number,
-	attempt: number,
-	enabled: boolean,
-): boolean {
-	return enabled && attempt < 2 && (status === 429 || status >= 500);
+export function shouldRetry(status: number, attempt: number): boolean {
+	return attempt < 2 && (status === 429 || status >= 500);
 }
 
 export function isRetryableFetchError(error: unknown): boolean {
@@ -29,8 +25,13 @@ export function isRetryableFetchError(error: unknown): boolean {
 		error instanceof Error &&
 		!isTimeoutError(error) &&
 		!refusedErrorPattern.test(error.message) &&
+		!isTooLargeError(error.message) &&
 		!isUnsafeUrlError(error.message)
 	);
+}
+
+export function isTooLargeError(error: string): boolean {
+	return /response exceeds|buffer larger than|maxOutputLength/i.test(error);
 }
 
 export function isUnsafeUrlError(error: string): boolean {

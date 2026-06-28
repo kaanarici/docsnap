@@ -1,24 +1,28 @@
 import { Buffer } from "node:buffer";
 import { parseHTML } from "linkedom";
 import { markdownLinkHrefs } from "../core/markdown.ts";
+import { invisibleTextPattern } from "../core/text.ts";
 import type { InjectionSignal } from "../core/types.ts";
 
 type SignalPattern = readonly [InjectionSignal, RegExp];
 
-const zeroWidthPattern =
-	/(?:\u034f|\p{Variation_Selector}|[\u00ad\u115f\u1160\u180e\u200b-\u200d\u2060-\u2064\u2800\u3164\ufeff\uffa0])/u;
+const invisibleTextTestPattern = new RegExp(invisibleTextPattern, "u");
+const invisibleTextGlobalPattern = new RegExp(invisibleTextPattern, "gu");
 const maxCommentBlocks = 64;
 const maxCommentScanChars = 16 * 1024;
 const maxStyleBlocks = 32;
 const maxStyleScanChars = 64 * 1024;
 const maxStyleRules = 512;
 const maxCssDeclarationChars = 16 * 1024;
+const rawSkipTags = new Set(["script", "style", "noscript", "template", "svg"]);
 
 const unicodePatterns: SignalPattern[] = [
-	["zero-width-text", zeroWidthPattern],
 	["unicode-tag-text", /[\u{e0000}-\u{e007f}]/u],
 	["bidi-control", /\p{Bidi_Control}/u],
 ];
+
+const localSecretTargetPattern = String.raw`(?:~\/\.ssh|\/etc\/passwd|\$[A-Z0-9_]*(?:API_?)?(?:KEY|TOKEN|SECRET)\b|process\.env)`;
+const secretTargetPattern = String.raw`(?:${localSecretTargetPattern}|\b(?:api(?:[-_]|[^\S\r\n])?keys?|tokens?|secrets?|environment[^\S\r\n]+variables?|env[^\S\r\n]+vars?|ssh[^\S\r\n]+keys?)\b)`;
 
 const instructionPatterns: SignalPattern[] = [
 	[
@@ -27,23 +31,47 @@ const instructionPatterns: SignalPattern[] = [
 	],
 	[
 		"instruction-override",
+		/\bi[^\S\r\n]*g[^\S\r\n]*n[^\S\r\n]*o[^\S\r\n]*r[^\S\r\n]*e\b[^\r\n]{0,40}\b(?:previous|prior|above|earlier|system|developer)\b[^\r\n]{0,30}\b(?:instructions?|prompts?|messages?)\b/i,
+	],
+	[
+		"instruction-override",
 		/\b(?:do[^\S\r\n]+not|don't)\b[^\r\n]{0,30}\b(?:follow|obey)\b[^\r\n]{0,30}\b(?:system|developer|previous|prior)\b[^\r\n]{0,30}\b(?:instructions?|prompts?)\b/i,
 	],
 	[
 		"ai-directed-instruction",
-		/\b(?:the[^\S\r\n]+)?(?:ai|assistant|agent|llm|coding[^\S\r\n]+agent)\b[^\r\n]{0,80}\b(?:ignore|follow|obey|execute|treat|trust|read|send|reveal|show|print|dump|disclose|expose|leak)\b[^\r\n]{0,80}\b(?:instructions?|prompts?|messages?|guidance|system|developer|this[^\S\r\n]+(?:page|document|content))\b/i,
+		/\b(?:ai|assistant|llm|(?:ai|coding|the|this|your)[^\S\r\n]+agent)\b[^\r\n]{0,80}\b(?:ignore|follow|obey|execute|treat|trust|send|reveal|show|print|dump|disclose|expose|leak)\b[^\r\n]{0,80}\b(?:instructions?|prompts?|messages?|guidance|system|developer|this[^\S\r\n]+(?:page|document|content))\b/i,
 	],
 	[
 		"ai-directed-instruction",
-		/\b(?:ignore|follow|obey|execute|treat|trust|read|send|reveal|show|print|dump|disclose|expose|leak)\b[^\r\n]{0,80}\b(?:the[^\S\r\n]+)?(?:ai|assistant|agent|llm|coding[^\S\r\n]+agent)\b/i,
+		/\b(?:ignore|follow|obey|execute|treat|trust|send|reveal|show|print|dump|disclose|expose|leak)\b[^\r\n]{0,80}\b(?:ai|assistant|llm|(?:ai|coding|the|this|your)[^\S\r\n]+agent)\b/i,
 	],
 	[
 		"tool-exfiltration-language",
-		/\b(?:send|exfiltrate|upload|post|curl)\b[^\r\n]{0,100}\b(?:api(?:[-_]|[^\S\r\n])?keys?|tokens?|secrets?|environment[^\S\r\n]+variables?|env[^\S\r\n]+vars?|~\/\.ssh|ssh[^\S\r\n]+keys?|webhook)\b/i,
+		new RegExp(
+			String.raw`\bexfiltrate\b[^\r\n]{0,100}${secretTargetPattern}`,
+			"i",
+		),
 	],
 	[
 		"tool-exfiltration-language",
-		/\bread\b[^\r\n]{0,60}\b(?:~\/\.ssh|\/etc\/passwd|api(?:[-_]|[^\S\r\n])?keys?|tokens?|secrets?|environment[^\S\r\n]+variables?|env[^\S\r\n]+vars?)\b/i,
+		new RegExp(
+			String.raw`\b(?:send|upload)\b[^\r\n]{0,100}${localSecretTargetPattern}`,
+			"i",
+		),
+	],
+	[
+		"tool-exfiltration-language",
+		new RegExp(
+			String.raw`\b(?:post|curl)\b[^\r\n]{0,100}${localSecretTargetPattern}`,
+			"i",
+		),
+	],
+	[
+		"tool-exfiltration-language",
+		new RegExp(
+			String.raw`\bread\b[^\r\n]{0,60}${localSecretTargetPattern}`,
+			"i",
+		),
 	],
 ];
 
@@ -53,8 +81,10 @@ const roleTagPattern =
 	/<\/?(?:system|assistant|developer|tool)(?:[^\S\r\n]|>)/gi;
 const roleActionPattern =
 	/\b(?:ignore|disregard|forget|bypass|override|follow|obey|execute|treat|trust|read|send|exfiltrate|upload|post|curl|reveal|show|print|dump|disclose|expose|leak)\b/i;
-const roleTargetPattern =
-	/\b(?:previous|prior|above|earlier|system|developer|instructions?|prompts?|messages?|guidance|secrets?|tokens?|api(?:[-_]|[^\S\r\n])?keys?|environment[^\S\r\n]+variables?|env[^\S\r\n]+vars?|webhook|~\/\.ssh|\/etc\/passwd|operational[^\S\r\n]+guidance|this[^\S\r\n]+(?:page|document|content))\b/i;
+const roleTargetPattern = new RegExp(
+	String.raw`(?:${secretTargetPattern}|\b(?:previous|prior|above|earlier|system|developer|instructions?|prompts?|messages?|guidance|webhook|operational[^\S\r\n]+guidance|this[^\S\r\n]+(?:page|document|content))\b)`,
+	"i",
+);
 
 const confusables: Record<string, string> = {
 	"\u0391": "A",
@@ -93,11 +123,14 @@ const confusables: Record<string, string> = {
 export function scanRawHtmlForInjectionSignals(
 	html: string,
 ): InjectionSignal[] {
-	const signals = new Set<InjectionSignal>(unicodeSignals(html));
+	const signals = new Set<InjectionSignal>();
 	for (const signal of htmlCommentSignals(html)) signals.add(signal);
 	try {
 		const { document } = parseHTML(html);
-		for (const element of hiddenElements(document)) {
+		const hidden = new Set(hiddenElements(document));
+		for (const signal of visibleUnicodeSignals(document, hidden))
+			signals.add(signal);
+		for (const element of hidden) {
 			const phraseSignals = instructionSignals(element.textContent ?? "");
 			if (phraseSignals.length === 0) continue;
 			signals.add("hidden-html-text");
@@ -107,6 +140,39 @@ export function scanRawHtmlForInjectionSignals(
 		return [...signals];
 	}
 	return [...signals];
+}
+
+function visibleUnicodeSignals(
+	document: Document,
+	hidden: Set<Element>,
+): InjectionSignal[] {
+	const signals = new Set<InjectionSignal>();
+	const stack: Node[] = [document.body ?? document.documentElement];
+	while (stack.length > 0) {
+		const node = stack.pop();
+		if (!node) continue;
+		if (node.nodeType === 3) {
+			if (hasVisibleText(node.textContent ?? "")) {
+				for (const signal of unicodeSignals(node.textContent ?? ""))
+					signals.add(signal);
+			}
+			continue;
+		}
+		if (node.nodeType !== 1) continue;
+		const element = node as Element;
+		if (hidden.has(element) || rawSkipTags.has(element.tagName.toLowerCase()))
+			continue;
+		const children = element.childNodes;
+		for (let index = children.length - 1; index >= 0; index--) {
+			const child = children[index];
+			if (child) stack.push(child);
+		}
+	}
+	return [...signals];
+}
+
+function hasVisibleText(text: string) {
+	return /\p{L}|\p{N}/u.test(stripInvisibleText(text));
 }
 
 export function scanMarkdownForInjectionSignals(
@@ -122,12 +188,23 @@ export function scanMarkdownForInjectionSignals(
 }
 
 function unicodeSignals(text: string): InjectionSignal[] {
-	return unicodePatterns
-		.filter(([, pattern]) => pattern.test(text))
-		.map(([signal]) => signal);
+	return unique([
+		...unicodePatterns
+			.filter(([, pattern]) => pattern.test(text))
+			.map(([signal]) => signal),
+		...zeroWidthSignals(text),
+	]);
 }
 
 function instructionSignals(text: string): InjectionSignal[] {
+	const direct = directInstructionSignals(text);
+	const stripped = stripInvisibleText(text);
+	return stripped === text
+		? direct
+		: unique([...direct, ...directInstructionSignals(stripped)]);
+}
+
+function directInstructionSignals(text: string): InjectionSignal[] {
 	const signals = new Set<InjectionSignal>(
 		instructionPatterns
 			.filter(([, pattern]) => pattern.test(text))
@@ -135,6 +212,19 @@ function instructionSignals(text: string): InjectionSignal[] {
 	);
 	if (hasFakeRoleTurn(text)) signals.add("fake-system-turn");
 	return [...signals];
+}
+
+function zeroWidthSignals(text: string): InjectionSignal[] {
+	if (!invisibleTextTestPattern.test(text)) return [];
+	const direct = new Set(directInstructionSignals(text));
+	const revealed = directInstructionSignals(stripInvisibleText(text)).filter(
+		(signal) => !direct.has(signal),
+	);
+	return revealed.length ? unique(["zero-width-text", ...revealed]) : [];
+}
+
+function stripInvisibleText(text: string) {
+	return text.replace(invisibleTextGlobalPattern, "");
 }
 
 function mixedScriptSignals(text: string): InjectionSignal[] {
@@ -163,9 +253,18 @@ function encodedSignals(text: string): InjectionSignal[] {
 			signals.add("encoded-injection-blob");
 			continue;
 		}
-		if (candidate.length >= 128) signals.add("opaque-encoded-blob");
+		if (isOpaqueEncodedBlob(candidate)) signals.add("opaque-encoded-blob");
 	}
 	return [...signals];
+}
+
+function isOpaqueEncodedBlob(candidate: string) {
+	return (
+		candidate.length >= 128 &&
+		!candidate.includes("/") &&
+		!/^[0-9a-fA-F]+$/.test(candidate) &&
+		!/^[a-z0-9]+(?:-[a-z0-9]+){2,}$/.test(candidate)
+	);
 }
 
 function unsafeLinkSchemeSignals(markdown: string): InjectionSignal[] {
@@ -279,14 +378,14 @@ function hasRoleInstruction(text: string) {
 }
 
 function decodeCandidate(candidate: string): string | undefined {
-	const normalized = candidate.replace(/-/g, "+").replace(/_/g, "/");
-	const base64 = decodeBase64(normalized);
-	if (base64) return base64;
 	if (/^[0-9a-fA-F]+$/.test(candidate) && candidate.length % 2 === 0) {
 		return decodedTextIfReadable(
 			Buffer.from(candidate, "hex").toString("utf8"),
 		);
 	}
+	const normalized = candidate.replace(/-/g, "+").replace(/_/g, "/");
+	const base64 = decodeBase64(normalized);
+	if (base64) return base64;
 	return undefined;
 }
 

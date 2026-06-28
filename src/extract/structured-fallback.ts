@@ -1,12 +1,13 @@
 import { wordCount } from "../core/text.ts";
+import { decodeEntities } from "./inline-state-scan.ts";
 import {
 	codeBlock,
+	codeBlockFromText,
 	inlineMarkdown,
-	pushNodeChildren,
 	renderTable,
 } from "./structured-fallback-render.ts";
 import {
-	blockTags,
+	actsLikeBlock,
 	collapseWhitespace,
 	countTextChars,
 	emptyStats,
@@ -16,6 +17,7 @@ import {
 	isHeading,
 	isLinkDominatedContainer,
 	isPreferredRoot,
+	isThemeImageTwin,
 	linkDensity,
 	maxDirectChildScan,
 	maxListDepth,
@@ -24,6 +26,7 @@ import {
 	maxRootFrames,
 	maxSerializeVisits,
 	type OutputState,
+	pushNodeChildren,
 	sanitizeText,
 	shouldSkipElement,
 	type TextStats,
@@ -34,16 +37,8 @@ import {
 	voidTags,
 } from "./structured-fallback-shared.ts";
 
-type Candidate = TextStats & {
-	element: Element;
-	score: number;
-};
-
-type RootScan = {
-	best?: Candidate;
-	preferred?: Candidate;
-	stats: WeakMap<Node, TextStats>;
-};
+type Candidate = TextStats & { element: Element; score: number };
+type ScanFrame = { node: Node; inAnchor: boolean; exit: boolean };
 
 export function structuredFallback(
 	document: Document,
@@ -53,21 +48,18 @@ export function structuredFallback(
 	if (!root) return "";
 
 	const scan = scanRoot(root);
-	const chosen = chooseRoot(root, scan);
+	const chosen = scan.preferred?.element ?? scan.best?.element ?? root;
 	const stats = scan.stats.get(chosen) ?? emptyStats();
-	if (stats.textChars < 40 || linkDensity(stats) >= 0.5) return "";
+	const maxDensity = isPreferredRoot(chosen) ? 0.8 : 0.5;
+	if (stats.textChars < 40 || linkDensity(stats) > maxDensity) return "";
 
 	const markdown = serializeRoot(chosen, baseUrl).trim();
 	return wordCount(markdown) >= 3 ? markdown : "";
 }
 
-function scanRoot(root: Element): RootScan {
+function scanRoot(root: Element) {
 	const stats = new WeakMap<Node, TextStats>();
-	const stack: Array<{
-		node: Node;
-		inAnchor: boolean;
-		exit: boolean;
-	}> = [{ node: root, inAnchor: false, exit: false }];
+	const stack: ScanFrame[] = [{ node: root, inAnchor: false, exit: false }];
 	let frames = 1;
 	let best: Candidate | undefined;
 	let preferred: Candidate | undefined;
@@ -87,9 +79,19 @@ function scanRoot(root: Element): RootScan {
 		if (frame.exit) {
 			const total = sumChildStats(node, stats);
 			stats.set(node, total);
-			const candidate = candidateFor(node, total);
-			if (candidate) {
-				if (isPreferredRoot(node)) {
+			const preferredRoot = isPreferredRoot(node);
+			const maxDensity = preferredRoot ? 0.8 : 0.5;
+			if (
+				total.textChars >= 80 &&
+				linkDensity(total) <= maxDensity &&
+				(isCandidateRoot(node) || preferredRoot)
+			) {
+				const candidate: Candidate = {
+					element: node,
+					score: total.textChars * (1 - linkDensity(total)),
+					...total,
+				};
+				if (preferredRoot) {
 					if (!preferred || candidate.score > preferred.score)
 						preferred = candidate;
 				} else if (!best || candidate.score > best.score) {
@@ -122,29 +124,12 @@ function scanRoot(root: Element): RootScan {
 	};
 }
 
-function chooseRoot(root: Element, scan: RootScan): Element {
-	return scan.preferred?.element ?? scan.best?.element ?? root;
-}
-
-function candidateFor(
-	element: Element,
-	stats: TextStats,
-): Candidate | undefined {
-	if (stats.textChars < 80 || linkDensity(stats) > 0.5) return undefined;
-	if (!isCandidateRoot(element) && !isPreferredRoot(element)) return undefined;
-	const score = stats.textChars * (1 - linkDensity(stats));
-	return { element, score, ...stats };
-}
-
 function sumChildStats(
 	element: Element,
 	stats: WeakMap<Node, TextStats>,
 ): TextStats {
 	const total = emptyStats();
-	const children = element.childNodes;
-	for (let index = 0; index < children.length; index++) {
-		const child = children[index];
-		if (!child) continue;
+	for (const child of element.childNodes) {
 		const childStats = stats.get(child);
 		if (!childStats) continue;
 		total.textChars += childStats.textChars;
@@ -170,6 +155,7 @@ function serializeRoot(root: Element, baseUrl: string) {
 			continue;
 		}
 		if (!isElement(node)) continue;
+		if (isCodeEditorChrome(node) || isCtaOnlyChrome(node)) continue;
 		if (
 			node !== root &&
 			(shouldSkipElement(node) || isLinkDominatedContainer(node))
@@ -183,12 +169,17 @@ function serializeRoot(root: Element, baseUrl: string) {
 			appendBlock(blocks, `${"#".repeat(Number(tag[1]))} ${text}`, output);
 			continue;
 		}
-		if (tag === "p") {
+		if (tag === "p" || node.getAttribute("data-as") === "p") {
 			appendBlock(blocks, inlineMarkdown(node, baseUrl, budget), output);
 			continue;
 		}
 		if (tag === "pre") {
 			appendBlock(blocks, codeBlock(node), output);
+			continue;
+		}
+		const editorCode = codeEditorBlock(node);
+		if (editorCode) {
+			appendBlock(blocks, editorCode, output);
 			continue;
 		}
 		if (tag === "ul" || tag === "ol") {
@@ -232,15 +223,51 @@ function serializeRoot(root: Element, baseUrl: string) {
 			continue;
 		}
 		if (voidTags.has(tag)) continue;
-		if (hasDirectBlockChild(node)) {
+		if (hasBlockChild(node)) {
 			pushNodeChildren(stack, node, budget.maxVisits - budget.visits);
 		} else {
 			appendBlock(blocks, inlineMarkdown(node, baseUrl, budget), output);
 		}
 	}
 
-	return blocks.join("\n\n");
+	return dropStandaloneChromeBlocks(blocks).join("\n\n");
 }
+
+function isCodeEditorChrome(element: Element) {
+	if (!element.closest(codeEditorSelector)) return false;
+	const text = collapseWhitespace(element.textContent ?? "");
+	return (
+		(tagName(element) === "label" && text === "Edit code") ||
+		(element.getAttribute("aria-live")?.toLowerCase() === "polite" &&
+			/^Press Enter to start editing$/i.test(text))
+	);
+}
+
+function isCtaOnlyChrome(element: Element) {
+	if (element.getAttribute("data-component-part") !== "card-cta") return false;
+	const text = collapseWhitespace(element.textContent ?? "").toLowerCase();
+	return /^(?:learn more|read more|view docs|view documentation)$/.test(text);
+}
+
+function codeEditorBlock(element: Element) {
+	if (tagName(element) !== "textarea" || !element.closest(codeEditorSelector))
+		return "";
+	const source = decodeEntities(element.textContent ?? "");
+	if (!/<[A-Z][\w.:-]*(?:\s|>|\/)/.test(source)) return "";
+	const language =
+		element.parentElement
+			?.querySelector("pre code[class*='language-']")
+			?.getAttribute("class")
+			?.match(/(?:^|\s)language-([A-Za-z0-9_#+.-]{1,32})(?=$|\s)/)?.[1] ??
+		"jsx";
+	return codeBlockFromText(
+		source.replace(/\r\n?/g, "\n").replace(/>\s+</g, ">\n<").trim(),
+		language,
+	);
+}
+
+const codeEditorSelector =
+	".MuiCode-root,.scrollContainer,.npm__react-simple-code-editor__textarea";
 
 function renderDefinitionList(
 	list: Element,
@@ -249,37 +276,31 @@ function renderDefinitionList(
 ) {
 	const lines: string[] = [];
 	const stack: Node[] = [];
-	// Pair each dd with its own preceding sibling dt: a flat hasTerm flag would
-	// leak a nested dl's term into the outer (empty-dt) dd on malformed markup.
-	const ddHasTerm = new Map<Node, boolean>();
+	const ddHasTerm = new Map<Element, boolean>();
 	pushNodeChildren(stack, list, maxDirectChildScan);
 	while (stack.length > 0 && lines.length < maxListItems && takeVisit(budget)) {
 		const child = stack.pop()!;
 		if (!isElement(child)) continue;
 		const tag = tagName(child);
-		if (tag === "dt") {
-			const term = inlineMarkdown(child, baseUrl, budget, {
-				skipDefinitionLists: true,
-			}).trim();
-			if (term) lines.push(`**${term}**`);
-			for (
-				let sib = child.nextElementSibling;
-				sib && tagName(sib) === "dd";
-				sib = sib.nextElementSibling
-			) {
-				ddHasTerm.set(sib, Boolean(term));
-			}
-			pushNestedDefinitionLists(stack, child, budget);
-		} else if (tag === "dd") {
-			const definition = inlineMarkdown(child, baseUrl, budget, {
-				skipDefinitionLists: true,
-			}).trim();
-			if (definition)
-				lines.push(ddHasTerm.get(child) ? `: ${definition}` : definition);
-			pushNestedDefinitionLists(stack, child, budget);
-		} else {
+		if (tag !== "dt" && tag !== "dd") {
 			pushNodeChildren(stack, child, maxDirectChildScan);
+			continue;
 		}
+		const text = inlineMarkdown(child, baseUrl, budget, {
+			skipDefinitionLists: true,
+		}).trim();
+		if (tag === "dt") {
+			if (text) lines.push(`**${text}**`);
+			for (
+				let sibling = child.nextElementSibling;
+				sibling && tagName(sibling) === "dd";
+				sibling = sibling.nextElementSibling
+			)
+				ddHasTerm.set(sibling, Boolean(text));
+		} else if (text) {
+			lines.push(ddHasTerm.get(child) ? `: ${text}` : text);
+		}
+		pushNestedDefinitionLists(stack, child, budget);
 	}
 	return lines.join("\n");
 }
@@ -290,20 +311,13 @@ function pushNestedDefinitionLists(
 	budget: VisitBudget,
 ) {
 	const found: Element[] = [];
-	const scan: Node[] = [];
-	pushNodeChildren(scan, element, maxDirectChildScan);
+	const scan = Array.from(element.children).reverse();
 	while (scan.length > 0 && found.length < maxListItems && takeVisit(budget)) {
 		const node = scan.pop()!;
-		if (!isElement(node)) continue;
-		if (tagName(node) === "dl") {
-			found.push(node);
-			continue;
-		}
-		pushNodeChildren(scan, node, maxDirectChildScan);
+		if (tagName(node) === "dl") found.push(node);
+		else scan.push(...Array.from(node.children).reverse());
 	}
-	for (let index = found.length - 1; index >= 0; index--) {
-		stack.push(found[index]!);
-	}
+	for (const node of found.reverse()) stack.push(node);
 }
 
 function renderList(
@@ -313,12 +327,9 @@ function renderList(
 	budget: VisitBudget,
 ) {
 	const lines: string[] = [];
-	const stack: Array<{
-		items: Element[];
-		ordered: boolean;
-		depth: number;
-		next: number;
-	}> = [{ items: directListItems(list), ordered, depth: 0, next: 0 }];
+	const stack = [
+		{ items: directListItems(list), ordered, depth: 0, next: 0, indent: "" },
+	];
 
 	while (stack.length > 0 && takeVisit(budget)) {
 		const frame = stack[stack.length - 1]!;
@@ -329,19 +340,20 @@ function renderList(
 		const item = frame.items[frame.next]!;
 		frame.next++;
 		const marker = frame.ordered ? `${frame.next}. ` : "- ";
-		const indent = "  ".repeat(Math.min(frame.depth, maxListDepth));
-		const text = inlineMarkdown(item, baseUrl, budget, {
-			skipNestedLists: true,
-		}).trim();
-		lines.push(`${indent}${marker}${text}`);
-		const nested = directNestedLists(item);
-		for (let index = nested.length - 1; index >= 0; index--) {
-			const child = nested[index]!;
+		const childIndent =
+			frame.indent +
+			(frame.depth >= maxListDepth ? "" : " ".repeat(marker.length));
+		const text =
+			renderListItemContent(item, baseUrl, budget) ||
+			inlineMarkdown(item, baseUrl, budget, { skipNestedLists: true }).trim();
+		lines.push(...listItemLines(frame.indent, marker, text));
+		for (const child of directNestedLists(item).reverse()) {
 			stack.push({
 				items: directListItems(child),
 				ordered: tagName(child) === "ol",
 				depth: frame.depth + 1,
 				next: 0,
+				indent: childIndent,
 			});
 		}
 	}
@@ -349,87 +361,138 @@ function renderList(
 	return lines.join("\n");
 }
 
+function renderListItemContent(
+	root: Element,
+	baseUrl: string,
+	budget: VisitBudget,
+) {
+	const blocks: string[] = [];
+	const inline: string[] = [];
+	const flushInline = () => {
+		const text = inline.splice(0).join(" ").trim();
+		if (text) blocks.push(text);
+	};
+	const pushBlock = (value: string) => {
+		const clean = value.trim();
+		if (clean) blocks.push(clean);
+	};
+	const limit = Math.min(root.childNodes.length, maxDirectChildScan);
+	for (let index = 0; index < limit && takeVisit(budget); index++) {
+		const child = root.childNodes[index];
+		if (!child) continue;
+		if (child.nodeType === textNode) {
+			const text = sanitizeText(collapseWhitespace(child.textContent ?? ""));
+			if (text) inline.push(text);
+			continue;
+		}
+		if (
+			!isElement(child) ||
+			shouldSkipElement(child) ||
+			isLinkDominatedContainer(child)
+		) {
+			continue;
+		}
+		const tag = tagName(child);
+		if (tag === "ul" || tag === "ol" || tag === "li") continue;
+		const block =
+			tag === "pre"
+				? codeBlock(child)
+				: tag === "p"
+					? inlineMarkdown(child, baseUrl, budget)
+					: tag === "table"
+						? renderTable(child, baseUrl, budget)
+						: tag === "blockquote"
+							? quoteBlock(inlineMarkdown(child, baseUrl, budget))
+							: tag === "dl"
+								? renderDefinitionList(child, baseUrl, budget)
+								: undefined;
+		if (block !== undefined) {
+			flushInline();
+			pushBlock(block);
+			continue;
+		}
+		if (actsLikeBlock(child) || hasBlockChild(child)) {
+			flushInline();
+			pushBlock(renderListItemContent(child, baseUrl, budget));
+			continue;
+		}
+		const text = inlineMarkdown(child, baseUrl, budget).trim();
+		if (text) inline.push(text);
+	}
+	flushInline();
+	return blocks.join("\n\n");
+}
+
+function listItemLines(indent: string, marker: string, text: string) {
+	if (!text) return [];
+	const continuation = `${indent}${" ".repeat(marker.length)}`;
+	return text.split("\n").map((line, index) => {
+		if (index === 0) return `${indent}${marker}${line}`;
+		return line ? `${continuation}${line}` : continuation.trimEnd();
+	});
+}
+
 function appendBlock(blocks: string[], block: string, output: OutputState) {
 	const clean = block.trim();
 	if (!clean || output.chars >= maxOutputChars) return;
 	const available = maxOutputChars - output.chars;
-	if (clean.length > available && mustStayWhole(clean)) return;
+	if (clean.length > available && /^(?:```|\| )/.test(clean)) return;
 	const value =
 		clean.length > available ? clean.slice(0, available).trimEnd() : clean;
-	if (!value) return;
+	if (!value || isThemeImageTwin(blocks.at(-1), value)) return;
 	blocks.push(value);
 	output.chars += value.length + 2;
 }
 
-function mustStayWhole(block: string) {
-	return block.startsWith("```") || block.startsWith("| ");
-}
-
-function quoteBlock(value: string) {
-	const lines = value
-		.split("\n")
-		.map((line) => (line.trim() ? `> ${line.trim()}` : ">"));
-	return lines.join("\n");
-}
-
-function directListItems(list: Element) {
-	const items: Element[] = [];
-	const children = list.childNodes;
-	for (
-		let index = 0;
-		index < children.length && items.length < maxListItems;
-		index++
-	) {
-		const child = children[index];
-		if (isElement(child) && tagName(child) === "li") items.push(child);
-	}
-	return items;
-}
-
-// Find the topmost ul/ol lists belonging to this <li>, including ones wrapped
-// in non-list elements like <div>/<section>. Stop descending at deeper list
-// items so we never reach into a child list's own contents.
-function directNestedLists(item: Element) {
-	const lists: Element[] = [];
-	const scan: Node[] = [];
-	pushChildrenInOrder(scan, item);
-	let scanned = 0;
-	while (
-		scan.length > 0 &&
-		lists.length < maxListItems &&
-		scanned < maxDirectChildScan
-	) {
-		const node = scan.shift()!;
-		scanned++;
-		if (!isElement(node)) continue;
-		const tag = tagName(node);
-		if (tag === "ul" || tag === "ol") {
-			lists.push(node);
+function dropStandaloneChromeBlocks(blocks: string[]) {
+	const out: string[] = [];
+	for (let index = 0; index < blocks.length; index++) {
+		const block = blocks[index]!;
+		if (feedbackFooterStartPattern.test(block)) break;
+		if (standaloneChromeBlockPattern.test(block)) continue;
+		if (/^Select [A-Za-z][A-Za-z ]{0,40} Version:?$/i.test(block)) {
+			if (versionSelectorChoicePattern.test(blocks[index + 1] ?? "")) index++;
 			continue;
 		}
-		if (tag === "li") continue;
-		pushChildrenInOrder(scan, node);
+		out.push(block);
+	}
+	return out;
+}
+
+const versionSelectorChoicePattern = /^Version [A-Za-z0-9_.-]+(?: \([^)]+\))?$/;
+const feedbackFooterStartPattern =
+	/^(?:#{2,3} Help improve MDN|\[Edit this page on GitHub]\(|\d+ contributors?$|Last edited by \[)/i;
+const standaloneChromeBlockPattern =
+	/^(?:#{1,6}\s*)?(?:copy as markdown|copy page as markdown(?: \[open in (?:chatgpt|claude|cursor)]\([^)]+\))*|copy to clipboard|copied!|on this page|tool navigation|in this article|table of contents|wrap text)$/i;
+
+const quoteBlock = (value: string) =>
+	value.replace(/^.*$/gm, (line) => (line.trim() ? `> ${line.trim()}` : ">"));
+
+const directListItems = (list: Element) =>
+	Array.from(list.children)
+		.filter((child) => tagName(child) === "li")
+		.slice(0, maxListItems);
+
+function directNestedLists(item: Element) {
+	const lists: Element[] = [];
+	const scan = Array.from(item.children);
+	for (let scanned = 0; scanned < scan.length; scanned++) {
+		if (lists.length >= maxListItems || scanned >= maxDirectChildScan) break;
+		const node = scan[scanned]!;
+		const tag = tagName(node);
+		if (tag === "ul" || tag === "ol") lists.push(node);
+		else if (tag !== "li") scan.push(...Array.from(node.children));
 	}
 	return lists;
 }
 
-function pushChildrenInOrder(scan: Node[], element: Element) {
-	const children = element.childNodes;
-	for (let index = 0; index < children.length; index++) {
-		const child = children[index];
-		if (child) scan.push(child);
-	}
-}
-
-function hasDirectBlockChild(element: Element) {
-	const children = element.childNodes;
-	for (
-		let index = 0;
-		index < children.length && index < maxDirectChildScan;
-		index++
-	) {
-		const child = children[index];
-		if (isElement(child) && blockTags.has(tagName(child))) return true;
-	}
-	return false;
+function hasBlockChild(element: Element) {
+	return Array.from(element.children)
+		.slice(0, maxDirectChildScan)
+		.some(
+			(child) =>
+				actsLikeBlock(child) ||
+				(tagName(child).includes("-") &&
+					Array.from(child.children).some(actsLikeBlock)),
+		);
 }

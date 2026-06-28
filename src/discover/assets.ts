@@ -1,4 +1,5 @@
 import { parseHTML } from "linkedom";
+import { runBounded } from "../core/parallel.ts";
 import {
 	escapeRegExp,
 	uniqueByWhitespace,
@@ -11,7 +12,6 @@ import type {
 } from "../core/types.ts";
 import { looksLikeAppShell } from "../extract/app-shell.ts";
 import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
-import { runBounded } from "../fetch/rate-limit.ts";
 import { inScope, normalizeUrl } from "./url.ts";
 
 type AssetOptions = {

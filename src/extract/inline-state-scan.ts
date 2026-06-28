@@ -114,14 +114,33 @@ export function decodeLooseEscapes(value: string) {
 }
 
 export function decodeEntities(value: string) {
-	return value
-		.replace(/&nbsp;/g, " ")
-		.replace(/&amp;/g, "&")
-		.replace(/&lt;/g, "<")
-		.replace(/&gt;/g, ">")
-		.replace(/&quot;/g, '"')
-		.replace(/&#39;/g, "'");
+	return value.replace(
+		/&(?:#x([0-9a-f]+)|#([0-9]+)|nbsp|amp|lt|gt|quot|apos);/gi,
+		(entity, hex: string | undefined, decimal: string | undefined) => {
+			if (hex || decimal) {
+				return entityFromCode(
+					Number.parseInt(hex ?? decimal ?? "", hex ? 16 : 10),
+				);
+			}
+			return namedEntities[entity.toLowerCase()] ?? entity;
+		},
+	);
 }
+
+function entityFromCode(code: number) {
+	return Number.isInteger(code) && code >= 0 && code <= 0x10ffff
+		? String.fromCodePoint(code)
+		: "";
+}
+
+const namedEntities: Record<string, string> = {
+	"&nbsp;": " ",
+	"&amp;": "&",
+	"&lt;": "<",
+	"&gt;": ">",
+	"&quot;": '"',
+	"&apos;": "'",
+};
 
 type BalancedExpression = {
 	value?: string;

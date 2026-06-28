@@ -4,6 +4,7 @@ import type {
 	PipelineConfig,
 } from "../core/types.ts";
 import {
+	isLlmsResourcePath,
 	relatedHost,
 	sameSharedHostPlatform,
 	sameSiteLabel,
@@ -15,6 +16,7 @@ import {
 	llmsCandidateUrls,
 } from "./llms.ts";
 import { loadRobots, type Robots } from "./robots.ts";
+import { candidateWindowConfig, orderByTopic } from "./topic.ts";
 import { addDiscovered, normalizeUrl, pathInScope } from "./url.ts";
 
 export type LlmsCorpusOptions = LlmsDiscoveryOptions & {
@@ -37,7 +39,6 @@ export async function resourceAllowed(
 	config: PipelineConfig,
 	robotsByOrigin: Map<string, Robots>,
 ) {
-	if (config.ignoreRobots) return true;
 	const robots = await robotsForOrigin(
 		new URL(url).origin,
 		config,
@@ -53,16 +54,23 @@ export async function discoverLlmsCorpus(
 	config: PipelineConfig,
 	options: LlmsCorpusOptions,
 ) {
-	const llmsUrls = await discoverLlmsUrls(seed, config, options);
+	const llmsUrls = await discoverLlmsUrls(
+		seed,
+		candidateWindowConfig(config),
+		options,
+	);
 	const corpus = corpusTarget(seed, llmsUrls);
-	const includeRootLlms =
-		!corpus && hasScopedSameOriginLinks(llmsUrls, sourceSeed, scope);
 	const out: DiscoveredUrl[] = [];
 	const seen = new Set<string>();
-	const sourceOrigin = new URL(sourceSeed).origin;
-	for (const raw of llmsUrls) {
+	const rankedUrls = orderByTopic(llmsUrls, sourceSeed, scope);
+	for (const raw of rankedUrls) {
 		const url = normalizeUrl(raw);
-		if (!url || !inCorpus(url, sourceSeed, scope, corpus)) continue;
+		if (
+			!url ||
+			isLlmsResource(url) ||
+			!inCorpus(url, sourceSeed, scope, corpus)
+		)
+			continue;
 		const parsed = new URL(url);
 		const origin = parsed.origin;
 		const robots = await robotsForOrigin(
@@ -70,22 +78,20 @@ export async function discoverLlmsCorpus(
 			config,
 			options.robotsByOrigin,
 		);
-		if (!config.ignoreRobots && !robots.allowed(url)) continue;
-		const rootLlms =
-			includeRootLlms &&
-			origin === sourceOrigin &&
-			parsed.pathname === "/llms.txt";
+		if (!robots.allowed(url)) continue;
 		const corpusMatch = corpus && origin === corpus.origin;
-		const targetSeed = rootLlms
-			? `${origin}/`
-			: corpusMatch
-				? `${corpus.origin}${corpus.scope}`
-				: sourceSeed;
-		const targetScope = rootLlms ? "/" : corpusMatch ? corpus.scope : scope;
+		const targetSeed = corpusMatch
+			? `${corpus.origin}${corpus.scope}`
+			: sourceSeed;
+		const targetScope = corpusMatch ? corpus.scope : scope;
 		addDiscovered(out, seen, url, "llms", targetSeed, targetScope);
 		if (config.maxExplicit && out.length >= config.max) break;
 	}
 	return out;
+}
+
+function isLlmsResource(url: string) {
+	return isLlmsResourcePath(new URL(url).pathname);
 }
 
 export async function robotsForOrigin(
@@ -106,7 +112,6 @@ async function cacheRobotsBlockedLlmsCandidates(
 	config: PipelineConfig,
 	options: LlmsCorpusOptions,
 ) {
-	if (config.ignoreRobots) return;
 	const cache = options.cache ?? new Map<string, Promise<FetchResult>>();
 	options.cache = cache;
 	for (const url of llmsCandidateUrls(seed)) {
@@ -121,22 +126,6 @@ async function cacheRobotsBlockedLlmsCandidates(
 	}
 }
 
-function hasScopedSameOriginLinks(
-	urls: string[],
-	sourceSeed: string,
-	scope: string,
-) {
-	const source = new URL(sourceSeed);
-	return urls.some((raw) => {
-		const url = new URL(raw);
-		return (
-			url.origin === source.origin &&
-			url.pathname !== "/llms.txt" &&
-			pathInScope(url.pathname, scope)
-		);
-	});
-}
-
 function inCorpus(
 	url: string,
 	sourceSeed: string,
@@ -146,9 +135,7 @@ function inCorpus(
 	const parsed = new URL(url);
 	const source = new URL(sourceSeed);
 	if (parsed.origin === source.origin)
-		return (
-			parsed.pathname === "/llms.txt" || pathInScope(parsed.pathname, scope)
-		);
+		return pathInScope(parsed.pathname, scope);
 	return (
 		corpus !== undefined &&
 		parsed.origin === corpus.origin &&

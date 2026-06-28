@@ -1,22 +1,23 @@
+import { decodeEntities } from "./inline-state-scan.ts";
 import {
+	actsLikeBlock,
 	collapseInlineWhitespace,
 	escapeTableCell,
 	imageMarkdown,
 	isElement,
-	isLanguageChar,
 	isLinkDominatedContainer,
-	isMetadataLabel,
-	isMetadataLabelHint,
+	isThemeImageTwin,
 	linkText,
 	maxBacktickRun,
 	maxCodeChars,
 	maxDirectChildScan,
 	maxInlineChars,
-	maxLanguageChars,
 	maxTableCells,
 	maxTableFrames,
 	maxTableRows,
+	needsImplicitInlineSpace,
 	pushInline,
+	pushNodeChildren,
 	removePipes,
 	safeHref,
 	sanitizeText,
@@ -30,21 +31,16 @@ import {
 	voidTags,
 } from "./structured-fallback-shared.ts";
 
-type InlineCheckpoint = {
-	chunks: number;
-	chars: number;
-};
-
+type InlineCheckpoint = { chunks: number; chars: number };
 type InlineFrame = {
 	node: Node;
 	close?: string;
 	checkpoint?: InlineCheckpoint;
 };
 
-type TableRow = {
-	cells: Element[];
-	header: boolean;
-};
+type TextFrame = { node?: Node; close?: " " | "\n" };
+
+type TableRow = { cells: Element[]; header: boolean };
 
 export function inlineMarkdown(
 	root: Element,
@@ -66,7 +62,7 @@ export function inlineMarkdown(
 		if (frame.close !== undefined) {
 			if (frame.checkpoint) {
 				atomicCheckpoints.pop();
-				if (!fitsInline(frame.close, chars)) {
+				if (chars + frame.close.length > maxInlineChars) {
 					chunks.length = frame.checkpoint.chunks;
 					chars = frame.checkpoint.chars;
 					continue;
@@ -102,35 +98,38 @@ export function inlineMarkdown(
 		}
 		const parent = node.parentNode;
 		if (tag === "code" && (!isElement(parent) || tagName(parent) !== "pre")) {
-			chars = pushWholeInline(chunks, inlineCode(collectRawText(node)), chars);
+			chars = pushWholeInline(
+				chunks,
+				inlineCode(collectText(node, maxInlineChars)),
+				chars,
+			);
 			continue;
 		}
 		if (tag === "a") {
-			chars = pushInline(chunks, renderLink(node, baseUrl), chars);
-			continue;
-		}
-		if (tag === "strong" || tag === "b") {
-			chars = renderAtomicInline(
+			const text = linkText(
+				collectText(node, maxInlineChars, { spaceBlocks: true }),
+			);
+			const href = safeHref(node.getAttribute("href"), baseUrl);
+			chars = pushInline(
 				chunks,
-				stack,
-				atomicCheckpoints,
-				node,
-				"**",
+				text && href ? `[${text}](${href})` : text,
 				chars,
-				budget,
 			);
 			continue;
 		}
-		if (tag === "em" || tag === "i") {
-			chars = renderAtomicInline(
-				chunks,
-				stack,
-				atomicCheckpoints,
-				node,
-				"*",
-				chars,
-				budget,
-			);
+		const emphasis =
+			tag === "strong" || tag === "b"
+				? "**"
+				: tag === "em" || tag === "i"
+					? "*"
+					: "";
+		if (emphasis) {
+			if (chars + emphasis.length * 2 > maxInlineChars) continue;
+			const checkpoint = { chunks: chunks.length, chars };
+			atomicCheckpoints.push(checkpoint);
+			stack.push({ node, close: emphasis, checkpoint });
+			pushFrameChildren(stack, node, budget.maxVisits - budget.visits);
+			chars = pushWholeInline(chunks, emphasis, chars);
 			continue;
 		}
 		if (tag === "hr") {
@@ -138,7 +137,7 @@ export function inlineMarkdown(
 			continue;
 		}
 		if (tag === "pre") {
-			chars = pushWholeInline(chunks, codeBlock(node), chars);
+			chars = pushWholeInline(chunks, `\n${codeBlock(node)}\n`, chars);
 			continue;
 		}
 		if (tag === "img") {
@@ -146,7 +145,7 @@ export function inlineMarkdown(
 			continue;
 		}
 		if (voidTags.has(tag)) continue;
-		pushInlineChildren(stack, node, budget.maxVisits - budget.visits);
+		pushFrameChildren(stack, node, budget.maxVisits - budget.visits);
 	}
 	if (atomicCheckpoints.length > 0)
 		chunks.length = atomicCheckpoints[0]!.chunks;
@@ -154,30 +153,42 @@ export function inlineMarkdown(
 }
 
 export function codeBlock(element: Element) {
-	const codeElement = firstElementChildWithTag(element, "code");
-	const source = codeElement ?? element;
-	const language = languageToken(source);
-	const body = collectRawText(source).slice(0, maxCodeChars).trimEnd();
+	const source =
+		Array.from(element.children).find((child) => tagName(child) === "code") ??
+		element;
+	const language =
+		languageToken(source) ||
+		languageToken(element) ||
+		adjacentCodeLanguage(element);
+	return codeBlockFromText(
+		collectText(source, maxCodeChars, { codeLines: true }),
+		language,
+	);
+}
+
+export function codeBlockFromText(value: string, language = "") {
+	let body = stripLineNumberGutter(value.slice(0, maxCodeChars));
+	const stripPresentation =
+		!/^(?:html?|xml|svg|jsx|tsx|vue|svelte|astro)$/i.test(language.trim()) &&
+		/<font\b[^>]*\bcolor=|<span\b[^>]*\bstyle=|<u\b[^>]*\bstyle=/i.test(body);
+	body = (
+		stripPresentation
+			? decodeEntities(body).replace(/<\/?(?:font|span|u|b)\b[^>]*>/gi, "")
+			: body
+	).trimEnd();
 	if (!body) return "";
 	const fence = "`".repeat(Math.max(3, maxBacktickRun(body) + 1));
 	return `${fence}${language}\n${body}\n${fence}`;
 }
 
-export function pushNodeChildren(
-	stack: Node[],
-	element: Element,
-	limit: number,
-) {
-	const children = element.childNodes;
-	let pushed = 0;
-	for (let index = children.length - 1; index >= 0; index--) {
-		if (pushed >= limit) break;
-		const child = children[index];
-		if (child) {
-			stack.push(child);
-			pushed++;
-		}
-	}
+function stripLineNumberGutter(value: string) {
+	const lines = value.replace(/\r\n?/g, "\n").split("\n");
+	let cursor = 0;
+	while (lines[cursor]?.trim() === String(cursor + 1)) cursor++;
+	const body = lines.slice(cursor);
+	return cursor >= 3 && body.some((line) => /\S/.test(line))
+		? body.join("\n").replace(/^\n+/, "")
+		: value;
 }
 
 export function renderTable(
@@ -186,192 +197,188 @@ export function renderTable(
 	budget: VisitBudget,
 ) {
 	const collected = collectTableRows(table, budget);
-	const metadata = !collected.invalid
-		? renderMetadataTable(collected.rows, baseUrl, budget)
-		: undefined;
-	if (metadata) return metadata;
 	if (collected.invalid || collected.rows.length < 2) {
 		return tableRowsAsProse(collected.rows, baseUrl, budget);
 	}
-	const headerRows = collected.rows.filter((row) => row.header);
-	const header = collected.rows[0];
-	if (!header || headerRows.length !== 1 || !header.header) {
+	const header = collected.rows[0]!;
+	const columns = header.cells.length;
+	if (
+		!header.header ||
+		columns === 0 ||
+		collected.rows.filter((row) => row.header).length !== 1
+	) {
 		return tableRowsAsProse(collected.rows, baseUrl, budget);
 	}
-	const columns = header.cells.length;
-	if (columns === 0) return tableRowsAsProse(collected.rows, baseUrl, budget);
 
 	const renderedRows: string[][] = [];
 	for (const row of collected.rows.slice(1)) {
-		if (row.header || row.cells.length > columns) {
+		if (row.header || row.cells.length > columns)
 			return tableRowsAsProse(collected.rows, baseUrl, budget);
-		}
 		const cells = row.cells.map((cell) =>
-			tableCellMarkdown(cell, baseUrl, budget),
+			escapeTableCell(inlineCellText(cell, baseUrl, budget)),
 		);
 		while (cells.length < columns) cells.push("");
 		renderedRows.push(cells);
 	}
-	if (renderedRows.length === 0) {
-		return tableRowsAsProse(collected.rows, baseUrl, budget);
-	}
 
 	const headerCells = header.cells.map((cell) =>
-		tableCellMarkdown(cell, baseUrl, budget),
+		escapeTableCell(inlineCellText(cell, baseUrl, budget)),
 	);
-	const separator = headerCells.map(() => "---");
 	return [
 		pipeRow(headerCells),
-		pipeRow(separator),
+		pipeRow(headerCells.map(() => "---")),
 		...renderedRows.map(pipeRow),
 	].join("\n");
 }
-function renderMetadataTable(
-	rows: TableRow[],
-	baseUrl: string,
-	budget: VisitBudget,
-) {
-	if (rows.length < 2) return undefined;
-	const probe = { ...budget };
-	const rendered: string[] = [];
-	let headerLabels = 0;
-	let hintedLabels = 0;
-	for (const row of rows) {
-		if (row.header || row.cells.length !== 2) return undefined;
-		const labelCell = row.cells[0]!;
-		const label = metadataCellText(labelCell, baseUrl, probe);
-		const value = metadataCellText(row.cells[1]!, baseUrl, probe);
-		if (!isMetadataLabel(label) || !value) return undefined;
-		if (tagName(labelCell) === "th") headerLabels++;
-		if (isMetadataLabelHint(label)) hintedLabels++;
-		rendered.push(`**${label}**\n: ${value}`);
-	}
-	if (headerLabels === 0 && hintedLabels === 0) return undefined;
-	budget.visits = probe.visits;
-	return rendered.join("\n");
-}
-
-function metadataCellText(cell: Element, baseUrl: string, budget: VisitBudget) {
-	return removePipes(
-		inlineMarkdown(cell, baseUrl, budget).trim().replaceAll("\n", " "),
-	);
-}
-function renderAtomicInline(
-	chunks: string[],
-	stack: InlineFrame[],
-	atomicCheckpoints: InlineCheckpoint[],
-	node: Element,
-	marker: string,
-	chars: number,
-	budget: VisitBudget,
-) {
-	if (!fitsInline(`${marker}${marker}`, chars)) return chars;
-	const checkpoint = { chunks: chunks.length, chars };
-	atomicCheckpoints.push(checkpoint);
-	stack.push({ node, close: marker, checkpoint });
-	pushInlineChildren(stack, node, budget.maxVisits - budget.visits);
-	return pushWholeInline(chunks, marker, chars);
-}
-
-function renderLink(element: Element, baseUrl: string) {
-	const text = linkText(collectRawText(element));
-	if (!text) return "";
-	const href = safeHref(element.getAttribute("href"), baseUrl);
-	return href ? `[${text}](${href})` : text;
-}
 
 function inlineCode(value: string) {
-	const code = value.replaceAll("\n", " ");
-	if (!code) return "";
+	const source = value.replace(/\r\n?/g, "\n").trim();
+	if (!source) return "";
+	const block = inlineCodeBlock(source);
+	if (block) return `\n${block}\n`;
+	const code = source.replaceAll("\n", " ");
 	const fence = "`".repeat(Math.max(1, maxBacktickRun(code) + 1));
 	const pad = code.startsWith("`") || code.endsWith("`") ? " " : "";
 	return `${fence}${pad}${code}${pad}${fence}`;
 }
 
-function collectRawText(root: Element) {
+function inlineCodeBlock(value: string) {
+	if (/^(?:\{|\[)\s/.test(value)) {
+		try {
+			const json = JSON.stringify(JSON.parse(value), null, 2);
+			return codeBlockFromText(json, "json");
+		} catch {
+			return "";
+		}
+	}
+	if (!/^(?:curl|gh|npm|yarn|pnpm|bun)\b/.test(value)) return "";
+	const code = value.replace(/ \\ (?=\S)/g, " \\\n  ");
+	return code.length >= 120 || code.includes("\n")
+		? codeBlockFromText(code, "bash")
+		: "";
+}
+
+function collectText(
+	root: Element,
+	maxChars: number,
+	options: { codeLines?: boolean; spaceBlocks?: boolean } = {},
+) {
 	const chunks: string[] = [];
 	let chars = 0;
 	let visits = 0;
-	const stack: Node[] = [root];
-	while (stack.length > 0 && chars < maxInlineChars && visits++ < 4_000) {
-		const node = stack.pop()!;
+	const stack: TextFrame[] = [{ node: root }];
+	while (stack.length > 0 && chars < maxChars && visits++ < 4_000) {
+		const frame = stack.pop()!;
+		if (frame.close) {
+			chars = pushCollectedText(chunks, frame.close, chars, maxChars);
+			continue;
+		}
+		const node = frame.node;
+		if (!node) continue;
 		if (node.nodeType === textNode) {
 			const value = node.textContent ?? "";
-			const available = maxInlineChars - chars;
-			chunks.push(value.length > available ? value.slice(0, available) : value);
-			chars += value.length;
+			if (options.codeLines && isCodeMarkupWhitespace(node, value)) continue;
+			chars = pushCollectedText(chunks, value, chars, maxChars);
 			continue;
 		}
-		if (
-			!isElement(node) ||
-			(node !== root &&
-				(shouldSkipElement(node) || isLinkDominatedContainer(node)))
-		) {
+		if (!isElement(node) || (node !== root && shouldSkipElement(node))) {
 			continue;
 		}
-		pushNodeChildren(stack, node, 4_000 - visits);
+		const codeKey = inlineCodeKeyText(node);
+		if (codeKey) {
+			chars = pushCollectedText(chunks, codeKey, chars, maxChars);
+			continue;
+		}
+		const tag = tagName(node);
+		if (options.codeLines && tag === "br") {
+			if (!chunks.at(-1)?.endsWith("\n"))
+				chars = pushCollectedText(chunks, "\n", chars, maxChars);
+			continue;
+		}
+		if (node !== root) {
+			if (options.codeLines && breaksCodeLine(node, tag)) {
+				stack.push({ close: "\n" });
+			} else if (options.spaceBlocks && actsLikeBlock(node)) {
+				chars = pushCollectedText(chunks, " ", chars, maxChars);
+				stack.push({ close: " " });
+			}
+		}
+		pushFrameChildren(stack, node, 4_000 - visits);
 	}
 	return chunks.join("");
 }
 
+const breaksCodeLine = (element: Element, tag: string) =>
+	/^(?:div|p)$/.test(tag) &&
+	!/(?:^|;)\s*display\s*:\s*inline(?:\s|;|$)/i.test(
+		element.getAttribute("style") ?? "",
+	);
+
+function pushCollectedText(
+	chunks: string[],
+	value: string,
+	chars: number,
+	maxChars: number,
+) {
+	const chunk = value.slice(0, maxChars - chars);
+	chunks.push(chunk);
+	return chars + chunk.length;
+}
+
+function isCodeMarkupWhitespace(node: Node, value: string) {
+	const parent = node.parentNode;
+	return (
+		/^\s+$/.test(value) &&
+		isElement(parent) &&
+		Array.from(parent.children).some((child) =>
+			/^(?:div|p)$/.test(tagName(child)),
+		)
+	);
+}
+
+function inlineCodeKeyText(element: Element) {
+	if (element.getAttribute("data-testid") !== "docs-inline-code-key") return "";
+	return Array.from(element.children).reduce((best, child) => {
+		const text = child.textContent?.trim() ?? "";
+		return text.length > best.length ? text : best;
+	}, "");
+}
+
 function languageToken(element: Element) {
-	const className = element.getAttribute("class") ?? "";
-	for (const marker of ["language-", "lang-"]) {
-		const start = className.indexOf(marker);
-		if (start < 0) continue;
-		return readLanguage(className, start + marker.length);
-	}
-	return "";
+	return (
+		(element.getAttribute("class") ?? "").match(
+			/(?:^|\s)(?:language-|lang-)([A-Za-z0-9_#+.-]{1,32})(?=$|\s)/,
+		)?.[1] ?? ""
+	);
 }
 
-function readLanguage(value: string, start: number) {
-	const chars: string[] = [];
-	for (
-		let index = start;
-		index < value.length && chars.length < maxLanguageChars;
-		index++
-	) {
-		const char = value[index]!;
-		if (!isLanguageChar(char)) break;
-		chars.push(char);
-	}
-	return chars.length > 0 ? chars.join("") : "";
+function adjacentCodeLanguage(element: Element) {
+	const match = (element.previousElementSibling?.textContent ?? "")
+		.slice(0, 240)
+		.match(/\.((?:[cm]?[jt]sx?)|css|html|json|md)(?=[A-Z\s]|$)/i);
+	if (!match) return "";
+	return match[1]!.toLowerCase();
 }
 
-function pushInlineChildren(
-	stack: InlineFrame[],
+function pushFrameChildren(
+	stack: { node?: Node }[],
 	element: Element,
 	limit: number,
 ) {
-	const children = element.childNodes;
-	let pushed = 0;
-	for (let index = children.length - 1; index >= 0; index--) {
-		if (pushed >= limit) break;
-		const child = children[index];
-		if (child) {
-			stack.push({ node: child });
-			pushed++;
-		}
+	for (const child of Array.from(element.childNodes)
+		.reverse()
+		.slice(0, limit)) {
+		stack.push({ node: child });
 	}
-}
-
-function firstElementChildWithTag(element: Element, tag: string) {
-	const children = element.childNodes;
-	for (let index = 0; index < children.length; index++) {
-		const child = children[index];
-		if (isElement(child) && tagName(child) === tag) return child;
-	}
-	return undefined;
 }
 
 function pushWholeInline(chunks: string[], value: string, chars: number) {
-	if (!fitsInline(value, chars)) return chars;
-	chunks.push(value);
-	return chars + value.length;
-}
-
-function fitsInline(value: string, chars: number) {
-	return Boolean(value) && chars + value.length <= maxInlineChars;
+	const prefix = needsImplicitInlineSpace(chunks.at(-1), value) ? " " : "";
+	if (!value || chars + prefix.length + value.length > maxInlineChars)
+		return chars;
+	if (isThemeImageTwin(chunks.at(-1), value)) return chars;
+	chunks.push(prefix ? `${prefix}${value}` : value);
+	return chars + prefix.length + value.length;
 }
 
 function collectTableRows(table: Element, budget: VisitBudget) {
@@ -423,18 +430,8 @@ function collectTableRows(table: Element, budget: VisitBudget) {
 function directTableCells(row: Element) {
 	const cells: Element[] = [];
 	let invalid = false;
-	const children = row.childNodes;
-	for (
-		let index = 0;
-		index < children.length && index < maxDirectChildScan;
-		index++
-	) {
-		if (cells.length >= maxTableCells) {
-			invalid = true;
-			break;
-		}
-		const child = children[index];
-		if (!isElement(child)) continue;
+	for (const child of Array.from(row.children).slice(0, maxDirectChildScan)) {
+		if (cells.length >= maxTableCells) return { cells, invalid: true };
 		const tag = tagName(child);
 		if (tag !== "td" && tag !== "th") continue;
 		if (
@@ -456,24 +453,13 @@ function isInlineOnlyCell(cell: Element) {
 		const node = stack.pop()!;
 		if (!isElement(node)) continue;
 		if (node !== cell && tableBlockTags.has(tagName(node))) return false;
-		const children = node.childNodes;
-		for (let index = children.length - 1; index >= 0; index--) {
-			const child = children[index];
-			if (child) stack.push(child);
-		}
+		pushNodeChildren(stack, node, 2_000 - visits);
 	}
 	return true;
 }
 
-function tableCellMarkdown(
-	cell: Element,
-	baseUrl: string,
-	budget: VisitBudget,
-) {
-	return escapeTableCell(
-		inlineMarkdown(cell, baseUrl, budget).trim().replaceAll("\n", " "),
-	);
-}
+const inlineCellText = (cell: Element, baseUrl: string, budget: VisitBudget) =>
+	inlineMarkdown(cell, baseUrl, budget).trim().replaceAll("\n", " ");
 
 function tableRowsAsProse(
 	rows: TableRow[],
@@ -482,10 +468,11 @@ function tableRowsAsProse(
 ) {
 	const lines: string[] = [];
 	for (const row of rows.slice(0, maxTableRows)) {
-		const cells = row.cells
-			.map((cell) => removePipes(inlineMarkdown(cell, baseUrl, budget).trim()))
-			.filter(Boolean);
-		if (cells.length > 0) lines.push(cells.join(" - "));
+		const line = row.cells
+			.map((cell) => removePipes(inlineCellText(cell, baseUrl, budget)))
+			.filter(Boolean)
+			.join(" - ");
+		if (line) lines.push(line);
 	}
 	return lines.join("\n");
 }

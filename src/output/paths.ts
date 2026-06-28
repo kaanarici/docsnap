@@ -1,13 +1,15 @@
 import { createHash } from "node:crypto";
 import { relative } from "node:path";
+import { identityUrls } from "../core/identity.ts";
 import { safeDecode } from "../core/text.ts";
 import type { PageSuccess, PathedPage } from "../core/types.ts";
-import { urlWithoutFragmentAndQuery } from "../core/url.ts";
+import { urlWithoutFragment } from "../core/url.ts";
 
 // Pure stage transition: each input success becomes a new PathedPage carrying its
 // assigned outputPath. The source records are never mutated, so a reference held
 // before this call still sees a PageSuccess without an outputPath.
 export function assignOutputPaths(records: PageSuccess[]): PathedPage[] {
+	if (records.length === 1) return [{ ...records[0]!, outputPath: "index.md" }];
 	const prefix = pathPrefix(records);
 	const byBase = new Map<string, PageSuccess[]>();
 	for (const record of records) {
@@ -37,21 +39,29 @@ export function assignOutputPaths(records: PageSuccess[]): PathedPage[] {
 
 export function pathMap(records: PathedPage[]): Map<string, string> {
 	const map = new Map<string, string>();
+	const ambiguous = new Set<string>();
 	for (const record of records) {
-		for (const url of urlAliases(record)) {
-			map.set(urlWithoutFragmentAndQuery(url), record.outputPath);
+		for (const url of identityUrls(record)) {
+			addPathKey(map, ambiguous, urlWithoutFragment(url), record.outputPath);
 		}
 	}
+	for (const key of ambiguous) map.delete(key);
 	return map;
 }
 
-function urlAliases(record: PageSuccess) {
-	return [
-		record.url,
-		record.finalUrl,
-		record.canonicalUrl,
-		...(record.aliases ?? []),
-	].filter((value): value is string => Boolean(value));
+function addPathKey(
+	map: Map<string, string>,
+	ambiguous: Set<string>,
+	key: string,
+	outputPath: string,
+) {
+	if (ambiguous.has(key)) return;
+	const current = map.get(key);
+	if (!current || current === outputPath) map.set(key, outputPath);
+	else {
+		map.delete(key);
+		ambiguous.add(key);
+	}
 }
 
 export function relativeMarkdownLink(fromPath: string, toPath: string): string {

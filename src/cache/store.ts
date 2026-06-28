@@ -82,7 +82,7 @@ export function cacheRequest(
 	return { url, accept, userAgent: config.userAgent };
 }
 
-export function cacheKey(request: CacheRequest): string {
+function cacheKey(request: CacheRequest): string {
 	const hash = createHash("sha256");
 	for (const part of [
 		schemaVersion,
@@ -142,9 +142,10 @@ export async function writeCacheResult(
 	result: FetchResult,
 ): Promise<void> {
 	const context = cacheContext(config);
-	if (!context.enabled || !result.ok || isNotModifiedResult(result)) return;
+	if (!context.enabled) return;
+	if (!result.ok || isNotModifiedResult(result)) return notStored(context);
 	const freshUntil = freshUntilFor(result);
-	if (!freshUntil) return;
+	if (!freshUntil) return notStored(context);
 	const bodyHash = sha256(result.body);
 	const bytes = byteLength(result.body);
 	const now = new Date().toISOString();
@@ -165,7 +166,7 @@ export async function writeCacheResult(
 		bodyHash,
 		bytes,
 	};
-	if (!entrySafe(entry)) return;
+	if (!entrySafe(entry)) return notStored(context);
 	try {
 		await ensureDirs(context);
 		// Caller holds this key's lock, so the prior entry can't change under us.
@@ -187,6 +188,8 @@ export async function writeCacheResult(
 		disableOnAccessError(context, error);
 	}
 }
+
+const notStored = (context: CacheContext) => void context.stats.notStored++;
 
 async function priorBodyHash(
 	context: CacheContext,
@@ -330,6 +333,7 @@ export function cacheContext(config: PipelineConfig): CacheContext {
 			stale: 0,
 			revalidated: 0,
 			written: 0,
+			notStored: 0,
 			bytesRead: 0,
 			bytesWritten: 0,
 			evictedBytes: 0,

@@ -1,13 +1,24 @@
-import type { FetchResult, PipelineConfig } from "../core/types.ts";
+import type {
+	DiscoveredUrl,
+	FetchResult,
+	PipelineConfig,
+} from "../core/types.ts";
 import { relatedHost } from "../core/url.ts";
 import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
+import { robotsBlockedResult } from "../fetch/result.ts";
+import {
+	discoverLlmsCorpus,
+	type LlmsCorpusOptions,
+	resourceAllowed,
+} from "./corpus.ts";
 import type { Robots } from "./robots.ts";
+import { discoverSitemaps } from "./sitemap.ts";
 import { normalizeUrl } from "./url.ts";
 
 // bare apex domains often refuse connections on /robots.txt while the
 // canonical www origin serves both content and robots; one bounded seed fetch
 // finds that origin, and discovery restarts there robots-first. Only a
-// cross-origin redirect target counts — same-origin means genuinely closed.
+// cross-origin redirect target counts; same-origin means genuinely closed.
 // When the seed itself fails, the fetch failure is returned so the run
 // reports the real network error instead of a robots block.
 // allowResource gates the probe so a cross-origin redirect target's body is
@@ -34,7 +45,69 @@ export async function canonicalOriginSeed(
 	return { moved: finalUrl };
 }
 
-export function literalAllowPrefix(
+export async function disallowedSeedDiscovery(
+	inputSeed: string,
+	robots: Robots,
+	config: PipelineConfig,
+	llmsOptions: LlmsCorpusOptions,
+	restart: (config: PipelineConfig) => Promise<DiscoveredUrl[]>,
+): Promise<DiscoveredUrl[]> {
+	const out = await discoverLlmsCorpus(
+		inputSeed,
+		inputSeed,
+		"/",
+		config,
+		llmsOptions,
+	);
+	const seen = new Set(out.map((item) => item.url));
+	const allowResource = (url: string) =>
+		resourceAllowed(url, config, llmsOptions.robotsByOrigin);
+	if (robots.sitemaps.length > 0 && out.length < config.max) {
+		const declaredSet = new Set(robots.sitemaps);
+		const sitemapUrls = await discoverSitemaps(
+			inputSeed,
+			robots.sitemaps,
+			config,
+			{
+				limit: config.max - out.length,
+				scope: "/",
+				declaredOnly: true,
+				accept: (url) => !seen.has(url) && robots.allowed(url),
+				allowResource: (url) => declaredSet.has(url) || allowResource(url),
+			},
+		);
+		for (const url of sitemapUrls) {
+			if (seen.has(url) || !robots.allowed(url)) continue;
+			seen.add(url);
+			out.push({ url, source: "sitemap" });
+		}
+	}
+	if (out.length > 0) return out;
+	const prefix = literalAllowPrefix(robots, inputSeed);
+	if (prefix) {
+		return [
+			{
+				url: inputSeed,
+				source: "seed",
+				wasSeed: true,
+				fetched: robotsBlockedResult(inputSeed),
+			},
+			...(await restart({ ...config, seedUrl: prefix })).map(
+				({ wasSeed: _wasSeed, ...item }) => item,
+			),
+		];
+	}
+	return [
+		{
+			url: inputSeed,
+			source: "seed",
+			wasSeed: true,
+			fetched: robotsBlockedResult(inputSeed),
+		},
+	];
+}
+
+function literalAllowPrefix(
 	robots: Robots,
 	inputSeed: string,
 ): string | undefined {

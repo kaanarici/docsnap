@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs";
 import { realpath } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import {
 	basename,
 	dirname,
@@ -30,7 +30,7 @@ export function isInsideOrSame(parent: string, child: string): boolean {
 	return path === "" || (!path.startsWith("..") && !parse(path).root);
 }
 
-export function isInsideRoot(root: string, target: string): boolean {
+function isInsideRoot(root: string, target: string): boolean {
 	return isInsideOrSame(resolve(root), resolve(target));
 }
 
@@ -44,7 +44,7 @@ export function assertInsideRoot(
 	return next;
 }
 
-export function isSafeRelativePath(path: string): boolean {
+function isSafeRelativePath(path: string): boolean {
 	return (
 		path.trim() !== "" &&
 		!isAbsolute(path) &&
@@ -108,7 +108,17 @@ function isUnsafeRoot(dir: string): boolean {
 	const home = resolve(homedir());
 	const isProtectedHomeDir =
 		dirname(dir) === home && protectedHomeDirs.has(basename(dir));
-	return dir === root || dir === home || isProtectedHomeDir;
+	return dir === root || dir === home || isTempRoot(dir) || isProtectedHomeDir;
+}
+
+function isTempRoot(dir: string): boolean {
+	return [
+		resolve(tmpdir()),
+		realRoot(resolve(tmpdir())),
+		resolve("/tmp"),
+		realRoot(resolve("/tmp")),
+		resolve("/private/tmp"),
+	].includes(dir);
 }
 
 // Resolve symlinks on the existing portion of the path while preserving the

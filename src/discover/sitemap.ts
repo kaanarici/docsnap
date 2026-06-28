@@ -1,8 +1,8 @@
 import { DOMParser } from "linkedom";
+import { runBounded } from "../core/parallel.ts";
 import { escapeRegExp } from "../core/text.ts";
 import type { PipelineConfig } from "../core/types.ts";
 import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
-import { runBounded } from "../fetch/rate-limit.ts";
 import { normalizeUrl, pathInScope } from "./url.ts";
 
 type SitemapOptions = {
@@ -10,7 +10,7 @@ type SitemapOptions = {
 	accept?: (url: string) => boolean;
 	scope?: string;
 	allowResource?: FetchUrlGate | undefined;
-	// only fetch sitemaps explicitly declared in robots.txt — required when the
+	// only fetch sitemaps explicitly declared in robots.txt; required when the
 	// seed path is robots-disallowed, where probing default sitemap paths would
 	// itself violate the rules while declared sitemaps are an explicit invitation
 	declaredOnly?: boolean;

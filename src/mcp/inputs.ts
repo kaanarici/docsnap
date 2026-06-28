@@ -1,23 +1,16 @@
 import { resolvePriorOutputPath } from "../output/prior.ts";
-import { assertSafeProjectRoot } from "./corpus.ts";
-import { toolDefinitions } from "./definitions.ts";
+import { type ToolInputSchema, toolDefinitions } from "./definitions.ts";
+import { assertSafeProjectRoot } from "./scan.ts";
 
-// Validated argument parsers for every MCP tool. Type, range, length, enum,
-// required, and unknown-field rejection are driven from each tool's published
-// inputSchema in definitions.ts, so the wire schema and the runtime guard cannot
-// drift (a maxLength declared for a client is also enforced here). Callers apply
-// their own defaults: validated() returns only fields that were actually
-// provided so absence-sensitive options — capture max_pages, which must stay
-// unset to leave maxExplicit false for llms.txt corpora — are not forced.
+// Runtime guards come from the published MCP schemas; absent fields stay absent
+// so max_pages does not force maxExplicit.
 
 type FetchScope = "page" | "site" | "auto";
 type Freshness = "reuse" | "refresh" | "force";
 type Safety = "exclude_injection" | "flag_all";
+type ValidatedValue = string | number | boolean;
 
-// The union of fields any tool can accept. Only the names and kinds live here;
-// the bounds that actually gate them live in definitions.ts. enum fields are
-// typed as their literal union because checkField rejects anything else.
-type ValidatedInput = {
+type ValidatedInput = Record<string, ValidatedValue | undefined> & {
 	url?: string;
 	output_dir?: string;
 	output_path?: string;
@@ -48,39 +41,20 @@ type ValidatedInput = {
 	include_frontmatter?: boolean;
 };
 
-type PropSchema = {
-	type: "string" | "integer" | "boolean";
-	minimum?: number;
-	maximum?: number;
-	maxLength?: number;
-	enum?: readonly string[];
-};
-
-type ToolSchema = {
-	required?: string[];
-	properties: Record<string, PropSchema>;
-};
-
-const schemas = new Map<string, ToolSchema>(
-	toolDefinitions.map((tool) => [
-		tool.name,
-		tool.inputSchema as unknown as ToolSchema,
-	]),
+const schemas = new Map<string, ToolInputSchema>(
+	toolDefinitions.map((tool) => [tool.name, tool.inputSchema]),
 );
 
 function validated(tool: string, value: unknown): ValidatedInput {
 	const schema = schemas.get(tool);
 	if (!schema) throw new Error(`Unknown tool: ${tool}`);
-	const input =
-		value && typeof value === "object" && !Array.isArray(value)
-			? (value as Record<string, unknown>)
-			: {};
+	const input = recordInput(value);
 	for (const key of Object.keys(input)) {
 		if (!(key in schema.properties)) {
 			throw new Error(`Unexpected input field: ${key}`);
 		}
 	}
-	const out: Record<string, unknown> = {};
+	const out: ValidatedInput = {};
 	for (const [key, prop] of Object.entries(schema.properties)) {
 		if (!(key in input)) {
 			if (schema.required?.includes(key)) throw new Error(`${key} is required`);
@@ -88,19 +62,29 @@ function validated(tool: string, value: unknown): ValidatedInput {
 		}
 		out[key] = checkField(key, input[key], prop);
 	}
-	return out as ValidatedInput;
+	return out;
 }
 
-function checkField(key: string, raw: unknown, prop: PropSchema): unknown {
+function recordInput(value: unknown): Record<string, unknown> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+	return Object.fromEntries(Object.entries(value));
+}
+
+function checkField(
+	key: string,
+	raw: unknown,
+	prop: ToolInputSchema["properties"][string],
+): ValidatedValue {
 	if (prop.type === "boolean") {
 		if (typeof raw !== "boolean") throw new Error(`${key} must be boolean`);
 		return raw;
 	}
 	if (prop.type === "integer") {
 		if (
+			typeof raw !== "number" ||
 			!Number.isInteger(raw) ||
-			(prop.minimum !== undefined && (raw as number) < prop.minimum) ||
-			(prop.maximum !== undefined && (raw as number) > prop.maximum)
+			(prop.minimum !== undefined && raw < prop.minimum) ||
+			(prop.maximum !== undefined && raw > prop.maximum)
 		) {
 			throw new Error(
 				`${key} must be an integer from ${prop.minimum} to ${prop.maximum}`,
@@ -118,6 +102,11 @@ function checkField(key: string, raw: unknown, prop: PropSchema): unknown {
 		throw new Error(`${key} must be one of: ${prop.enum.join(", ")}`);
 	}
 	return raw;
+}
+
+function required<T>(value: T | undefined, key: string): T {
+	if (value === undefined) throw new Error(`${key} is required`);
+	return value;
 }
 
 function pathGlobOf(glob: string | undefined): string | undefined {
@@ -144,10 +133,10 @@ function cursorOf(cursor: string | undefined): string | undefined {
 export function captureInput(value: unknown) {
 	const v = validated("docsnap_capture", value);
 	return {
-		url: v.url as string,
+		url: required(v.url, "url"),
 		output_dir: v.output_dir,
 		max_pages: v.max_pages,
-		page_only: v.page_only ?? false,
+		page_only: v.page_only === true ? true : undefined,
 		clean: v.clean ?? false,
 		concurrency: v.concurrency,
 	};
@@ -156,7 +145,7 @@ export function captureInput(value: unknown) {
 export function refreshInput(value: unknown) {
 	const v = validated("docsnap_refresh", value);
 	return {
-		output_dir: v.output_dir as string,
+		output_dir: required(v.output_dir, "output_dir"),
 		max_pages: v.max_pages,
 		concurrency: v.concurrency,
 	};
@@ -176,7 +165,7 @@ export function corporaInput(value: unknown) {
 export function summaryInput(value: unknown) {
 	const v = validated("docsnap_get_corpus_summary", value);
 	return {
-		output_dir: v.output_dir as string,
+		output_dir: required(v.output_dir, "output_dir"),
 		include_errors: v.include_errors ?? true,
 		include_refresh_changes: v.include_refresh_changes ?? true,
 		error_limit: v.error_limit ?? 10,
@@ -186,7 +175,7 @@ export function summaryInput(value: unknown) {
 export function pagesInput(value: unknown) {
 	const v = validated("docsnap_list_pages", value);
 	return {
-		output_dir: v.output_dir as string,
+		output_dir: required(v.output_dir, "output_dir"),
 		page_size: v.page_size ?? 50,
 		cursor: cursorOf(v.cursor),
 		include_failures: v.include_failures ?? false,
@@ -196,8 +185,8 @@ export function pagesInput(value: unknown) {
 export function searchInput(value: unknown) {
 	const v = validated("docsnap_search_corpus", value);
 	return {
-		output_dir: v.output_dir as string,
-		query: v.query as string,
+		output_dir: required(v.output_dir, "output_dir"),
+		query: required(v.query, "query"),
 		path_glob: pathGlobOf(v.path_glob),
 		max_results: v.max_results ?? 10,
 		snippet_chars: v.snippet_chars ?? 350,
@@ -207,8 +196,8 @@ export function searchInput(value: unknown) {
 
 export function readPageInput(value: unknown) {
 	const v = validated("docsnap_read_page", value);
-	const output = v.output_dir as string;
-	const path = v.output_path as string;
+	const output = required(v.output_dir, "output_dir");
+	const path = required(v.output_path, "output_path");
 	if (!resolvePriorOutputPath({ outDir: output }, path)) {
 		throw new Error("output_path must be a safe relative manifest path");
 	}
@@ -236,12 +225,13 @@ export type FetchToolInput = {
 	freshness: Freshness;
 	context_chars: number;
 	safety: Safety;
+	cache?: boolean;
 };
 
 export function fetchInput(value: unknown): FetchToolInput {
 	const v = validated("docsnap_fetch", value);
 	return {
-		url: v.url as string,
+		url: required(v.url, "url"),
 		...(v.question !== undefined ? { question: v.question } : {}),
 		...(v.scope !== undefined ? { scope: v.scope } : {}),
 		...(v.output_dir !== undefined ? { output_dir: v.output_dir } : {}),
@@ -255,8 +245,8 @@ export function fetchInput(value: unknown): FetchToolInput {
 export function contextPackInput(value: unknown) {
 	const v = validated("docsnap_context_pack", value);
 	return {
-		output_dir: v.output_dir as string,
-		query: v.query as string,
+		output_dir: required(v.output_dir, "output_dir"),
+		query: required(v.query, "query"),
 		max_snippets: v.max_snippets ?? 8,
 		context_chars: v.context_chars ?? 500,
 		path_glob: pathGlobOf(v.path_glob),

@@ -30,7 +30,6 @@ export async function loadRobots(
 	origin: string,
 	config: PipelineConfig,
 ): Promise<Robots> {
-	if (config.ignoreRobots) return openRobots();
 	const response = await fetchTextUncached(
 		`${origin}/robots.txt`,
 		config,
@@ -43,7 +42,7 @@ export async function loadRobots(
 	return parseRobots(response.body, origin, config.userAgent);
 }
 
-export function parseRobots(
+function parseRobots(
 	body: string,
 	origin: string,
 	userAgent = "docsnap",
@@ -52,11 +51,9 @@ export function parseRobots(
 	const groups: Array<{ agents: string[]; allows: Rule[]; disallows: Rule[] }> =
 		[];
 	let group = newGroup();
-	let lines = 0;
 	let rules = 0;
 
-	for (const raw of body.split(/\r?\n/)) {
-		if (++lines > MAX_ROBOTS_LINES) break;
+	for (const raw of robotsLines(body)) {
 		const line = raw.replace(/#.*/, "").trim();
 		if (!line) continue;
 		const [fieldRaw, ...rest] = line.split(":");
@@ -106,6 +103,24 @@ export function parseRobots(
 		if (group.agents.length || group.allows.length || group.disallows.length)
 			groups.push(group);
 		group = newGroup();
+	}
+}
+
+function* robotsLines(body: string) {
+	let start = 0;
+	for (
+		let lines = 0;
+		lines < MAX_ROBOTS_LINES && start <= body.length;
+		lines++
+	) {
+		const end = body.indexOf("\n", start);
+		if (end < 0) {
+			yield body.slice(start);
+			break;
+		}
+		const line = body.slice(start, end);
+		yield line.endsWith("\r") ? line.slice(0, -1) : line;
+		start = end + 1;
 	}
 }
 

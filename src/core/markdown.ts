@@ -2,6 +2,9 @@ export type MarkdownLink = {
 	text: string;
 	href: string;
 	suffix: string;
+	start: number;
+	end: number;
+	full: string;
 };
 
 export function markdownLinkHrefs(markdown: string): string[] {
@@ -26,14 +29,8 @@ export function replaceMarkdownLinks(
 	return cursor === 0 ? markdown : out + markdown.slice(cursor);
 }
 
-type MarkdownLinkSpan = MarkdownLink & {
-	start: number;
-	end: number;
-	full: string;
-};
-
-function markdownLinkSpans(markdown: string): MarkdownLinkSpan[] {
-	const links: MarkdownLinkSpan[] = [];
+function markdownLinkSpans(markdown: string): MarkdownLink[] {
+	const links: MarkdownLink[] = [];
 	const code = codeRegions(markdown);
 	let index = 0;
 	while (index < markdown.length) {

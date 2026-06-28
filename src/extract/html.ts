@@ -1,12 +1,13 @@
 import { Defuddle } from "defuddle/node";
 import { parseHTML } from "linkedom";
+import { markdownLinkHrefs } from "../core/markdown.ts";
 import {
 	stripCompleteHtmlElement,
 	uniqueByWhitespace,
 	wordCount,
 } from "../core/text.ts";
 import type { FetchedUrl, FetchResult, PageRecord } from "../core/types.ts";
-import { urlWithoutFragmentAndQuery } from "../core/url.ts";
+import { urlWithoutFragment } from "../core/url.ts";
 import { isFeedResponse } from "../discover/feed.ts";
 import { chromeHeading, isShellPlaceholder } from "./app-shell.ts";
 import {
@@ -14,7 +15,6 @@ import {
 	isStructuredTextAsset,
 	languageFromUrl,
 } from "./content.ts";
-import { linksFromMarkdown, titleFromMarkdown } from "./markdown.ts";
 import {
 	type ExtractedBody,
 	failedRecord,
@@ -28,12 +28,15 @@ import {
 	countTextChars,
 	isElement,
 	maxBacktickRun,
+	maxOutputChars,
+	maxSerializeVisits,
 	shouldSkipElement,
 	tagName,
 } from "./structured-fallback-shared.ts";
+import { titleFromMarkdown } from "./title.ts";
 
 export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
-	const { metadata, result, source } = input;
+	const { metadata, result, source, wasSeed } = input;
 	const started = performance.now();
 	if (!result.ok)
 		return failedRecord(
@@ -42,6 +45,8 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 			metadata,
 			result.error,
 			result.failureKind,
+			[],
+			wasSeed,
 		);
 	// rss/atom feeds are discovery sources, not content pages; exclude them from
 	// the corpus instead of capturing the raw feed XML as a page
@@ -52,6 +57,8 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 			metadata,
 			"feed resource used for discovery, not a content page",
 			"empty",
+			[],
+			wasSeed,
 		);
 	const signals = rawInjectionSignals(result);
 
@@ -66,6 +73,7 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 			error instanceof Error ? error.message : String(error),
 			"extract",
 			signals,
+			wasSeed,
 		);
 	}
 }
@@ -133,11 +141,8 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 		};
 	}
 
-	// Defuddle is ~90% of cold extraction time. When the page has a clear semantic
-	// main-content container, the cheap structured extractor already matches it
-	// (verified equivalent content on real docs), so skip the expensive pass when
-	// its result is strong and confident. Cluttered pages with no main/article, or
-	// a weak/low-confidence structured result, still fall through to Defuddle.
+	// Skip Defuddle only when the cheap structured pass is already substantial,
+	// high-confidence, and not a shell.
 	const fast = strongStructuredFastPath(
 		document,
 		result.finalUrl,
@@ -212,10 +217,7 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 		: fallback.markdown
 			? fallback.extractor
 			: ("fallback" as const);
-	// Meta-tag-only output means nothing real was extracted — the markdown is just
-	// the page's og/twitter description (marketing copy), not captured content. Fail
-	// honestly so inline-state can still recover real JS state and content-less
-	// shells/skeletons record as empty rather than masquerading as a captured page.
+	// Meta-tag-only output is marketing copy, not captured page content.
 	const metadataOnly = !serialized && !fallback.markdown && Boolean(metadata);
 	const isShell =
 		isShellPlaceholder(markdown, title, result.body) ||
@@ -232,11 +234,6 @@ function freshDocument(html: string) {
 	return parseHTML(html).document;
 }
 
-// Returns structured markdown only when it is confidently the page's real content
-// (substantial prose, high quality score, not a shell), so the caller can skip the
-// costly Defuddle pass. structuredFallback already finds and gates the content root
-// (returning "" for weak/link-dominated roots), so no semantic-container requirement
-// is needed; conservative word/confidence/shell gates keep clutter on Defuddle.
 const fastPathMinWords = 200;
 const fastPathMinConfidence = 0.9;
 function strongStructuredFastPath(
@@ -298,7 +295,7 @@ function largePageOutline(
 
 function chromeOnlyExtractedMarkdown(markdown: string) {
 	const words = wordCount(markdown);
-	const linkCount = linksFromMarkdown(markdown).length;
+	const linkCount = markdownLinkHrefs(markdown).length;
 	const imageCount = (markdown.match(/!\[[^\]]*]\([^)]+\)/g) ?? []).length;
 	const withoutLinks = markdown
 		.replace(/\[[^\]]+]\([^)]+\)/g, "")
@@ -326,7 +323,11 @@ function readableText(node: Node): string {
 	let visits = 0;
 	let chars = 0;
 	let anchorChars = 0;
-	while (stack.length > 0 && visits++ < 60_000 && chars < 200_000) {
+	while (
+		stack.length > 0 &&
+		visits++ < maxSerializeVisits &&
+		chars < maxOutputChars
+	) {
 		const frame = stack.pop()!;
 		if (frame.node.nodeType === 3) {
 			const value = frame.node.textContent ?? "";
@@ -340,7 +341,7 @@ function readableText(node: Node): string {
 		if (shouldSkipElement(frame.node)) continue;
 		const inAnchor = frame.inAnchor || tagName(frame.node) === "a";
 		const children = frame.node.childNodes;
-		const remaining = Math.max(0, 60_000 - visits);
+		const remaining = Math.max(0, maxSerializeVisits - visits);
 		let pushed = 0;
 		for (let index = children.length - 1; index >= 0; index--) {
 			if (pushed >= remaining) break;
@@ -371,19 +372,14 @@ function renderTextAsset(title: string, body: string, url: string) {
 	return `# ${title}\n\n${fence}${language}\n${body.trim()}\n${fence}`;
 }
 
-export function stripScriptStyleTags(html: string): string {
+function stripScriptStyleTags(html: string): string {
 	return stripCompleteHtmlElement(
 		stripCompleteHtmlElement(html, "script"),
 		"style",
 	);
 }
 
-// Defuddle logs parse warnings straight to console. We silence console.error /
-// console.warn only WHILE a parse is in flight, then restore the real methods —
-// so importing this module leaves the host's console untouched and stderr is
-// pristine whenever extraction is idle (it is not mutated at module load). A
-// depth counter handles concurrent worker-pool parses: the first parse saves and
-// replaces the real methods, the last to finish restores them.
+// Defuddle can write parse warnings to stderr; silence only during active parses.
 let activeDefuddleParses = 0;
 let restoreConsole: (() => void) | undefined;
 
@@ -410,7 +406,6 @@ async function parseWithDefuddle(document: Document, url: string) {
 	try {
 		return await Defuddle(document, url, {
 			markdown: true,
-			debug: false,
 			useAsync: false,
 		});
 	} catch {
@@ -423,7 +418,7 @@ async function parseWithDefuddle(document: Document, url: string) {
 function resolveCanonical(href: string | null | undefined, base: string) {
 	if (!href) return undefined;
 	try {
-		return urlWithoutFragmentAndQuery(href, base);
+		return urlWithoutFragment(href, base);
 	} catch {
 		return undefined;
 	}

@@ -1,5 +1,6 @@
 import { markdownLinkHrefs } from "../core/markdown.ts";
 import type { FetchResult, PipelineConfig } from "../core/types.ts";
+import { isLlmsResourcePath } from "../core/url.ts";
 import { fetchText } from "../fetch/fetcher.ts";
 import {
 	normalizeUrl,
@@ -11,7 +12,6 @@ import {
 const CORPUS_INDEX_LIMIT = 256;
 export type LlmsDiscoveryOptions = {
 	cache?: Map<string, Promise<FetchResult>>;
-	retryHttp?: boolean;
 	allowResource?: (url: string) => Promise<boolean> | boolean;
 };
 
@@ -24,7 +24,6 @@ export async function discoverLlms(
 	const urls = new Set<string>();
 	const seen = new Set<string>();
 	const queue = llmsCandidateUrls(seed);
-	const roots = new Set(queue);
 	while (
 		queue.length > 0 &&
 		seen.size < CORPUS_INDEX_LIMIT &&
@@ -46,7 +45,6 @@ export async function discoverLlms(
 		)
 			continue;
 		const corpusBase = response.finalUrl;
-		if (roots.has(llmsUrl)) urls.add(corpusBase);
 		for (const link of corpusLinks(
 			response.body,
 			corpusBase,
@@ -54,6 +52,10 @@ export async function discoverLlms(
 			config.maxExplicit,
 		)) {
 			if (new URL(link).pathname === "/") continue;
+			if (isLlmsResourcePath(new URL(link).pathname)) {
+				if (!seen.has(link)) queue.push(link);
+				continue;
+			}
 			if (shouldExpandIndex(link, corpusBase, seen, urls, config)) {
 				urls.add(link);
 				queue.push(link);
@@ -73,6 +75,7 @@ export function llmsCandidateUrls(seed: string): string[] {
 		? base.pathname
 		: base.pathname.replace(/\/[^/]*$/, "/");
 	const paths = new Set<string>();
+	if (isLlmsResourcePath(base.pathname)) paths.add(base.pathname);
 	if (base.pathname.endsWith("/")) paths.add(`${base.pathname}llms.txt`);
 	else if (!/\.[a-z0-9]+$/i.test(base.pathname))
 		paths.add(`${base.pathname}/llms.txt`);
@@ -90,10 +93,7 @@ function fetchLlmsText(
 	if (cached) return cached;
 	const fetched = fetchText(
 		url,
-		{
-			...config,
-			retryHttp: options.retryHttp ?? false,
-		},
+		config,
 		"text/markdown,text/plain,*/*;q=0.8",
 		undefined,
 		options.allowResource,
@@ -107,7 +107,7 @@ function fetchLlmsText(
 	return fetched;
 }
 
-export function isLlmsCorpus(contentType: string, body: string) {
+function isLlmsCorpus(contentType: string, body: string) {
 	const text = body.trim();
 	if (!text) return false;
 	if (looksLikeHtml(text)) return false;

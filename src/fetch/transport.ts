@@ -3,44 +3,25 @@ import { Agent as HttpAgent, request as httpRequest } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import type { LookupFunction } from "node:net";
 import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
-import type {
-	FetchTransport,
-	HeaderMap,
-	HttpResponse,
-	PipelineConfig,
-} from "../core/types.ts";
+import type { HeaderMap, HttpResponse, PipelineConfig } from "../core/types.ts";
 import {
 	type PublicAddress,
 	type PublicHttpAddress,
 	resolvePublicHttpUrl,
 } from "../security/url.ts";
 
-export type { FetchTransport, HeaderMap, HttpResponse };
+export type { HeaderMap, HttpResponse };
 
 const httpAgent = new HttpAgent({ keepAlive: true, maxSockets: 64 });
 const httpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 64 });
-
-type Resolver = typeof resolvePublicHttpUrl;
-
-// requestPublicHttp performs real DNS resolution; the only thing tests need to
-// substitute is that resolution so they can drive the real transport against a
-// loopback server while presenting a public hostname. This is the sole test
-// seam left in the transport and it is reset between tests.
-let testResolver: Resolver | undefined;
-
-export function setResolvePublicHttpUrlForTest(
-	resolver: Resolver | undefined,
-): void {
-	testResolver = resolver;
-}
 
 export async function requestPublicHttp(
 	raw: string,
 	headers: Record<string, string>,
 	config: PipelineConfig,
 ): Promise<HttpResponse> {
-	const resolved = await (testResolver ?? resolvePublicHttpUrl)(raw);
-	const deadlineAt = Date.now() + config.timeoutMs * 3;
+	const resolved = await resolvePublicHttpUrl(raw);
+	const deadlineAt = Date.now() + config.timeoutMs;
 	let lastError: unknown;
 	for (const address of resolved.addresses) {
 		const remainingMs = deadlineAt - Date.now();
@@ -111,13 +92,21 @@ function requestAddress(
 				timeout: config.timeoutMs,
 			},
 			(res) => {
+				const status = res.statusCode ?? 0;
+				const headers = responseHeaders(res);
+				if (status >= 300 && status <= 399) {
+					res.resume();
+					clearTimeout(deadline);
+					resolve({ url: raw, status, headers, body: new Uint8Array() });
+					return;
+				}
 				void readIncoming(res, config.maxBytes)
 					.then((body) => decodeContent(body, res, config.maxBytes))
 					.then((body) =>
 						resolve({
 							url: raw,
-							status: res.statusCode ?? 0,
-							headers: responseHeaders(res),
+							status,
+							headers,
 							body,
 						}),
 					)
@@ -188,14 +177,6 @@ async function readIncoming(
 	response: IncomingMessage,
 	maxBytes: number,
 ): Promise<Uint8Array> {
-	if (
-		response.statusCode &&
-		response.statusCode >= 300 &&
-		response.statusCode <= 399
-	) {
-		response.resume();
-		return new Uint8Array();
-	}
 	const chunks: Uint8Array[] = [];
 	let bytes = 0;
 	for await (const chunk of response) {

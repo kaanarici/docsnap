@@ -1,4 +1,4 @@
-export const elementNode = 1;
+const elementNode = 1;
 export const textNode = 3;
 export const maxRootFrames = 60_000;
 export const maxSerializeVisits = 60_000;
@@ -11,30 +11,19 @@ export const maxTableFrames = 12_000;
 export const maxListItems = 500;
 export const maxDirectChildScan = 2_000;
 export const maxListDepth = 6;
-export const maxLanguageChars = 32;
 
-export type TextStats = {
-	textChars: number;
-	anchorChars: number;
-};
+export type TextStats = { textChars: number; anchorChars: number };
 
-export type VisitBudget = {
-	visits: number;
-	maxVisits: number;
-};
+export type VisitBudget = { visits: number; maxVisits: number };
 
-export type OutputState = {
-	chars: number;
-};
+export type OutputState = { chars: number };
 
 export const emptyStats = (): TextStats => ({ textChars: 0, anchorChars: 0 });
 export const linkDensity = (stats: TextStats) =>
 	stats.textChars === 0 ? 1 : stats.anchorChars / stats.textChars;
 
 export function takeVisit(budget: VisitBudget) {
-	if (budget.visits >= budget.maxVisits) return false;
-	budget.visits++;
-	return true;
+	return budget.visits < budget.maxVisits && ++budget.visits > 0;
 }
 
 export function tagName(element: Element | undefined) {
@@ -50,32 +39,198 @@ export function isPreferredRoot(element: Element) {
 	return tag === "main" || tag === "article" || role(element) === "main";
 }
 
-export function isCandidateRoot(element: Element) {
-	return rootCandidateTags.has(tagName(element));
-}
+export const isCandidateRoot = (element: Element) =>
+	rootCandidateTags.has(tagName(element));
 
 export function isHeading(tag: string) {
 	return tag.length === 2 && tag[0] === "h" && tag[1]! >= "1" && tag[1]! <= "6";
 }
 
-export function shouldSkipElement(element: Element) {
-	const tag = tagName(element);
+export function actsLikeBlock(element: Element) {
 	return (
-		skipTags.has(tag) || isChromeElement(element) || isHiddenElement(element)
+		blockTags.has(tagName(element)) ||
+		element.getAttribute("data-as") === "p" ||
+		element.getAttribute("data-component-part") === "card-cta"
 	);
+}
+
+export function shouldSkipElement(element: Element) {
+	return (
+		skipTags.has(tagName(element)) ||
+		isChromeElement(element) ||
+		isWidgetChrome(element) ||
+		isHiddenElement(element)
+	);
+}
+
+function isWidgetChrome(element: Element) {
+	const tag = tagName(element);
+	return isShareChrome(element, tag) || isSubscriptionChrome(element, tag);
 }
 
 function isChromeElement(element: Element) {
 	const tag = tagName(element);
-	return chromeTags.has(tag) || role(element) === "navigation";
+	const elementRole = role(element);
+	return (
+		chromeTags.has(tag) ||
+		Boolean(elementRole && chromeRoles.has(elementRole)) ||
+		isCodeCopyControl(element, tag) ||
+		((tag === "button" || tag === "a" || elementRole === "button") &&
+			controlChromePattern.test(
+				boundedElementText(element, 160, 80).toLowerCase(),
+			))
+	);
 }
 
 const role = (element: Element) => element.getAttribute("role")?.toLowerCase();
+
+function isCodeCopyControl(element: Element, tag: string) {
+	if (tag !== "button") return false;
+	const label = collapseWhitespace(
+		`${element.getAttribute("aria-label") ?? ""} ${element.getAttribute("title") ?? ""}`,
+	).toLowerCase();
+	const className = element.getAttribute("class")?.toLowerCase() ?? "";
+	return (
+		label === "copy code" ||
+		label === "copy the code" ||
+		className.includes("code-copy") ||
+		className.includes("copy-code") ||
+		className.includes("muicode-copy")
+	);
+}
+
+function isShareChrome(element: Element, tag: string) {
+	if (!shareCandidateTags.has(tag)) return false;
+	if (!widgetHint(element, "share") && !widgetHint(element, "social")) {
+		return false;
+	}
+	const text = boundedElementText(element, 120, 120).toLowerCase();
+	if (!/^(?:share|share this):?$/.test(text)) return false;
+	return (
+		hasElementMatching(element, 120, (candidate) =>
+			interactiveTags.has(tagName(candidate)),
+		) &&
+		!hasElementMatching(element, 120, (candidate) =>
+			contentBlockTags.has(tagName(candidate)),
+		)
+	);
+}
+
+function isSubscriptionChrome(element: Element, tag: string) {
+	if (!subscriptionCandidateTags.has(tag)) return false;
+	if (
+		tag !== "form" &&
+		!widgetHint(element, "newsletter") &&
+		!widgetHint(element, "subscribe") &&
+		!widgetHint(element, "signup")
+	) {
+		return false;
+	}
+	const text = boundedElementText(element, 1_200, 240).toLowerCase();
+	if (!/\b(?:newsletter|subscribe|sign up|email updates)\b/.test(text)) {
+		return false;
+	}
+	if (
+		!/\b(?:email address|your email|privacy|personalized communications)\b/.test(
+			text,
+		)
+	) {
+		return false;
+	}
+	return hasElementMatching(element, 240, (candidate) => {
+		if (tagName(candidate) !== "input") return false;
+		return (
+			attrEquals(candidate, "type", "email") ||
+			attrIncludes(candidate, "name", "email") ||
+			attrEquals(candidate, "autocomplete", "email") ||
+			attrIncludes(candidate, "placeholder", "email")
+		);
+	});
+}
+
+function widgetHint(element: Element, needle: string) {
+	return (
+		attrIncludes(element, "class", needle) ||
+		attrIncludes(element, "id", needle) ||
+		attrIncludes(element, "aria-label", needle)
+	);
+}
+
+function boundedElementText(
+	element: Element,
+	maxChars: number,
+	maxVisits: number,
+) {
+	const chunks: string[] = [];
+	let chars = 0;
+	let visits = 0;
+	const stack: Node[] = [element];
+	while (stack.length > 0 && chars < maxChars && visits++ < maxVisits) {
+		const node = stack.pop()!;
+		if (node.nodeType === textNode) {
+			const text = node.textContent ?? "";
+			const chunk = text.slice(0, maxChars - chars);
+			chunks.push(chunk);
+			chars += chunk.length;
+			continue;
+		}
+		if (!isElement(node) || skipTags.has(tagName(node))) continue;
+		pushNodeChildren(stack, node, maxVisits - visits);
+	}
+	return collapseWhitespace(chunks.join(""));
+}
+
+function hasElementMatching(
+	element: Element,
+	maxVisits: number,
+	match: (element: Element) => boolean,
+) {
+	let visits = 0;
+	const stack: Node[] = [element];
+	while (stack.length > 0 && visits++ < maxVisits) {
+		const node = stack.pop()!;
+		if (!isElement(node) || skipTags.has(tagName(node))) continue;
+		if (node !== element && match(node)) return true;
+		pushNodeChildren(stack, node, maxVisits - visits);
+	}
+	return false;
+}
+
+export function pushNodeChildren(
+	stack: Node[],
+	element: Element,
+	limit: number,
+) {
+	let pushed = 0;
+	for (
+		let index = element.childNodes.length - 1;
+		index >= 0 && pushed < limit;
+		index--
+	) {
+		const child = element.childNodes[index];
+		if (!child) continue;
+		stack.push(child);
+		pushed++;
+	}
+}
+
+function attrEquals(element: Element, name: string, value: string) {
+	return element.getAttribute(name)?.toLowerCase() === value;
+}
+
+function attrIncludes(element: Element, name: string, value: string) {
+	return element.getAttribute(name)?.toLowerCase().includes(value) ?? false;
+}
 
 function isHiddenElement(element: Element) {
 	return (
 		element.hasAttribute("hidden") ||
 		element.getAttribute("aria-hidden")?.toLowerCase() === "true" ||
+		(element
+			.getAttribute("class")
+			?.split(/\s+/)
+			.some((token) => hiddenClassTokens.has(token)) ??
+			false) ||
 		styleHidesElement(element.getAttribute("style") ?? "")
 	);
 }
@@ -83,20 +238,26 @@ function isHiddenElement(element: Element) {
 export function isLinkDominatedContainer(element: Element) {
 	const tag = tagName(element);
 	if (tag !== "article" && tag !== "section" && tag !== "div") return false;
-	if (hasDirectHeading(element)) return false;
+	if (hasNearbyHeading(element)) return false;
 	const stats = quickTextStats(element);
-	return stats.textChars >= 20 && linkDensity(stats) > 0.5;
+	return stats.textChars >= 20 && linkDensity(stats) > 0.7;
 }
 
-function hasDirectHeading(element: Element) {
-	const children = element.childNodes;
-	for (
-		let index = 0;
-		index < children.length && index < maxDirectChildScan;
-		index++
-	) {
-		const child = children[index];
-		if (isElement(child) && isHeading(tagName(child))) return true;
+function hasNearbyHeading(element: Element) {
+	const stack: Array<{ node: Node; depth: number }> = [
+		{ node: element, depth: 0 },
+	];
+	let visits = 0;
+	while (stack.length > 0 && visits++ < 240) {
+		const { node, depth } = stack.pop()!;
+		if (!isElement(node)) continue;
+		if (node !== element && isHeading(tagName(node))) return true;
+		if (depth >= 3 || shouldSkipElement(node)) continue;
+		const children = node.childNodes;
+		for (let index = children.length - 1; index >= 0; index--) {
+			const child = children[index];
+			if (child) stack.push({ node: child, depth: depth + 1 });
+		}
 	}
 	return false;
 }
@@ -132,131 +293,101 @@ function quickTextStats(root: Element): TextStats {
 }
 
 function styleHidesElement(style: string) {
-	for (const declaration of style.slice(0, 2_048).split(";")) {
-		const colon = declaration.indexOf(":");
-		if (colon < 0) continue;
-		const property = declaration.slice(0, colon).trim().toLowerCase();
-		const value = declaration
-			.slice(colon + 1)
-			.trim()
-			.toLowerCase();
-		if (property === "display" && value.startsWith("none")) return true;
-		if (property === "visibility" && value.startsWith("hidden")) return true;
-	}
-	return false;
+	return /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)/i.test(
+		style.slice(0, 2_048),
+	);
 }
 
 const rootCandidateTags = wordSet("article main section div table td");
-export const allowedSchemes = wordSet("http: https: mailto:");
+const allowedSchemes = wordSet("http: https: mailto:");
 const chromeTags = wordSet("nav header footer aside");
+const chromeRoles = wordSet("navigation tab tablist");
+const contentBlockTags = wordSet("code h1 h2 h3 h4 h5 h6 p pre table");
+const interactiveTags = wordSet("a button input select textarea");
+const shareCandidateTags = wordSet("div section ul ol");
+const subscriptionCandidateTags = wordSet("div section form");
+const hiddenClassTokens = wordSet("hidden sr-only visually-hidden");
 const skipTags = wordSet("script style noscript template svg canvas");
 export const voidTags = wordSet(
 	"area base col embed iframe img input link meta param source track wbr",
 );
-export const blockTags = wordSet(
+const blockTags = wordSet(
 	"address article aside blockquote details dialog div dl fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 header hr li main nav ol p pre section table ul",
 );
 export const tableBlockTags = wordSet(
 	"article blockquote div h1 h2 h3 h4 h5 h6 li ol p pre section table ul",
 );
-export const languageExtraChars = new Set("_#+.-");
-export const unsafeHrefChars = new Set(')<>"');
-const whitespaceChars = new Set([" ", "\n", "\r", "\t", "\f"]);
+const whitespacePattern = /[ \n\r\t\f]/;
+const whitespaceRunPattern = /[ \n\r\t\f]+/g;
+const inlineJoinEndPattern = /[\p{L}\p{N}`!?:;)]$/u;
+const inlineJoinStartPattern = /^[\p{L}`]/u;
+const rawPattern = (source: string, flags?: string) =>
+	new RegExp(source, flags);
+const sanitizeControlPattern = rawPattern(
+	String.raw`[\x00-\x08\x0B-\x1F\x7F]`,
+	"g",
+);
+const stripControlPattern = rawPattern(String.raw`[\x00-\x1F\x7F-\x9F]`, "g");
+const unsafeHrefPattern = rawPattern(String.raw`[)<>" \n\r\t\f\x00-\x1F\x7F]`);
+const fencedBlockPattern = /(`{3,})[^\n]*\n[\s\S]*?\n\1/g;
 
 function wordSet(values: string) {
 	return new Set(values.split(" "));
 }
 
 export function countTextChars(value: string) {
-	let count = 0;
-	for (const char of value) {
-		if (!isWhitespace(char)) count++;
-	}
-	return count;
+	return value.replace(whitespaceRunPattern, "").length;
 }
 
 export function collapseWhitespace(value: string) {
-	const out: string[] = [];
-	let pendingSpace = false;
-	for (const char of value) {
-		if (isWhitespace(char)) {
-			pendingSpace = out.length > 0;
-			continue;
-		}
-		if (pendingSpace) out.push(" ");
-		out.push(char);
-		pendingSpace = false;
-	}
-	return out.join("");
+	return value.replace(whitespaceRunPattern, " ").trim();
 }
 
 export function collapseInlineWhitespace(value: string) {
 	const collapsed = collapseWhitespace(value);
 	if (!collapsed) return value ? " " : "";
-	const prefix = isWhitespace(value[0] ?? "") ? " " : "";
-	const suffix = isWhitespace(value[value.length - 1] ?? "") ? " " : "";
-	return `${prefix}${collapsed}${suffix}`;
+	const prefix = whitespacePattern.test(value[0] ?? "") ? " " : "";
+	return `${prefix}${collapsed}${whitespacePattern.test(value[value.length - 1] ?? "") ? " " : ""}`;
 }
 
 export function tidyInline(value: string) {
-	const out: string[] = [];
-	let pendingSpace = false;
-	let pendingNewline = false;
-	for (const char of value) {
-		if (char === "\n") {
-			pendingNewline = out.length > 0;
-			pendingSpace = false;
-			continue;
-		}
-		if (isWhitespace(char)) {
-			pendingSpace = out.length > 0;
-			continue;
-		}
-		if (pendingNewline) out.push("\n");
-		else if (pendingSpace) out.push(" ");
-		out.push(char);
-		pendingSpace = false;
-		pendingNewline = false;
-	}
-	return out.join("").trim();
+	const blocks: string[] = [];
+	return value
+		.replace(fencedBlockPattern, (block) => `@@F${blocks.push(block) - 1}@@`)
+		.replace(/[ \r\t\f]+/g, " ")
+		.replace(/ *\n+ */g, "\n")
+		.replace(/ +([,.;:!?)](?:\s|$))/g, "$1")
+		.replace(/([.)]["”]?)(?=(?:Default|Can be|Properties of)\b)/g, "$1 ")
+		.replace(/\b(Default: (?:`[^`\n]+`|[^.\n]{1,80})) Can be\b/g, "$1. Can be")
+		.replace(/\bProperties of (`[^`\n]+`)(?= `)/g, "\nProperties of $1\n")
+		.replace(
+			/\nProperties of (`[^`\n]+`)\n([\s\S]*?)(?=\nProperties of `|$)/g,
+			(_match, label, body) =>
+				`\nProperties of ${label}\n${body.replace(/ (?=(`[^`\n]+`) (?:object|array|string|boolean|integer|number|null)\b)/g, "\n")}`,
+		)
+		.replace(/@@F(\d+)@@\n? ?\. (?=[A-Z])/g, "@@F$1@@\n")
+		.replace(/@@F(\d+)@@/g, (_match, index) => blocks[Number(index)] ?? "")
+		.trim();
 }
 
 export function sanitizeText(value: string) {
-	const out: string[] = [];
-	for (const char of value) {
-		const code = char.codePointAt(0) ?? 0;
-		if ((code < 0x20 && char !== "\n" && char !== "\t") || code === 0x7f) {
-			continue;
-		}
-		if (char === "<") out.push("&lt;");
-		else if (char === ">") out.push("&gt;");
-		else out.push(char);
-	}
-	return out.join("");
+	return value
+		.replace(sanitizeControlPattern, "")
+		.replaceAll("<", "&lt;")
+		.replaceAll(">", "&gt;");
 }
 
 export function linkText(value: string) {
-	const out: string[] = [];
-	let pendingSpace = false;
-	for (const char of value) {
-		if (isWhitespace(char)) {
-			pendingSpace = out.length > 0;
-			continue;
-		}
-		if (pendingSpace) out.push(" ");
-		if (char === "[" || char === "]" || char === "`") out.push("\\", char);
-		else if (char === "<") out.push("&lt;");
-		else if (char === ">") out.push("&gt;");
-		else out.push(char);
-		pendingSpace = false;
-	}
-	return out.join("").trim();
+	return collapseWhitespace(value)
+		.replace(/[[\]`]/g, "\\$&")
+		.replaceAll("<", "&lt;")
+		.replaceAll(">", "&gt;");
 }
 
 export function safeHref(value: string | null, baseUrl: string) {
 	if (!value) return undefined;
-	const stripped = stripControlChars(value.trim());
-	if (!stripped || hasUnsafeHrefChar(stripped)) return undefined;
+	const stripped = value.trim().replace(stripControlPattern, "");
+	if (!stripped || unsafeHrefPattern.test(stripped)) return undefined;
 	try {
 		const resolved = new URL(stripped, baseUrl);
 		if (!allowedSchemes.has(resolved.protocol)) return undefined;
@@ -266,156 +397,79 @@ export function safeHref(value: string | null, baseUrl: string) {
 	}
 }
 
-// content-bearing alt only: empty/missing alt is decorative (HTML spec) and dropped
 export function imageMarkdown(element: Element, baseUrl: string) {
-	const alt = linkText(element.getAttribute("alt") ?? "");
-	if (!alt) return "";
 	const src = imageSource(element, baseUrl);
+	const alt = linkText(element.getAttribute("alt") ?? "");
+	if (!alt || urlLikeImageAlt(alt, src)) return "";
 	return src ? `![${alt}](${src})` : alt;
 }
 
-// responsive images often omit src; recover the first usable srcset candidate
+function urlLikeImageAlt(alt: string, src: string | undefined) {
+	return /^(?:https?:)?\/\//i.test(alt) || (src !== undefined && alt === src);
+}
+
+export function isThemeImageTwin(previous: string | undefined, next: string) {
+	const previousImage = previous?.match(imageMarkdownPattern);
+	const nextImage = next.match(imageMarkdownPattern);
+	if (!previousImage || !nextImage || previousImage[1] !== nextImage[1])
+		return false;
+	const previousTheme = themeVariant(previousImage[2]!);
+	const nextTheme = themeVariant(nextImage[2]!);
+	return Boolean(previousTheme && nextTheme && nextTheme !== previousTheme);
+}
+
+const imageMarkdownPattern = /^!\[([^\]]+)]\(([^)]+)\)$/;
+const themeVariant = (src: string) =>
+	src.match(/(?:\/|%2f)(light|dark)(?:\/|%2f)/i)?.[1]?.toLowerCase();
+
 function imageSource(element: Element, baseUrl: string) {
 	const direct = safeHref(element.getAttribute("src"), baseUrl);
 	if (direct) return direct;
-	for (const candidate of srcsetUrls(element.getAttribute("srcset"))) {
-		const safe = safeHref(candidate, baseUrl);
+	for (const part of (element.getAttribute("srcset") ?? "").split(",")) {
+		const candidate = part.trim().split(/\s+/, 1)[0];
+		const safe = safeHref(candidate ?? "", baseUrl);
 		if (safe) return safe;
 	}
 	return undefined;
 }
 
-function srcsetUrls(value: string | null) {
-	if (!value) return [] as string[];
-	const urls: string[] = [];
-	for (const part of value.split(",")) {
-		const url = part.trim().split(/\s+/, 1)[0];
-		if (url) urls.push(url);
-	}
-	return urls;
-}
-
-export function stripControlChars(value: string) {
-	const out: string[] = [];
-	for (const char of value) {
-		const code = char.codePointAt(0) ?? 0;
-		if (code >= 0x20 && (code < 0x7f || code > 0x9f)) out.push(char);
-	}
-	return out.join("");
-}
-
-export function hasUnsafeHrefChar(value: string) {
-	for (const char of value) {
-		const code = char.codePointAt(0) ?? 0;
-		if (
-			unsafeHrefChars.has(char) ||
-			isWhitespace(char) ||
-			code < 0x20 ||
-			code === 0x7f
-		) {
-			return true;
-		}
-	}
-	return false;
-}
-
 export function escapeTableCell(value: string) {
-	const out: string[] = [];
-	for (const char of value) {
-		if (char === "|") out.push("\\|");
-		else out.push(char);
-	}
-	return out.join("");
+	return value.replaceAll("|", "\\|");
 }
 
 export function removePipes(value: string) {
-	const out: string[] = [];
-	for (const char of value.replaceAll("\n", " ")) {
-		if (char !== "|") out.push(char);
-	}
-	return out.join("");
+	return value.replaceAll("\n", " ").replaceAll("|", "");
 }
 
-export function isMetadataLabel(value: string) {
-	if (!value || value.length > 48) return false;
-	let letters = 0;
-	let words = 0;
-	let inWord = false;
-	for (const char of value) {
-		if (char === "\n" || char === "|" || char === "." || char === ";")
-			return false;
-		const word = !isWhitespace(char) && char !== ":" && char !== "-";
-		if (word && !inWord) words++;
-		inWord = word;
-		if ((char >= "A" && char <= "Z") || (char >= "a" && char <= "z")) letters++;
-	}
-	return letters > 0 && words <= 6;
-}
-
-export function isMetadataLabelHint(value: string) {
-	const label = value.endsWith(":") ? value.slice(0, -1) : value;
-	return metadataLabelHints.has(label.toLowerCase());
-}
-
-const metadataLabelHints = new Set([
-	"author",
-	"authors",
-	"category",
-	"created",
-	"date",
-	"deprecated",
-	"endpoint",
-	"last updated",
-	"license",
-	"method",
-	"module",
-	"obsoletes",
-	"pep",
-	"post-history",
-	"resolution",
-	"requires",
-	"rfc",
-	"returns",
-	"since",
-	"status",
-	"title",
-	"type",
-	"updated",
-	"updates",
-	"version",
-]);
+const controlChromePattern =
+	/^(?:ask about this section|copy for llm|show child parameters|hide child parameters|show more parameters|show fewer parameters)$/;
 
 export function pushInline(chunks: string[], value: string, chars: number) {
 	if (!value || chars >= maxInlineChars) return chars;
-	const available = maxInlineChars - chars;
+	const prefix = needsImplicitInlineSpace(chunks.at(-1), value) ? " " : "";
+	const available = maxInlineChars - chars - prefix.length;
+	if (available <= 0) return chars;
 	const chunk = value.length > available ? value.slice(0, available) : value;
-	chunks.push(chunk);
-	return chars + chunk.length;
+	chunks.push(prefix ? `${prefix}${chunk}` : chunk);
+	return chars + prefix.length + chunk.length;
 }
 
-export function maxBacktickRun(value: string) {
-	let max = 0;
-	let run = 0;
-	for (const char of value) {
-		if (char === "`") {
-			run++;
-			if (run > max) max = run;
-		} else {
-			run = 0;
-		}
-	}
-	return max;
-}
-
-export function isLanguageChar(char: string) {
+export function needsImplicitInlineSpace(
+	previous: string | undefined,
+	next: string,
+) {
+	if (!previous || previous.endsWith("_") || next.startsWith("_")) return false;
 	return (
-		(char >= "A" && char <= "Z") ||
-		(char >= "a" && char <= "z") ||
-		(char >= "0" && char <= "9") ||
-		languageExtraChars.has(char)
+		inlineJoinEndPattern.test(previous) &&
+		inlineJoinStartPattern.test(next) &&
+		!whitespacePattern.test(previous.at(-1) ?? "") &&
+		!whitespacePattern.test(next[0] ?? "")
 	);
 }
 
-export function isWhitespace(char: string) {
-	return whitespaceChars.has(char);
+export function maxBacktickRun(value: string) {
+	return Math.max(
+		0,
+		...Array.from(value.matchAll(/`+/g), (match) => match[0].length),
+	);
 }

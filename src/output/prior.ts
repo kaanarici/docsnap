@@ -13,6 +13,7 @@ import type {
 	PageExtractor,
 	PageSuccess,
 	PipelineConfig,
+	RunSummary,
 } from "../core/types.ts";
 import { filterInjectionSignals } from "../core/types.ts";
 import { scanMarkdownForInjectionSignals } from "../security/injection.ts";
@@ -21,8 +22,6 @@ import { runFiles } from "./files.ts";
 export type PriorPage = Omit<PageSuccess, "markdown" | "rendered"> & {
 	outputPath: string;
 	outputHash?: string;
-	bytes?: number;
-	contentBytes?: number;
 };
 
 export type PriorState = {
@@ -37,8 +36,14 @@ type OutputRoot = { outDir: string };
 export async function loadPrior(config: PipelineConfig): Promise<PriorState> {
 	if (config.clean) return disabled("clean");
 	try {
-		const text = await readFile(join(config.outDir, runFiles.manifest), "utf8");
+		const [text, summaryText] = await Promise.all([
+			readFile(join(config.outDir, runFiles.manifest), "utf8"),
+			readFile(join(config.outDir, runFiles.summary), "utf8"),
+		]);
 		const records = parsePriorManifest(text, config);
+		if (!priorMatchesSummary(summaryText, records)) {
+			throw new Error("manifest and summary disagree");
+		}
 		return enabled(records);
 	} catch (error) {
 		if (error instanceof Error && "code" in error && error.code === "ENOENT") {
@@ -79,9 +84,7 @@ export async function recoverPriorPage(
 	}
 	const markdown = markdownFromRendered(rendered);
 	if (hashContent(markdown) !== prior.contentHash) return undefined;
-	const { bytes, contentBytes, outputHash, ...record } = prior;
-	void bytes;
-	void contentBytes;
+	const { outputHash, ...record } = prior;
 	void outputHash;
 	const recoveredSignals = filterInjectionSignals([
 		...record.injectionSignals,
@@ -162,6 +165,20 @@ function parsePriorManifest(text: string, config: PipelineConfig): PriorPage[] {
 	return out;
 }
 
+function priorMatchesSummary(
+	summaryText: string,
+	records: PriorPage[],
+): boolean {
+	const summary = JSON.parse(summaryText) as Partial<RunSummary>;
+	if (typeof summary.written !== "number") return false;
+	if (summary.written !== records.length) return false;
+	const seedPath = summary.seed?.outputPath;
+	return (
+		typeof seedPath !== "string" ||
+		records.some((record) => record.outputPath === seedPath)
+	);
+}
+
 function isManifestRecord(value: unknown): value is { ok: boolean } {
 	return Boolean(value && typeof value === "object" && "ok" in value);
 }
@@ -181,16 +198,19 @@ function isReusablePrior(
 		typeof record.status === "number" &&
 		isSource(record.source) &&
 		isExtractor(record.extractor) &&
-		typeof record.confidence === "number" &&
-		Array.isArray(record.links) &&
-		Array.isArray(record.qualityReasons)
+		typeof record.confidence === "number"
 	);
 }
 
 function normalizePrior(record: PriorPage): PriorPage {
 	return {
 		...record,
+		links: Array.isArray(record.links) ? record.links : [],
+		qualityReasons: Array.isArray(record.qualityReasons)
+			? record.qualityReasons
+			: [],
 		injectionSignals: filterInjectionSignals(record.injectionSignals),
+		redirects: Array.isArray(record.redirects) ? record.redirects : [],
 	};
 }
 

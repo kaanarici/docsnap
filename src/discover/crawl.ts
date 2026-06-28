@@ -1,10 +1,10 @@
+import { runBounded } from "../core/parallel.ts";
 import type {
 	DiscoveredUrl,
 	FetchResult,
 	PipelineConfig,
 } from "../core/types.ts";
 import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
-import { runBounded } from "../fetch/rate-limit.ts";
 import { discoverPageLinks } from "./nav.ts";
 import type { Robots } from "./robots.ts";
 import { inScope } from "./url.ts";

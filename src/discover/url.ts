@@ -1,6 +1,6 @@
 import { markdownLinkHrefs } from "../core/markdown.ts";
 import type { DiscoveredUrl, DiscoverySource } from "../core/types.ts";
-import { dropFragmentAndQuery } from "../core/url.ts";
+import { classifyDiscoveryResource } from "../core/url.ts";
 
 export const ignoredExtension =
 	/\.(png|jpe?g|gif|svg|webp|ico|pdf|epub|zip|tar|gz|mp4|mp3|wav|woff2?|ttf|eot|css|js|mjs|map|rss|atom)$/i;
@@ -13,7 +13,8 @@ export function normalizeUrl(
 		const url = new URL(raw, base);
 		if (!["http:", "https:"].includes(url.protocol)) return;
 		if (url.username || url.password) return;
-		dropFragmentAndQuery(url);
+		url.hash = "";
+		url.search = "";
 		url.pathname = url.pathname.replace(/\/{2,}/g, "/");
 		collapseRepeatedBasePath(url, base);
 		if (!url.pathname) url.pathname = "/";
@@ -35,21 +36,15 @@ export function normalizeDiscoveryResourceUrl(
 		url.hash = "";
 		url.pathname = url.pathname.replace(/\/{2,}/g, "/");
 		if (!url.pathname) url.pathname = "/";
-		if (ignoredExtension.test(url.pathname) && !isFeedResourceUrl(url)) return;
+		if (
+			ignoredExtension.test(url.pathname) &&
+			classifyDiscoveryResource(url)?.source !== "feed"
+		) {
+			return;
+		}
 		return url.href;
 	} catch {
 		return;
-	}
-}
-
-export function looksLikeFeedResourceUrl(
-	raw: string,
-	base?: string | URL,
-): boolean {
-	try {
-		return isFeedResourceUrl(new URL(raw, base));
-	} catch {
-		return false;
 	}
 }
 
@@ -60,7 +55,7 @@ export function scopeFromSeed(seed: string): string {
 	if (/\.[a-z0-9]+$/i.test(url.pathname))
 		return url.pathname.replace(/\/[^/]*$/, "/") || "/";
 	const parts = url.pathname.split("/").filter(Boolean);
-	return parts.length <= 1 ? url.pathname : `/${parts.slice(0, -1).join("/")}/`;
+	return parts.length <= 2 ? url.pathname : `/${parts.slice(0, -1).join("/")}/`;
 }
 
 export function inScope(raw: string, seed: string, scope: string): boolean {
@@ -75,8 +70,62 @@ export function inScope(raw: string, seed: string, scope: string): boolean {
 
 export function pathInScope(pathname: string, scope: string): boolean {
 	if (scope === "/") return true;
-	if (scope.endsWith("/")) return pathname.startsWith(scope);
+	if (scope.endsWith("/")) {
+		const sectionRoot = scope.slice(0, -1);
+		const pageVariant = pagePathVariant(pathname);
+		return (
+			pathname === sectionRoot ||
+			pathname.startsWith(scope) ||
+			(pageVariant !== undefined && pageVariant === sectionRoot)
+		);
+	}
 	return pathname === scope || pathname.startsWith(`${scope}/`);
+}
+
+export function chooseScope(inputScope: string, seed: string, links: string[]) {
+	const seedPath = new URL(seed).pathname;
+	const seedScope = scopeFromSeed(seed);
+	const baseScope =
+		inputScope !== "/" && pathInScope(seedPath, inputScope)
+			? inputScope
+			: seedScope;
+	if (inputScope !== "/" && seedPath === inputScope.replace(/\/$/, "")) {
+		return inputScope;
+	}
+	let best = baseScope;
+	let bestCount = countInScope(links, seed, best);
+	for (const scope of parentScopes(baseScope)) {
+		if ((scope === "/" || isLocaleOnlyScope(scope)) && bestCount >= 3) continue;
+		const count = countInScope(links, seed, scope);
+		if (count > bestCount + 2) {
+			best = scope;
+			bestCount = count;
+		}
+	}
+	return best;
+}
+
+function pagePathVariant(pathname: string) {
+	const match = pathname.match(/\.(?:html?|mdx?|txt)$/i);
+	return match ? pathname.slice(0, match.index) : undefined;
+}
+
+function countInScope(links: string[], seed: string, scope: string) {
+	return links.filter((link) => inScope(link, seed, scope)).length;
+}
+
+function parentScopes(scope: string) {
+	const parts = scope.split("/").filter(Boolean);
+	const scopes: string[] = [];
+	for (let i = parts.length - 1; i >= 1; i--) {
+		scopes.push(`/${parts.slice(0, i).join("/")}/`);
+	}
+	scopes.push("/");
+	return scopes;
+}
+
+function isLocaleOnlyScope(scope: string) {
+	return /^\/[a-z]{2}(?:-[a-z]{2})?\/$/i.test(scope);
 }
 
 export function addDiscovered(
@@ -99,6 +148,7 @@ export function addDiscovered(
 	out.push({
 		url: raw,
 		source,
+		...(source === "seed" ? { wasSeed: true as const } : {}),
 		...(fetched ? { fetched } : {}),
 		...(metadata ? { metadata } : {}),
 	});
@@ -157,6 +207,7 @@ function isNonPageUrl(url: URL) {
 			url.pathname,
 		) ||
 		/(?:^|\/)(?:managewatches|mydocs)(?:\/|$)/i.test(url.pathname) ||
+		/(?:^|\/)contributors\.txt$/i.test(url.pathname) ||
 		/(?:^|\/)(?:copyright|copying(?:_[a-z]+)?)\.html$/i.test(url.pathname) ||
 		/(?:^|\/)page\/index\.md$/i.test(url.pathname) ||
 		/\.x?html?\.md$/i.test(url.pathname) ||
@@ -170,22 +221,17 @@ function isNonPageUrl(url: URL) {
 	);
 }
 
-function isFeedResourceUrl(url: URL) {
-	const pathname = url.pathname.toLowerCase();
-	return (
-		/(?:^|\/)(?:feed|rss|atom)(?:\/|$)/i.test(pathname) ||
-		/(?:^|\/)(?:rss|feed|atom)\.xml$/i.test(pathname) ||
-		/\.(?:rss|atom)$/i.test(pathname) ||
-		url.searchParams.has("feed")
-	);
-}
-
 function mergeDiscovered(
 	target: DiscoveredUrl,
 	source: DiscoverySource,
 	metadata: DiscoveredUrl["metadata"],
 ) {
-	if (sourceRank[source] > sourceRank[target.source]) target.source = source;
+	if (source === "seed") target.wasSeed = true;
+	if (
+		target.source !== "seed" &&
+		sourceRank[source] > sourceRank[target.source]
+	)
+		target.source = source;
 	if (!metadata) return;
 	target.metadata = {
 		...metadata,

@@ -1,5 +1,10 @@
 import { looksLikeAppShell } from "../extract/app-shell.ts";
-import { extractInlineStatePage } from "../extract/inline-state-page.ts";
+import { extractInlineState } from "../extract/inline-state.ts";
+import {
+	rawInjectionSignals,
+	recordFromExtracted,
+} from "../extract/page-record.ts";
+import { titleFromMarkdown } from "../extract/title.ts";
 import type {
 	FetchedUrl,
 	FetchResult,
@@ -28,6 +33,35 @@ export function applyInlineState(
 		}
 	}
 	return output;
+}
+
+function extractInlineStatePage(input: FetchedUrl): PageRecord | undefined {
+	const { result } = input;
+	if (!result.ok || ("notModified" in result && result.notModified))
+		return undefined;
+	const started = performance.now();
+	const signals = rawInjectionSignals(result);
+	try {
+		const inline = extractInlineState(result.body, result.finalUrl);
+		if (!inline) return undefined;
+		const title = titleFromMarkdown(
+			inline.markdown,
+			new URL(result.finalUrl).pathname,
+		);
+		return recordFromExtracted(
+			input,
+			{
+				markdown: inline.markdown,
+				extractor: "inline-state",
+				inlineStateSource: inline.source,
+				title,
+			},
+			started,
+			signals,
+		);
+	} catch {
+		return undefined;
+	}
 }
 
 function shouldAttemptInlineState(

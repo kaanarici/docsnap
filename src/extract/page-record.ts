@@ -1,3 +1,4 @@
+import { markdownLinkHrefs } from "../core/markdown.ts";
 import { hashContent } from "../core/snapshot.ts";
 import { wordCount } from "../core/text.ts";
 import type {
@@ -14,13 +15,16 @@ import {
 	scanRawHtmlForInjectionSignals,
 } from "../security/injection.ts";
 import {
+	blockedAccessError,
 	emptyContentError,
-	isBlockedChallenge,
 	isLanguageSelector,
 	isLoadingShellPlaceholder,
+	reportedNotFoundError,
 } from "./app-shell.ts";
-import { cleanMarkdown, linksFromMarkdown } from "./markdown.ts";
+import { isMarkdownLike } from "./content.ts";
+import { cleanMarkdown } from "./markdown.ts";
 import { scoreMarkdown } from "./quality.ts";
+import { titleFromContent } from "./title.ts";
 
 export type ExtractedBody = {
 	markdown: string;
@@ -36,8 +40,9 @@ export function recordFromExtracted(
 	started: number,
 	rawSignals: PageRecord["injectionSignals"],
 ): PageRecord {
-	const { metadata, result, source } = input;
+	const { metadata, result, source, wasSeed } = input;
 	const markdown = cleanMarkdown(extracted.markdown);
+	const title = titleFromContent(markdown, extracted.title);
 	if (!markdown)
 		return failedRecord(
 			result,
@@ -46,6 +51,7 @@ export function recordFromExtracted(
 			emptyContentError(result.body),
 			"empty",
 			rawSignals,
+			wasSeed,
 		);
 	if (isLoadingShellPlaceholder(markdown, result.body)) {
 		return failedRecord(
@@ -55,16 +61,31 @@ export function recordFromExtracted(
 			"app shell without static text",
 			"empty",
 			rawSignals,
+			wasSeed,
 		);
 	}
-	if (isBlockedChallenge(markdown, extracted.title)) {
+	const reportedNotFound = reportedNotFoundError(markdown, title);
+	if (reportedNotFound) {
 		return failedRecord(
 			result,
 			source,
 			metadata,
-			"blocked by client challenge",
+			reportedNotFound,
+			"not_found",
+			rawSignals,
+			wasSeed,
+		);
+	}
+	const blocked = blockedAccessError(markdown, title, result.body);
+	if (blocked) {
+		return failedRecord(
+			result,
+			source,
+			metadata,
+			blocked,
 			"blocked",
 			rawSignals,
+			wasSeed,
 		);
 	}
 	if (isLanguageSelector(result.finalUrl, result.body)) {
@@ -75,13 +96,35 @@ export function recordFromExtracted(
 			"language selector without article content",
 			"empty",
 			rawSignals,
+			wasSeed,
 		);
 	}
 	const injectionSignals = uniqueSignals([
 		...rawSignals,
+		...scanMarkdownForInjectionSignals(extracted.markdown),
 		...scanMarkdownForInjectionSignals(markdown),
 	]);
-	const quality = scoreMarkdown(markdown, extracted.title);
+	const quality = scoreMarkdown(markdown, title);
+	const links = markdownLinkHrefs(markdown);
+	if (
+		isChromeOnlyHtml(
+			markdown,
+			title,
+			extracted.extractor,
+			quality,
+			links.length,
+		)
+	) {
+		return failedRecord(
+			result,
+			source,
+			metadata,
+			"page chrome without article content",
+			"empty",
+			injectionSignals,
+			wasSeed,
+		);
+	}
 	if (
 		(extracted.extractor === "fallback" ||
 			extracted.extractor === "structured") &&
@@ -101,10 +144,11 @@ export function recordFromExtracted(
 		injectionSignals,
 		...(metadata ?? {}),
 		...(extracted.canonicalUrl ? { canonicalUrl: extracted.canonicalUrl } : {}),
-		...(extracted.title ? { title: extracted.title } : {}),
+		...(title ? { title } : {}),
 		markdown,
-		links: linksFromMarkdown(markdown),
+		links,
 		status: result.status,
+		...(wasSeed ? { wasSeed: true as const } : {}),
 		contentHash: hashContent(markdown),
 		extractor: extracted.extractor,
 		...(extracted.inlineStateSource
@@ -121,6 +165,27 @@ export function recordFromExtracted(
 	};
 }
 
+const titleStopTerms = new Set(["and", "the", "with", "from", "your"]);
+
+function isChromeOnlyHtml(
+	markdown: string,
+	title: string | undefined,
+	extractor: PageExtractor,
+	quality: { reasons: string[] },
+	links: number,
+) {
+	if (extractor !== "html") return false;
+	if (!quality.reasons.includes("high link density")) return false;
+	if (links < 20 || /^#{1,6}\s+/m.test(markdown)) return false;
+	const terms = (title ?? "")
+		.toLowerCase()
+		.split(/[^a-z0-9]+/)
+		.filter((term) => term.length >= 4 && !titleStopTerms.has(term));
+	if (terms.length < 2) return false;
+	const text = markdown.toLowerCase();
+	return terms.filter((term) => text.includes(term)).length < 2;
+}
+
 export function failedRecord(
 	result: FetchResult,
 	source: DiscoverySource,
@@ -128,6 +193,7 @@ export function failedRecord(
 	error: string,
 	failureKind: FailureKind = "extract",
 	injectionSignals: PageRecord["injectionSignals"] = [],
+	wasSeed?: true,
 ): PageRecord {
 	return {
 		ok: false,
@@ -142,6 +208,7 @@ export function failedRecord(
 		markdown: "",
 		links: [],
 		status: result.status,
+		...(wasSeed ? { wasSeed: true as const } : {}),
 		contentHash: "",
 		extractor: "none",
 		confidence: 0,
@@ -154,7 +221,9 @@ export function failedRecord(
 }
 
 export function rawInjectionSignals(result: FetchResult) {
-	return scanRawHtmlForInjectionSignals(result.body);
+	return isMarkdownLike(result)
+		? []
+		: scanRawHtmlForInjectionSignals(result.body);
 }
 
 function uniqueSignals(signals: PageRecord["injectionSignals"]) {

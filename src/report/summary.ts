@@ -3,7 +3,7 @@ import { emptyRefreshSummary } from "../core/refresh.ts";
 import type { SnapshotStats } from "../core/snapshot.ts";
 import { snapshotSchemaVersion } from "../core/snapshot.ts";
 import {
-	type CacheSummary,
+	type DiscoveryResourceSeed,
 	discoverySources,
 	type FailureKind,
 	type InjectionSignal,
@@ -18,13 +18,11 @@ import {
 	pageExtractors,
 	type RefreshSummary,
 	type RunSummary,
+	type RunWarning,
+	type SeedSummary,
 } from "../core/types.ts";
+import { classifyDiscoveryResource } from "../core/url.ts";
 
-// `records` is every attempted page (failures included) and drives source and
-// failure counts; `outputs` is the written corpus and drives every count that
-// must describe pages actually on disk. They are distinct inputs because a
-// success beyond --max never becomes a PageOutput, so it can be present in
-// `records` yet absent from `outputs`.
 export function buildSummary(
 	records: PageRecord[],
 	outputs: PageOutput[],
@@ -35,7 +33,8 @@ export function buildSummary(
 	elapsedMs: number,
 	firstPageMs: number | null = null,
 	refresh: RefreshSummary = emptyRefreshSummary(),
-	cache: CacheSummary = emptyCacheSummary(config),
+	cache = cacheSummary(config),
+	seedResource?: DiscoveryResourceSeed,
 ): RunSummary {
 	let written = 0;
 	let failed = 0;
@@ -67,11 +66,6 @@ export function buildSummary(
 		});
 	}
 
-	// Every written-corpus count describes pages actually on disk. A success beyond
-	// --max never becomes a PageOutput, so it is absent here and cannot inflate
-	// extractor/quality/injection counts or flip run status. Injection signals only
-	// matter for captured content, so an unwritten page's raw-HTML signals never
-	// trip --fail-on-injection-signal.
 	for (const record of outputs) {
 		byExtractor[record.extractor]++;
 		if (record.inlineStateSource) {
@@ -90,14 +84,18 @@ export function buildSummary(
 		}
 	}
 	const reached = maxReached(config, discovered);
+	const seed = seedSummary(records, outputs, config, seedResource);
+	const warnings = runWarnings(seed);
 
 	return {
 		status: runStatus(written, failed, lowQuality, reached),
 		seedUrl: config.seedUrl,
+		seed,
+		warnings,
 		outDir: config.outDir,
 		dryRun: config.dryRun,
+		captureMode: config.pageOnly ? "page" : "site",
 		userAgent: config.userAgent,
-		...(config.ignoreRobots ? { ignoreRobots: true as const } : {}),
 		generatedAt: new Date().toISOString(),
 		snapshotVersion: snapshotSchemaVersion,
 		rootHash: snapshot.rootHash,
@@ -139,10 +137,152 @@ export function buildSummary(
 	};
 }
 
-// Reflect the real (safe-root-validated) cache context so an unsafe configured
-// DOCSNAP_CACHE_DIR reports disabled, not enabled with a bogus dir.
-export function emptyCacheSummary(config: PipelineConfig): CacheSummary {
-	return cacheSummary(config);
+function runWarnings(seed: SeedSummary): RunWarning[] {
+	const resource = seed.kind === "discovery_resource";
+	if (!seed.included) {
+		return [
+			{
+				kind: resource ? "discovery_resource_empty" : "seed_omitted",
+				message: resource
+					? "The requested discovery resource produced no captured pages."
+					: "The requested seed page is not in the written corpus.",
+				...(seed.omissionReason ? { omissionReason: seed.omissionReason } : {}),
+				...(seed.failureKind ? { failureKind: seed.failureKind } : {}),
+				...(seed.error ? { error: seed.error } : {}),
+			},
+		];
+	}
+	if (resource) {
+		return [
+			{
+				kind: "discovery_resource_seed",
+				message:
+					"The requested seed was used as a discovery resource, not captured as an exact page.",
+				...(seed.source ? { source: seed.source } : {}),
+				pagesWritten: seed.pagesWritten ?? 0,
+			},
+		];
+	}
+	if (seed.redirected) {
+		return [
+			{
+				kind: "seed_redirected",
+				message: "The requested seed redirected before capture.",
+				...(seed.url ? { url: seed.url } : {}),
+				...(seed.finalUrl ? { finalUrl: seed.finalUrl } : {}),
+			},
+		];
+	}
+	return [];
+}
+
+function seedSummary(
+	records: PageRecord[],
+	outputs: PageOutput[],
+	config: PipelineConfig,
+	seedResource: DiscoveryResourceSeed | undefined,
+): SeedSummary {
+	const resource = classifyDiscoveryResource(config.seedUrl);
+	const includedResource =
+		resource && includedDiscoveryResourceSeed(outputs, resource, seedResource);
+	if (includedResource) return includedResource;
+	const output = outputs.find((record) => record.wasSeed);
+	if (output) {
+		const url = config.seedUrl;
+		return {
+			attempted: true,
+			included: true,
+			...seedLocation(url, output.finalUrl, output.redirects.length > 0),
+			outputPath: output.outputPath,
+			source: output.source,
+		};
+	}
+	const attempted = records.find((record) => record.wasSeed);
+	const resourceKind = resource ? { kind: "discovery_resource" as const } : {};
+	if (!attempted) {
+		return resource
+			? {
+					attempted: true,
+					included: false,
+					kind: "discovery_resource",
+					url: resource.url,
+					finalUrl: resource.url,
+					source: resource.source,
+					omissionReason: "empty_resource",
+				}
+			: {
+					attempted: false,
+					included: false,
+					omissionReason: "not_discovered",
+				};
+	}
+	if (!attempted.ok) {
+		return {
+			attempted: true,
+			included: false,
+			...seedLocation(
+				attempted.url,
+				attempted.finalUrl,
+				attempted.redirects.length > 0,
+			),
+			...resourceKind,
+			source: attempted.source,
+			omissionReason: "failed",
+			failureKind: attempted.failureKind,
+			error: attempted.error,
+		};
+	}
+	return {
+		attempted: true,
+		included: false,
+		...seedLocation(
+			attempted.url,
+			attempted.finalUrl,
+			attempted.redirects.length > 0,
+		),
+		...resourceKind,
+		source: attempted.source,
+		omissionReason: "not_written",
+	};
+}
+
+function seedLocation(
+	url: string,
+	finalUrl: string,
+	redirected = url !== finalUrl,
+) {
+	return {
+		url,
+		finalUrl,
+		...(redirected ? { redirected: true as const } : {}),
+	};
+}
+
+function includedDiscoveryResourceSeed(
+	outputs: PageOutput[],
+	resource: Pick<DiscoveryResourceSeed, "url" | "source">,
+	seedResource: DiscoveryResourceSeed | undefined,
+): SeedSummary | undefined {
+	const seed =
+		seedResource?.source === resource.source
+			? seedResource
+			: {
+					url: resource.url,
+					finalUrl: resource.url,
+					source: resource.source,
+				};
+	const pagesWritten = outputs.filter(
+		(record) => record.source === resource.source,
+	).length;
+	if (pagesWritten === 0) return undefined;
+	return {
+		attempted: true,
+		included: true,
+		kind: "discovery_resource",
+		...seedLocation(seed.url, seed.finalUrl),
+		source: resource.source,
+		pagesWritten,
+	};
 }
 
 function addRedirectedHosts(
@@ -196,6 +336,7 @@ function orderedPartialCounts<T extends string>(
 }
 
 function maxReached(config: PipelineConfig, discovered: number) {
+	if (config.pageOnly) return false;
 	return config.maxExplicit
 		? discovered >= config.max
 		: discovered === config.max;

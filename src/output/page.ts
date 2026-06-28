@@ -13,6 +13,7 @@ function frontmatter(record: PageSuccess, fetchedAt: string) {
 		finalUrl: record.finalUrl,
 		status: record.status,
 		source: record.source,
+		...(record.wasSeed ? { requestedSeed: true } : {}),
 		fetchedAt,
 		extractor: record.extractor,
 		confidence: record.confidence,

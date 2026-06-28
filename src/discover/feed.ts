@@ -50,7 +50,7 @@ export function discoverFeedLinks(html: string, base: string): string[] {
 	return [...urls];
 }
 
-export function parseFeedEntries(xml: string, base: string): FeedEntry[] {
+function parseFeedEntries(xml: string, base: string): FeedEntry[] {
 	try {
 		const document = new DOMParser().parseFromString(xml, "text/xml");
 		const root = document.documentElement as unknown as Element | null;

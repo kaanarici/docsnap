@@ -1,4 +1,5 @@
 import { uniqueByWhitespace, whitespaceKey, wordCount } from "../core/text.ts";
+import { parseJson, stringLiterals } from "./inline-state-scan.ts";
 
 type TextCandidate = {
 	value: string;
@@ -61,29 +62,13 @@ function keyedStrings(body: string): string[] {
 	for (const key of ["children", "description", "title"]) {
 		const pattern = new RegExp(`"${key}"\\s*:\\s*("(?:\\\\.|[^"\\\\])*")`, "g");
 		for (const match of body.matchAll(pattern)) {
-			const value = decodeLiteral(match[1]!);
+			const parsed = parseJson(match[1]!);
+			if (typeof parsed !== "string") continue;
+			const value = parsed.trim();
 			if (value) values.push(value);
 		}
 	}
 	return values;
-}
-
-function stringLiterals(body: string): string[] {
-	const values: string[] = [];
-	for (const match of body.matchAll(/"(?:\\.|[^"\\])*"/g)) {
-		const value = decodeLiteral(match[0]);
-		if (value) values.push(value);
-	}
-	return values;
-}
-
-function decodeLiteral(literal: string): string {
-	try {
-		const parsed = JSON.parse(literal);
-		return typeof parsed === "string" ? parsed.trim() : "";
-	} catch {
-		return "";
-	}
 }
 
 function readable(value: string): boolean {
@@ -124,7 +109,7 @@ function utilityTokenCount(text: string) {
 		).length;
 }
 
-export function numericCssNoise(text: string): boolean {
+function numericCssNoise(text: string): boolean {
 	const tokens = text.split(/\s+/);
 	let pxIndex = -1;
 	let pxDigits = 0;

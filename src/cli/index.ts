@@ -1,44 +1,64 @@
-import { runPipeline } from "../core/pipeline.ts";
-import type { CliOptions, PipelineConfig, RunSummary } from "../core/types.ts";
-import { runFiles } from "../output/files.ts";
-import { buildPipelineConfig, flagTakesValue, parseArgs } from "./args.ts";
-import { logLine, printSummary } from "./progress.ts";
+import { flagTakesValue, parseArgs } from "./args.ts";
+import { runCapture } from "./capture.ts";
+import { runFetch } from "./fetch.ts";
+import { runList } from "./list.ts";
+import { runRefresh } from "./refresh.ts";
+import { runSearch } from "./search.ts";
 
 export async function runCli(argv: string[]): Promise<void> {
 	try {
 		if (argv[0] === "mcp") {
-			const { runMcpServer } = await import("../mcp/server.ts");
-			await runMcpServer(argv.slice(1));
+			if (argv.includes("-h") || argv.includes("--help")) {
+				process.stdout.write(
+					"Usage:\n  docsnap mcp    run local stdio MCP server\n",
+				);
+				return;
+			}
+			if (argv.includes("-v") || argv.includes("--version")) {
+				process.stdout.write(`${await version()}\n`);
+				return;
+			}
+			if (argv.length > 1) {
+				process.stderr.write("docsnap mcp does not accept flags\n");
+				process.exitCode = 1;
+				return;
+			}
+			const { runJsonRpcServer } = await import("../mcp/jsonrpc.ts");
+			await runJsonRpcServer({
+				version: await version(),
+				state: { corpora: new Set(), resourceCorpora: new Map() },
+			});
 			return;
 		}
 		const parsed = parseArgs(await normalizeArgv(argv));
-		if ("help" in parsed) {
+		if (parsed.kind === "help") {
 			process.stdout.write(`${parsed.help}\n`);
 			return;
 		}
-		if ("version" in parsed) {
+		if (parsed.kind === "version") {
 			process.stdout.write(`${await version()}\n`);
 			return;
 		}
-		const { run, cli } = parsed;
-		const config = buildPipelineConfig(run);
-		const progress = cli.quiet || cli.json ? undefined : logLine;
-		if (config.ignoreRobots)
-			logLine("docsnap: warning: --ignore-robots bypasses robots.txt rules");
-		const result = await runPipeline(config, progress);
-		const ok = runOk(result.summary, cli);
-		if (cli.json) {
-			process.stdout.write(
-				`${JSON.stringify(jsonResult(result.summary, config, ok))}\n`,
-			);
+		if (parsed.kind === "list") {
+			await runList(parsed.list);
+			return;
 		}
-		if (!cli.quiet && !cli.json) printSummary(result.summary);
-		if (!ok) {
-			process.exitCode = 1;
+		if (parsed.kind === "search") {
+			await runSearch(parsed.search);
+			return;
 		}
+		if (parsed.kind === "fetch") {
+			await runFetch(parsed.fetch);
+			return;
+		}
+		if (parsed.kind === "refresh") {
+			await runRefresh(parsed.refresh, parsed.cli);
+			return;
+		}
+		await runCapture(parsed.run, parsed.cli);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		if (argv.includes("--json")) {
+		if (wantsJsonError(argv)) {
 			process.stdout.write(
 				`${JSON.stringify({ ok: false, status: "error", error: message })}\n`,
 			);
@@ -49,7 +69,17 @@ export async function runCli(argv: string[]): Promise<void> {
 	}
 }
 
+function wantsJsonError(argv: string[]) {
+	if (argv[0] === "fetch" || argv[0] === "search") {
+		const queryStart = argv.indexOf("--");
+		const flags = queryStart >= 0 ? argv.slice(0, queryStart) : argv;
+		return flags.includes("--json");
+	}
+	return argv.includes("--json");
+}
+
 async function normalizeArgv(argv: string[]) {
+	if (isSubcommand(argv[0])) return argv;
 	if (!argv.includes("--stdin")) return argv;
 	const next = argv.filter((arg) => arg !== "--stdin");
 	if (
@@ -75,6 +105,15 @@ async function normalizeArgv(argv: string[]) {
 	return [seedUrl, ...next];
 }
 
+function isSubcommand(command: string | undefined) {
+	return (
+		command === "fetch" ||
+		command === "search" ||
+		command === "refresh" ||
+		command === "list"
+	);
+}
+
 function hasSeedArg(argv: string[]) {
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i]!;
@@ -85,32 +124,6 @@ function hasSeedArg(argv: string[]) {
 		if (!arg.startsWith("-")) return true;
 	}
 	return false;
-}
-
-function runOk(summary: RunSummary, cli: CliOptions) {
-	return (
-		summary.written > 0 &&
-		(!cli.failOnLowQuality || summary.lowQuality === 0) &&
-		(!cli.failOnInjectionSignal || summary.injectionSignalPages === 0)
-	);
-}
-
-function jsonResult(summary: RunSummary, config: PipelineConfig, ok: boolean) {
-	return {
-		ok,
-		...summary,
-		paths: config.dryRun
-			? undefined
-			: {
-					summary: `${summary.outDir}/${runFiles.summary}`,
-					manifest: `${summary.outDir}/${runFiles.manifest}`,
-					agentReadme: `${summary.outDir}/${runFiles.agentReadme}`,
-					tree: `${summary.outDir}/${runFiles.tree}`,
-				},
-		...(config.agentFiles
-			? { agentFilesUpdated: summary.agentFilesUpdated ?? [] }
-			: {}),
-	};
 }
 
 async function version() {

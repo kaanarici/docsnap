@@ -1,15 +1,12 @@
 import { hashContent } from "../core/snapshot.ts";
-import { McpReadLimitError } from "./access.ts";
+import { CorpusReadLimitError } from "./access.ts";
 import type { CorpusPage } from "./corpus.ts";
+import { docSnippet, lineNumberAt } from "./snippets.ts";
 
-// In-house ranked retrieval over a captured corpus. BM25 over body tokens with
-// field boosts for matches in titles/headings/path/frontmatter, and a
-// confidence/injection penalty so low-quality and injection-signal pages do not
-// outrank clean ones. No deps, fully bounded, and free of any RegExp built from
-// untrusted page text (tokenization scans char-by-char to stay ReDoS-safe).
+type PageRecord = CorpusPage & { outputPath: string };
 
 export type RankedSnippet = {
-	record: CorpusPage & { outputPath: string };
+	record: PageRecord;
 	contentHash: string;
 	extractor: string;
 	score: number;
@@ -27,8 +24,10 @@ export type RankInput = {
 };
 
 export type PageDoc = {
-	record: CorpusPage & { outputPath: string };
+	record: PageRecord;
 	body: string;
+	bodyLineOffset: number;
+	frontmatter: string;
 	titleTerms: Set<string>;
 	headingTerms: Set<string>;
 	pathTerms: Set<string>;
@@ -45,27 +44,31 @@ const fieldBoost = {
 	path: 1.4,
 	frontmatter: 0.9,
 };
-const maxTermsPerField = 4_000;
+const maxTermsPerField = 32_000;
 const maxQueryTerms = 32;
 const minTermLength = 2;
 const maxTermLength = 48;
+const stopTerms = new Set(
+	"a about an and are as at be by can could describe did do docs document does explain for from how in is it me of on or page should summarize summary tell the these this to use what when where which who why will with would you your".split(
+		" ",
+	),
+);
 
-// PageLoader yields the bounded Markdown for one manifest record (or null when
-// the page exceeds read caps), keeping retrieval independent of fs access.
-export type PageLoader = (
-	record: CorpusPage & { outputPath: string },
-) => Promise<string | null>;
+export type PageLoader = (record: PageRecord) => Promise<string | null>;
 
 export async function buildRankInput(
 	records: CorpusPage[],
 	load: PageLoader,
 	limits: { maxPages: number; maxBytes: number },
-): Promise<{ input: RankInput; truncated: boolean }> {
+	options: { query?: string; genericWhenNoContentTerms?: boolean } = {},
+): Promise<{ input: RankInput; truncated: boolean; skipped: number }> {
+	const filter = candidateFilter(options.query, options);
 	const pages: PageDoc[] = [];
 	const docFreq = new Map<string, number>();
 	let scannedBytes = 0;
 	let totalBodyLength = 0;
 	let truncated = false;
+	let skipped = 0;
 	for (const record of records) {
 		if (!record.ok || !record.outputPath) continue;
 		if (pages.length >= limits.maxPages || scannedBytes >= limits.maxBytes) {
@@ -74,23 +77,26 @@ export async function buildRankInput(
 		}
 		let source: string | null;
 		try {
-			source = await load(record as CorpusPage & { outputPath: string });
+			source = await load(record as PageRecord);
 		} catch (error) {
-			if (error instanceof McpReadLimitError) {
+			if (error instanceof CorpusReadLimitError) {
 				truncated = true;
 				continue;
 			}
 			throw error;
 		}
 		if (source === null) {
-			truncated = true;
+			skipped++;
 			continue;
 		}
 		scannedBytes += Buffer.byteLength(source);
-		const doc = toPageDoc(
-			record as CorpusPage & { outputPath: string },
-			source,
-		);
+		if (
+			filter.terms.length &&
+			!candidateTextMatches(record as PageRecord, source, filter)
+		) {
+			continue;
+		}
+		const doc = toPageDoc(record as PageRecord, source);
 		for (const term of doc.bodyTermFreq.keys()) {
 			docFreq.set(term, (docFreq.get(term) ?? 0) + 1);
 		}
@@ -105,7 +111,31 @@ export async function buildRankInput(
 			docFreq,
 		},
 		truncated,
+		skipped,
 	};
+}
+
+function candidateFilter(
+	query: string | undefined,
+	options: { genericWhenNoContentTerms?: boolean } = {},
+): { terms: string[] } {
+	if (!query) return { terms: [] };
+	const queryTerms = tokenize(query).slice(0, maxQueryTerms);
+	const meaningful = meaningfulQueryTerms(queryTerms);
+	if (meaningful.length === 0 && options.genericWhenNoContentTerms) {
+		return { terms: [] };
+	}
+	return { terms: meaningful.length ? meaningful : queryTerms };
+}
+
+function candidateTextMatches(
+	record: PageRecord,
+	source: string,
+	filter: { terms: string[] },
+): boolean {
+	const haystack =
+		`${record.title ?? ""}\n${record.url}\n${record.finalUrl}\n${record.outputPath}\n${source}`.toLowerCase();
+	return filter.terms.some((term) => haystack.includes(term));
 }
 
 export function rankPages(
@@ -115,18 +145,40 @@ export function rankPages(
 		maxResults: number;
 		snippetChars: number;
 		excludeInjection: boolean;
+		genericWhenNoContentTerms?: boolean;
+		preferredOutputPaths?: ReadonlySet<string>;
 	},
 ): RankedSnippet[] {
 	const queryTerms = tokenize(query).slice(0, maxQueryTerms);
 	if (queryTerms.length === 0) return [];
-	const queryTermSet = new Set(queryTerms);
+	const requiredTerms = meaningfulQueryTerms(queryTerms);
+	if (requiredTerms.length === 0 && options.genericWhenNoContentTerms) {
+		return genericSnippets(input.pages, options);
+	}
+	const snippetSource = requiredTerms.length ? requiredTerms : queryTerms;
+	const snippetTerms = new Set(snippetSource);
+	const distinctiveTerms = requiredTerms.filter((term) => term.length >= 8);
+	const literalTerms = queryLiteralTerms(query);
+	const requiredHits = minRequiredHits(requiredTerms.length);
 	const scored: RankedSnippet[] = [];
 	for (const doc of input.pages) {
-		const highRisk = doc.record.injectionSignals.length > 0;
-		if (options.excludeInjection && highRisk) continue;
-		const score = scoreDoc(input, doc, queryTerms);
+		if (options.excludeInjection && doc.record.injectionSignals.length)
+			continue;
+		const hitCount = countTermHits(doc, requiredTerms);
+		if (requiredHits > 0 && hitCount < requiredHits) continue;
+		if (distinctiveTerms.length && !countTermHits(doc, distinctiveTerms))
+			continue;
+		const score =
+			scoreDoc(input, doc, queryTerms) *
+			literalTermBoost(docSearchText(doc), literalTerms) *
+			preferredPageBoost(doc, options.preferredOutputPaths);
 		if (score <= 0) continue;
-		const snippet = bestSnippet(doc.body, queryTermSet, options.snippetChars);
+		const snippet = docSnippet(
+			doc,
+			snippetTerms,
+			options.snippetChars,
+			literalTerms,
+		);
 		scored.push({
 			record: doc.record,
 			contentHash: doc.record.contentHash ?? hashContent(doc.body),
@@ -138,13 +190,111 @@ export function rankPages(
 			text: snippet.text,
 		});
 	}
-	// deterministic order: score desc, then path asc as a stable tiebreaker
 	scored.sort(
 		(a, b) =>
 			b.score - a.score ||
 			a.record.outputPath.localeCompare(b.record.outputPath),
 	);
 	return scored.slice(0, options.maxResults);
+}
+
+function genericSnippets(
+	pages: PageDoc[],
+	options: {
+		maxResults: number;
+		snippetChars: number;
+		excludeInjection: boolean;
+		preferredOutputPaths?: ReadonlySet<string>;
+	},
+): RankedSnippet[] {
+	return pages
+		.filter(
+			(doc) =>
+				!options.excludeInjection || doc.record.injectionSignals.length === 0,
+		)
+		.map((doc) => {
+			const snippet = docSnippet(doc, new Set(), options.snippetChars);
+			return {
+				record: doc.record,
+				contentHash: doc.record.contentHash ?? hashContent(doc.body),
+				extractor: doc.record.extractor ?? "unknown",
+				score:
+					genericScore(doc) *
+					preferredPageBoost(doc, options.preferredOutputPaths),
+				confidence: doc.record.confidence ?? 0,
+				lineStart: snippet.lineStart,
+				lineEnd: snippet.lineEnd,
+				text: snippet.text,
+			};
+		})
+		.sort(
+			(a, b) =>
+				b.score - a.score ||
+				a.record.outputPath.localeCompare(b.record.outputPath),
+		)
+		.slice(0, options.maxResults);
+}
+
+function genericScore(doc: PageDoc): number {
+	return (
+		(doc.record.source === "seed" ? 2 : 1) +
+		clamp01(doc.record.confidence ?? 0.5)
+	);
+}
+
+function preferredPageBoost(
+	doc: PageDoc,
+	preferredOutputPaths: ReadonlySet<string> | undefined,
+) {
+	return preferredOutputPaths?.has(doc.record.outputPath) ? 1.15 : 1;
+}
+
+function docSearchText(doc: PageDoc): string {
+	return `${doc.record.title ?? ""}\n${doc.record.outputPath}\n${doc.frontmatter}\n${doc.body}`;
+}
+
+function queryLiteralTerms(query: string): string[] {
+	return query
+		.toLowerCase()
+		.split(/\s+/)
+		.filter((term) => term.length > 2 && /[-_.@/]/.test(term))
+		.slice(0, 8);
+}
+
+function literalTermBoost(text: string, terms: string[]): number {
+	if (!terms.length) return 1;
+	const haystack = text.toLowerCase();
+	let hits = 0;
+	for (const term of terms) {
+		if (haystack.includes(term)) hits++;
+	}
+	return hits ? 1 + Math.min(2, hits * 1.75) : 1;
+}
+
+function meaningfulQueryTerms(queryTerms: string[]): string[] {
+	return [...new Set(queryTerms.filter((term) => !stopTerms.has(term)))];
+}
+
+function minRequiredHits(termCount: number): number {
+	if (termCount <= 2) return termCount;
+	if (termCount <= 5) return termCount - 1;
+	return Math.ceil(termCount * 0.65);
+}
+
+function countTermHits(doc: PageDoc, terms: string[]): number {
+	let hits = 0;
+	for (const term of terms) {
+		if (
+			doc.bodyTermFreq.has(term) ||
+			doc.titleTerms.has(term) ||
+			doc.headingTerms.has(term) ||
+			doc.pathTerms.has(term) ||
+			doc.frontmatterTerms.has(term)
+		) {
+			hits++;
+		}
+	}
+	return hits;
 }
 
 function scoreDoc(
@@ -162,7 +312,6 @@ function scoreDoc(
 		if (doc.pathTerms.has(term)) fieldHit += fieldBoost.path;
 		if (doc.frontmatterTerms.has(term)) fieldHit += fieldBoost.frontmatter;
 		if (tf === 0 && fieldHit === 0) continue;
-		// idf clamped non-negative so corpus-wide terms never push scores below 0
 		const idf = Math.max(
 			0,
 			Math.log(1 + (input.totalDocs - df + 0.5) / (df + 0.5)),
@@ -175,18 +324,13 @@ function scoreDoc(
 		score += bodyScore + idf * fieldHit;
 	}
 	if (score <= 0) return 0;
-	// penalize low-confidence and injection-signal pages so clean, high-quality
-	// sources rank first without hiding flagged ones entirely
 	const confidence = doc.record.confidence ?? 0.5;
 	const confidencePenalty = 0.5 + 0.5 * clamp01(confidence);
 	const injectionPenalty = doc.record.injectionSignals.length > 0 ? 0.6 : 1;
 	return score * confidencePenalty * injectionPenalty;
 }
 
-function toPageDoc(
-	record: CorpusPage & { outputPath: string },
-	source: string,
-): PageDoc {
+function toPageDoc(record: PageRecord, source: string): PageDoc {
 	const { frontmatter, body } = splitFrontmatter(source);
 	const bodyTermFreq = new Map<string, number>();
 	let bodyLength = 0;
@@ -197,17 +341,19 @@ function toPageDoc(
 	return {
 		record,
 		body,
+		bodyLineOffset: frontmatter.lineOffset,
+		frontmatter: frontmatter.text,
 		titleTerms: new Set(tokenize(record.title ?? "")),
 		headingTerms: collectHeadingTerms(body),
 		pathTerms: new Set(tokenize(record.outputPath.replace(/[/\\.]/g, " "))),
-		frontmatterTerms: new Set(tokenizeBounded(frontmatter, maxTermsPerField)),
+		frontmatterTerms: new Set(
+			tokenizeBounded(frontmatter.text, maxTermsPerField),
+		),
 		bodyTermFreq,
 		bodyLength,
 	};
 }
 
-// headings drive intent: collect terms from Markdown ATX headings only, scanning
-// line starts without a global RegExp over the page body
 function collectHeadingTerms(body: string): Set<string> {
 	const terms = new Set<string>();
 	let lineStart = 0;
@@ -225,8 +371,6 @@ function collectHeadingTerms(body: string): Set<string> {
 	return terms;
 }
 
-// char-by-char ASCII-ish tokenizer: lowercases, keeps alphanumerics, splits on
-// everything else. No RegExp over untrusted text, and bounded by callers.
 function tokenize(value: string): string[] {
 	return tokenizeBounded(value, Number.POSITIVE_INFINITY);
 }
@@ -244,7 +388,6 @@ function tokenizeBounded(value: string, maxTokens: number): string[] {
 		} else if (isUpper) {
 			current += String.fromCharCode(code + 32);
 		} else if (code > 127) {
-			// keep non-ASCII letters intact (e.g. accented docs) but lowercased
 			current += value.charAt(i).toLowerCase();
 		} else {
 			if (current) {
@@ -264,102 +407,22 @@ function pushToken(tokens: string[], token: string): void {
 }
 
 function splitFrontmatter(source: string): {
-	frontmatter: string;
+	frontmatter: { text: string; lineOffset: number };
 	body: string;
 } {
-	if (!source.startsWith("---\n")) return { frontmatter: "", body: source };
+	if (!source.startsWith("---\n"))
+		return { frontmatter: { text: "", lineOffset: 0 }, body: source };
 	const end = source.indexOf("\n---\n", 4);
-	if (end < 0) return { frontmatter: "", body: source };
+	if (end < 0)
+		return { frontmatter: { text: "", lineOffset: 0 }, body: source };
+	const bodyStart = end + 5;
 	return {
-		frontmatter: source.slice(4, end),
-		body: source.slice(end + 5),
+		frontmatter: {
+			text: source.slice(4, end),
+			lineOffset: lineNumberAt(source, bodyStart) - 1,
+		},
+		body: source.slice(bodyStart),
 	};
-}
-
-// pick the densest window of query-term hits, then expand to char bounds and map
-// back to 1-based line numbers for stable citations
-function bestSnippet(
-	body: string,
-	queryTerms: Set<string>,
-	snippetChars: number,
-): { lineStart: number; lineEnd: number; text: string } {
-	const hit = firstDenseHit(body, queryTerms);
-	const center = hit >= 0 ? hit : 0;
-	const half = Math.floor(snippetChars / 2);
-	let start = Math.max(0, center - half);
-	let end = Math.min(body.length, start + snippetChars);
-	start = expandToLineStart(body, start);
-	end = expandToLineEnd(body, end);
-	const text = body.slice(start, end).trim();
-	return {
-		lineStart: lineNumberAt(body, start),
-		lineEnd: lineNumberAt(body, end),
-		text,
-	};
-}
-
-// scan windows of body tokens (bounded) for the position with the most distinct
-// query-term hits; returns a char offset near that window
-function firstDenseHit(body: string, queryTerms: Set<string>): number {
-	let bestOffset = -1;
-	let bestHits = 0;
-	let current = "";
-	let tokenStart = 0;
-	let scanned = 0;
-	let windowHits = new Set<string>();
-	let windowStart = 0;
-	const flush = () => {
-		if (!current) return;
-		const term = current.toLowerCase();
-		if (queryTerms.has(term)) {
-			windowHits.add(term);
-			if (windowHits.size > bestHits) {
-				bestHits = windowHits.size;
-				bestOffset = tokenStart;
-			}
-		}
-		scanned++;
-		// slide a coarse window every 40 tokens to keep hit clusters local
-		if (scanned - windowStart >= 40) {
-			windowHits = new Set();
-			windowStart = scanned;
-		}
-		current = "";
-	};
-	for (let i = 0; i < body.length; i++) {
-		const ch = body.charCodeAt(i);
-		const isWord =
-			(ch >= 48 && ch <= 57) ||
-			(ch >= 65 && ch <= 90) ||
-			(ch >= 97 && ch <= 122) ||
-			ch > 127;
-		if (isWord) {
-			if (!current) tokenStart = i;
-			current += body.charAt(i);
-		} else {
-			flush();
-		}
-	}
-	flush();
-	return bestOffset;
-}
-
-function expandToLineStart(body: string, index: number): number {
-	const nl = body.lastIndexOf("\n", index);
-	return nl < 0 ? 0 : nl + 1;
-}
-
-function expandToLineEnd(body: string, index: number): number {
-	const nl = body.indexOf("\n", index);
-	return nl < 0 ? body.length : nl;
-}
-
-function lineNumberAt(text: string, index: number): number {
-	let line = 1;
-	for (let i = 0; i < index && i < text.length; i++) {
-		if (text[i] === "\n") line++;
-	}
-	return line;
 }
 
 function clamp01(value: number): number {

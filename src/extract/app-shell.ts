@@ -72,24 +72,45 @@ export function isLoadingShellPlaceholder(markdown: string, html: string) {
 }
 
 export function emptyContentError(html: string) {
-	return emptyShellMarkers.test(html)
+	return emptyShellMarkers.test(html) || looksLikeAppShell(html)
 		? "app shell without static text"
 		: "empty content";
 }
 
+export function reportedNotFoundError(
+	markdown: string,
+	title: string | undefined,
+) {
+	const titleText = title?.trim();
+	const lines = markdown
+		.split(/\n+/)
+		.map((line) => line.replace(/^#{1,6}\s*/, "").trim())
+		.filter(Boolean)
+		.slice(0, 4);
+	const content = titleText && lines[0] === titleText ? lines.slice(1) : lines;
+	return /^404:?\s*this page could not be found\.?$/i.test(content[0] ?? "") &&
+		/^this page could not be found\.?$/i.test(content[1] ?? "")
+		? "page reported not found"
+		: undefined;
+}
+
 export function looksLikeAppShell(html: string): boolean {
 	if (discoveryShellMarkers.test(html)) return true;
-	const { document } = parseHTML(html);
-	const scriptCount = document.querySelectorAll(
-		"script[src],link[href]",
-	).length;
-	if (scriptCount === 0) return false;
-	document.querySelectorAll("script,style,noscript").forEach((node) => {
-		node.remove();
-	});
-	const bodyText = whitespaceKey(document.body?.textContent ?? "");
-	const anchorCount = document.querySelectorAll("a[href]").length;
-	return bodyText.length < 500 && anchorCount < 5;
+	try {
+		const { document } = parseHTML(html);
+		const scriptCount = document.querySelectorAll(
+			"script[src],link[href]",
+		).length;
+		if (scriptCount === 0) return false;
+		document.querySelectorAll("script,style,noscript").forEach((node) => {
+			node.remove();
+		});
+		const bodyText = whitespaceKey(document.body?.textContent ?? "");
+		const anchorCount = document.querySelectorAll("a[href]").length;
+		return bodyText.length < 500 && anchorCount < 5;
+	} catch {
+		return false;
+	}
 }
 
 export function chromeHeading(text: string) {
@@ -98,13 +119,14 @@ export function chromeHeading(text: string) {
 	);
 }
 
-export function isBlockedChallenge(
+export function blockedAccessError(
 	markdown: string,
 	title: string | undefined,
+	html = "",
 ) {
 	return (
-		/client challenge/i.test(title ?? "") ||
-		/required part of this site couldn.t load/i.test(markdown)
+		clientChallengeError(markdown, title, html) ??
+		(accessGate(markdown, title, html) ? "blocked by access gate" : undefined)
 	);
 }
 
@@ -119,6 +141,71 @@ export function isLanguageSelector(finalUrl: string, html: string) {
 
 function rawGithubOrXhr(html: string) {
 	return /raw\.githubusercontent\.com|xhrPromise/i.test(html);
+}
+
+function clientChallengeError(
+	markdown: string,
+	title: string | undefined,
+	html: string,
+) {
+	return /client challenge/i.test(title ?? "") ||
+		/required part of this site couldn.t load/i.test(markdown) ||
+		isCloudflareChallenge(markdown, title, html)
+		? "blocked by client challenge"
+		: undefined;
+}
+
+function isCloudflareChallenge(
+	markdown: string,
+	title: string | undefined,
+	html: string,
+) {
+	if (wordCount(markdown) > 80) return false;
+	const text = whitespaceKey([title ?? "", markdown].join(" "));
+	const marker =
+		/cdn-cgi\/challenge-platform|cf-browser-verification|cf-challenge|_cf_chl_opt/i.test(
+			html,
+		);
+	if (!marker && !/\bjust a moment\b/i.test(text)) return false;
+	return /\bchecking if the site connection is secure\b|\benable javascript and cookies to continue\b|\bplease stand by\b/i.test(
+		text,
+	);
+}
+
+function accessGate(markdown: string, title: string | undefined, html: string) {
+	const compact = whitespaceKey([title ?? "", markdown].join(" "));
+	const words = wordCount(markdown);
+	if (words > 160) return false;
+	if (strongGateLanguage(compact)) return true;
+	return (
+		words <= 60 &&
+		gateTitle(title) &&
+		(formLikeGate(html) || actionOnlyGate(markdown))
+	);
+}
+
+function strongGateLanguage(text: string) {
+	return /\b(?:complete the security check|paywall|please log in|please sign in|sign in to continue|subscribe to continue|verify (?:you are human|your identity))\b/i.test(
+		text,
+	);
+}
+
+function gateTitle(title: string | undefined) {
+	return /^(?:access denied|log in|login|sign in|subscribe|verify you are human)$/i.test(
+		(title ?? "").trim(),
+	);
+}
+
+function formLikeGate(html: string) {
+	return /<form\b|type=["'](?:email|password)["']|name=["'](?:email|login|password|username)["']|(?:g-recaptcha|hcaptcha|cf-turnstile)/i.test(
+		html,
+	);
+}
+
+function actionOnlyGate(markdown: string) {
+	return /\b(?:continue with (?:github|google|microsoft)|create account|email address|forgot password|password|remember me|sign in|log in)\b/i.test(
+		markdown,
+	);
 }
 
 function placeholderText(markdown: string) {

@@ -1,22 +1,32 @@
-import { markdownLinkHrefs } from "../core/markdown.ts";
-
-export function titleFromMarkdown(markdown: string, fallback: string): string {
-	return markdown.match(/^#\s+(.+)$/m)?.[1]?.trim() || fallback;
-}
-
-export function linksFromMarkdown(markdown: string): string[] {
-	return markdownLinkHrefs(markdown);
-}
-
+import { replaceMarkdownLinks } from "../core/markdown.ts";
+import {
+	invisibleTextPattern,
+	isInvisibleTextOnly,
+	wordCount,
+} from "../core/text.ts";
+import {
+	chromeKey,
+	isArticleFooterStart,
+	isMarkdownChromeLine,
+} from "./markdown-chrome.ts";
 export function cleanMarkdown(markdown: string): string {
 	let fence: Fence | undefined;
+	let pendingFenceLanguage = "";
 	let componentDepth = 0;
+	let bodyWords = 0;
+	let skippedSphinxPermalink = false;
 	const lines: string[] = [];
+	const sourceLines = stripIndexBanner(stripSourceFrontmatter(markdown)).split(
+		"\n",
+	);
 
-	for (const rawLine of stripIndexBanner(markdown).split("\n")) {
+	for (let index = 0; index < sourceLines.length; index++) {
+		const rawLine = sourceLines[index]!;
 		const line = stripComponentIndent(rawLine, componentDepth);
 		if (fence) {
-			lines.push(line);
+			const finalLine = line.replace(invisibleTextRunPattern, "");
+			lines.push(finalLine);
+			bodyWords += wordCount(finalLine);
 			if (closesFence(line, fence)) fence = undefined;
 			continue;
 		}
@@ -25,7 +35,10 @@ export function cleanMarkdown(markdown: string): string {
 			if (component.kind === "close")
 				componentDepth = Math.max(0, componentDepth - 1);
 			if (component.kind === "open") {
-				if (component.line !== undefined) lines.push(component.line);
+				if (component.line !== undefined) {
+					lines.push(component.line);
+					bodyWords += wordCount(component.line);
+				}
 				if (!component.selfClosing) componentDepth++;
 			}
 			continue;
@@ -34,114 +47,198 @@ export function cleanMarkdown(markdown: string): string {
 		const opened = openFence(line);
 		if (opened) {
 			fence = opened.fence;
-			lines.push(opened.line);
+			lines.push(
+				pendingFenceLanguage && fenceHasNoLanguage(opened.line)
+					? `${opened.line}${pendingFenceLanguage}`
+					: opened.line,
+			);
+			pendingFenceLanguage = "";
 			continue;
 		}
 
-		if (isBoilerplateLine(line)) continue;
-		lines.push(line);
+		const rawCleanedLine = stripInvisibleAnchorLinks(
+			cleanMarkdownLine(line),
+		).replace(/^(#{1,6})[ \t]{2,}/, "$1 ");
+		const trimmedLine = rawCleanedLine.trim();
+		if (sphinxPermalinkLinePattern.test(trimmedLine)) {
+			skippedSphinxPermalink = true;
+			continue;
+		}
+		if (skippedSphinxPermalink) {
+			if (!trimmedLine) continue;
+			skippedSphinxPermalink = false;
+			if (horizontalRuleLinePattern.test(trimmedLine)) continue;
+		}
+		if (horizontalRuleLinePattern.test(trimmedLine)) continue;
+		const cleanedLine = stripSphinxPermalinks(rawCleanedLine);
+		if (isArticleFooterStart(cleanedLine) && bodyWords >= 80) break;
+		if (isMarkdownChromeLine(cleanedLine)) continue;
+		const finalLine = cleanedLine.replace(invisibleTextRunPattern, "");
+		const fenceHint = codeFenceHint(finalLine);
+		if (
+			fenceHint &&
+			nextMeaningfulLineOpensFence(sourceLines, index, componentDepth)
+		) {
+			pendingFenceLanguage = fenceHint.language;
+			if (fenceHint.keepLine) {
+				lines.push(finalLine);
+				bodyWords += wordCount(finalLine);
+			}
+			continue;
+		}
+		lines.push(finalLine);
+		bodyWords += wordCount(finalLine);
 	}
 
-	return normalizeImageAlt(
+	const cleaned = dropTrailingSchemaJsonFence(
 		lines
 			.join("\n")
 			.replace(/\n{3,}/g, "\n\n")
 			.trim(),
 	);
-}
-
-// Standalone UI chrome leaks into captures; only drop bare paragraph lines whose
-// full normalized text is one of these labels.
-const boilerplateLines = new Set([
-	"advertisement",
-	"advertisements",
-	"accept all cookies",
-	"accept cookies",
-	"back to top",
-	"cookie policy",
-	"follow us",
-	"got it",
-	"manage cookies",
-	"most popular",
-	"most read",
-	"newsletter",
-	"print this page",
-	"read more",
-	"related articles",
-	"related stories",
-	"share",
-	"share this",
-	"sign up",
-	"skip to content",
-	"skip to main content",
-	"sponsored",
-	"sponsored content",
-	"sponsored links",
-	"subscribe",
-	"tweet",
-	"we use cookies",
-]);
-
-function isBoilerplateLine(line: string): boolean {
-	const trimmed = line.trim();
-	if (!trimmed || isMarkdownStructuralLine(trimmed)) return false;
-	return boilerplateLines.has(normalizeBoilerplateLine(trimmed));
-}
-
-function isMarkdownStructuralLine(trimmed: string): boolean {
-	const first = trimmed[0];
-	if (first === "#" || first === ">") return true;
-	if ((first === "-" || first === "*" || first === "+") && trimmed[1] === " ") {
-		return true;
-	}
-	return isOrderedListLine(trimmed);
-}
-
-function isOrderedListLine(trimmed: string): boolean {
-	let index = 0;
-	while (index < trimmed.length && isDigit(trimmed.charCodeAt(index))) index++;
-	return (
-		index > 0 &&
-		(trimmed[index] === "." || trimmed[index] === ")") &&
-		trimmed[index + 1] === " "
+	return normalizeImageAlt(
+		repairBrokenLinkBlocks(repairSphinxSignatureEmphasis(cleaned)),
 	);
 }
 
-function normalizeBoilerplateLine(line: string): string {
-	let out = "";
-	let pendingSpace = false;
-	for (const char of line) {
-		const code = char.charCodeAt(0);
-		const isWhitespace =
-			code === 9 ||
-			code === 10 ||
-			code === 11 ||
-			code === 12 ||
-			code === 13 ||
-			code === 32;
-		if (isWhitespace) {
-			pendingSpace = out.length > 0;
-			continue;
+const sphinxPermalinkLinePattern = /^\[¶]\([^)]+\)$/;
+const horizontalRuleLinePattern = /^(?:-{3,}|\*{3,}|_{3,})$/;
+
+function stripSphinxPermalinks(line: string) {
+	return line.replace(/\[¶]\([^)]+\)/g, "").trimEnd();
+}
+
+function repairSphinxSignatureEmphasis(markdown: string) {
+	const lines = markdown.split("\n");
+	for (let index = 0; index + 3 < lines.length; index++) {
+		if (
+			lines[index]?.startsWith("**") &&
+			!lines[index]?.endsWith("**") &&
+			lines[index + 1] === "" &&
+			lines[index + 2] === "**" &&
+			lines[index + 3]?.startsWith(":")
+		) {
+			lines[index] += "**";
+			lines.splice(index + 1, 2);
 		}
-		if (pendingSpace) {
-			out += " ";
-			pendingSpace = false;
-		}
-		out += char.toLowerCase();
 	}
-	return out;
+	return lines.join("\n");
 }
 
-function isDigit(code: number): boolean {
-	return code >= 48 && code <= 57;
+function repairBrokenLinkBlocks(markdown: string) {
+	return markdown
+		.replace(/^(#{1,6}\s+[^\n[]+)(\[[^\]]+]\()/gm, "$1\n\n$2")
+		.replace(
+			/\[\n+\s*([^\][][\s\S]{0,500}?[^\][])\s*\n+\]\(([^)\n]+)\)/g,
+			(_, text: string, href: string) =>
+				`[${text.replace(/\s+/g, " ").trim()}](${href})`,
+		)
+		.replace(/(\]\([^)]+\))(?=\[)/g, "$1\n\n");
 }
 
-const maxAltChars = 250;
+const pipeSet = (value: string) => new Set(value.split("|"));
 
-// defuddle can emit a multi-line stock-photo caption as image alt text, which
-// bloats the corpus and reads like body prose; collapse alt whitespace and cap
-// egregious captions. Linear indexOf scan (no backtracking regex) so it can't
-// ReDoS on hostile markdown.
+const codeFenceLanguageNames = pipeSet(
+	"bash|c|csharp|css|go|html|java|javascript|json|js|jsx|kotlin|markdown|php|python|ruby|rust|sql|swift|tsx|typescript|yaml",
+);
+
+function codeFenceHint(line: string) {
+	const trimmed = line.trim();
+	if (trimmed.length > 24 || /[\s`()[\]{}:;]/.test(trimmed)) return "";
+	const key = chromeKey(trimmed);
+	if (key === "cli" || key === "curl" || key === "shell") {
+		return { language: "bash", keepLine: false };
+	}
+	if (codeFenceLanguageNames.has(key)) {
+		return { language: key, keepLine: false };
+	}
+	const fileLanguage = filenameCodeLanguage(key);
+	return fileLanguage ? { language: fileLanguage, keepLine: true } : "";
+}
+
+const filenameCodeLanguages = new Map<string, string>(
+	"cjs:javascript|css:css|go:go|htm:html|html:html|java:java|js:javascript|json:json|jsx:jsx|kt:kotlin|md:markdown|mdx:markdown|mjs:javascript|php:php|py:python|rb:ruby|rs:rust|sh:bash|sql:sql|swift:swift|ts:typescript|tsx:tsx|yaml:yaml|yml:yaml"
+		.split("|")
+		.map((pair) => pair.split(":") as [string, string]),
+);
+
+function filenameCodeLanguage(key: string) {
+	const match = key.match(/^[a-z0-9_.-]+\.([a-z0-9]+)$/);
+	return match ? filenameCodeLanguages.get(match[1]!) : undefined;
+}
+
+function nextMeaningfulLineOpensFence(
+	sourceLines: string[],
+	index: number,
+	componentDepth: number,
+) {
+	for (let cursor = index + 1; cursor < sourceLines.length; cursor++) {
+		const line = cleanMarkdownLine(
+			stripComponentIndent(sourceLines[cursor]!, componentDepth),
+		).trim();
+		if (!line) continue;
+		const fence = openFence(line);
+		return Boolean(fence && fenceHasNoLanguage(fence.line));
+	}
+	return false;
+}
+
+function fenceHasNoLanguage(line: string) {
+	return /^(\s*)(`{3,}|~{3,})$/.test(line);
+}
+
+function stripHeadingControlSuffix(line: string): string {
+	const match = line.match(
+		/^(\s*#{1,6}\s+)(.+?)(?:\s*(?:Expand\s+Collapse|Expand\s+All|Collapse\s+All))\s*$/i,
+	);
+	return match ? `${match[1]}${match[2]!.trimEnd()}` : line;
+}
+
+function cleanMarkdownLine(line: string) {
+	const image = markdownImageLine(line);
+	if (image !== undefined) return image;
+	return stripSelfLinkedHeading(stripHeadingControlSuffix(line))
+		.replace(/<\/?([A-Z][A-Za-z0-9]*)(?:\s[^>]*)?>/g, (match, name: string) =>
+			inlineMdxTags.has(name) ? "" : match,
+		)
+		.replace(
+			/^\s*<\/?(?:svg|path|g|defs|clipPath|rect|circle|line|polyline|polygon|use|source|picture)(?:\s[^>]*)?\/?>\s*$/i,
+			"",
+		)
+		.replace(/(`+|\]\([^)]+\)) +([,.;:!?])/g, "$1$2")
+		.replace(/\s*\{\/\*.*?\*\/}\s*/g, " ")
+		.trimEnd();
+}
+const inlineMdxTags = new Set(["CodeStep"]);
+
+function stripSelfLinkedHeading(line: string): string {
+	const match = line.match(/^(#{1,6}\s+)\[([^\]]+)]\(([^)]+)\)(.*)$/);
+	if (!match || !localHeadingHref(match[3]!)) return line;
+	return `${match[1]}${match[2]}${match[4]}`;
+}
+
+function stripInvisibleAnchorLinks(markdown: string) {
+	return replaceMarkdownLinks(markdown, (link) =>
+		isInvisibleTextOnly(link.text) && localAnchorHref(link.href)
+			? ""
+			: undefined,
+	);
+}
+
+function localAnchorHref(href: string) {
+	return href.includes("#") && !href.includes(":") && !href.startsWith("//");
+}
+
+function localHeadingHref(href: string) {
+	return (
+		!href.includes(":") &&
+		!href.startsWith("//") &&
+		(href.startsWith("#") || href.startsWith("./") || href.startsWith("../"))
+	);
+}
+
+const invisibleTextRunPattern = new RegExp(`${invisibleTextPattern}+`, "gu");
+
 function normalizeImageAlt(markdown: string): string {
 	if (!markdown.includes("![")) return markdown;
 	let out = "";
@@ -161,41 +258,38 @@ function normalizeImageAlt(markdown: string): string {
 			continue;
 		}
 		out += markdown.slice(cursor, altStart);
-		out += cappedAlt(markdown.slice(altStart, altEnd));
+		const alt = markdown.slice(altStart, altEnd);
+		out += isUrlImageAlt(alt, markdown.slice(altEnd + 2, srcEnd))
+			? ""
+			: cappedAlt(alt);
 		out += markdown.slice(altEnd, srcEnd + 1);
 		cursor = srcEnd + 1;
 	}
 	return out;
 }
 
+function isUrlImageAlt(alt: string, src: string) {
+	const text = alt.replace(/\s+/g, " ").trim();
+	return Boolean(
+		text && (/^(?:https?:)?\/\//i.test(text) || text === src.trim()),
+	);
+}
+
 function cappedAlt(alt: string): string {
-	if (alt.length <= maxAltChars && !/\n|\s\s/.test(alt)) return alt;
+	if (alt.length <= 250 && !/\n|\s\s/.test(alt)) return alt;
 	const collapsed = alt.replace(/\s+/g, " ").trim();
-	return collapsed.length > maxAltChars
-		? `${collapsed.slice(0, maxAltChars - 1)}…`
-		: collapsed;
+	return collapsed.length > 250 ? `${collapsed.slice(0, 249)}…` : collapsed;
 }
 
 type Fence = { marker: "`" | "~"; length: number };
 type ComponentLine =
-	| { kind: "close" }
-	| { kind: "drop" }
+	| { kind: "close" | "drop" }
 	| { kind: "open"; line?: string; selfClosing: boolean };
 
-const wrappers = new Set([
-	"AccordionGroup",
-	"CardGroup",
-	"CodeGroup",
-	"Frame",
-	"Info",
-	"Note",
-	"Steps",
-	"Tabs",
-	"Tip",
-	"Warning",
-]);
-
-const titledBlocks = new Set(["Accordion", "Card", "Step", "Tab"]);
+const wrappers = pipeSet(
+	"AccordionGroup|CardGroup|CodeDiagram|CodeGroup|ConsoleBlock|ConsoleBlockMulti|ConsoleLogLine|DeepDive|Diagram|DiagramGroup|Frame|FullWidth|Info|Intro|InlineToc|Note|Pitfall|Recipes|RSC|Sandpack|Solution|Steps|Tabs|Tip|Warning|YouWillLearn",
+);
+const titledBlocks = pipeSet("Accordion|Card|Step|Tab");
 
 function componentLine(line: string): ComponentLine | undefined {
 	const indent = line.match(/^\s*/)?.[0] ?? "";
@@ -208,11 +302,9 @@ function componentLine(line: string): ComponentLine | undefined {
 	if (!tag) return undefined;
 
 	const name = tag[1]!;
-	if (trimmed.startsWith("</")) {
-		return wrappers.has(name) || titledBlocks.has(name)
-			? { kind: "close" }
-			: undefined;
-	}
+	const wrapped = wrappers.has(name) || titledBlocks.has(name);
+	if (!wrapped) return undefined;
+	if (trimmed.startsWith("</")) return { kind: "close" };
 
 	const selfClosing = trimmed.endsWith("/>");
 	if (titledBlocks.has(name)) {
@@ -227,23 +319,52 @@ function componentLine(line: string): ComponentLine | undefined {
 		}
 	}
 
-	return wrappers.has(name) || titledBlocks.has(name)
-		? { kind: "open", selfClosing }
-		: undefined;
+	return { kind: "open", selfClosing };
 }
 
 function stripIndexBanner(markdown: string) {
-	return markdown.replace(
-		/^> ## Documentation Index\n> Fetch the complete documentation index at: https?:\/\/\S+\n> Use this file to discover all available pages before exploring further\.\n\n?/,
-		"",
-	);
+	const lines = markdown.split("\n");
+	let offset = 0;
+	while (lines[offset]?.trim() === "") offset++;
+	const banner = lines
+		.slice(offset, offset + 3)
+		.map((line) => chromeKey(line.replace(/^>\s*/, "")));
+	if (
+		banner[0] === "documentation index" &&
+		banner[1]?.startsWith("fetch the complete documentation index at: ") &&
+		banner[2] ===
+			"use this file to discover all available pages before exploring further."
+	) {
+		return lines.slice(nextBodyLine(lines, offset + 3)).join("\n");
+	}
+	if (
+		/^>\s*For an index of all .+ documentation, see \[[^\]]+]\([^)]+\)\.?$/i.test(
+			lines[offset]?.trim() ?? "",
+		)
+	) {
+		return lines.slice(nextBodyLine(lines, offset + 1)).join("\n");
+	}
+	return markdown;
+}
+
+function nextBodyLine(lines: string[], start: number) {
+	while (lines[start]?.trim() === "") start++;
+	return start;
+}
+function stripSourceFrontmatter(markdown: string) {
+	if (!markdown.startsWith("---\n")) return markdown;
+	const close = markdown.indexOf("\n---", 4);
+	if (close < 0) return markdown;
+	const after = close + 4;
+	if (markdown[after] && markdown[after] !== "\n" && markdown[after] !== "\r") {
+		return markdown;
+	}
+	return markdown.slice(after).replace(/^\r?\n/, "");
 }
 
 function stripComponentIndent(line: string, depth: number) {
 	let stripped = line;
-	for (let index = 0; index < depth && stripped.startsWith("  "); index++) {
-		stripped = stripped.slice(2);
-	}
+	while (depth-- > 0 && stripped.startsWith("  ")) stripped = stripped.slice(2);
 	return stripped;
 }
 
@@ -271,4 +392,35 @@ function closesFence(line: string, fence: Fence) {
 function attr(tag: string, name: string) {
 	const match = tag.match(new RegExp(`${name}\\s*=\\s*("[^"]*"|'[^']*')`));
 	return match?.[1]?.slice(1, -1);
+}
+
+function markdownImageLine(line: string) {
+	const match = line.match(/^(\s*)<img\b([^>]*)\/?>\s*$/i);
+	if (!match) return undefined;
+	const src = attr(match[2]!, "src");
+	if (!src) return "";
+	const alt = attr(match[2]!, "alt") ?? attr(match[2]!, "title") ?? "";
+	return `${match[1]}![${alt.replace(/[[\]]/g, "")}](${src})`;
+}
+
+function dropTrailingSchemaJsonFence(markdown: string) {
+	const lines = markdown.split("\n");
+	let end = lines.length - 1;
+	while (end >= 0 && lines[end]?.trim() === "") end--;
+	if (end < 0 || lines[end]?.trim() !== "```") return markdown;
+	let start = end - 1;
+	while (start >= 0 && lines[start]?.trim() !== "```json") start--;
+	if (start < 0) return markdown;
+	const body = lines.slice(start + 1, end).filter((line) => line.trim());
+	const schemaJson =
+		body.length > 0 &&
+		body.every((line) => {
+			const trimmed = line.trim();
+			return (
+				trimmed.startsWith("{") &&
+				trimmed.endsWith("}") &&
+				/"@context"\s*:\s*"https:\/\/schema\.org"/.test(trimmed)
+			);
+		});
+	return schemaJson ? lines.slice(0, start).join("\n").trimEnd() : markdown;
 }

@@ -3,7 +3,7 @@ import { assertInsideRoot } from "../core/fs-safety.ts";
 
 type CachePathContext = { dir: string | null };
 
-export const cacheHexPattern = /^[0-9a-f]{64}$/;
+const cacheHexPattern = /^[0-9a-f]{64}$/;
 
 export function isCacheHex(value: unknown): value is string {
 	return typeof value === "string" && cacheHexPattern.test(value);
@@ -35,6 +35,6 @@ export function pathFor(context: CachePathContext, ...parts: string[]): string {
 	return assertInsideCache(context.dir, resolve(context.dir, ...parts));
 }
 
-export function assertInsideCache(root: string, target: string): string {
+function assertInsideCache(root: string, target: string): string {
 	return assertInsideRoot(root, target, `cache path escapes root: ${target}`);
 }

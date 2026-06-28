@@ -37,6 +37,8 @@ export async function refreshSummary(
 	config: PipelineConfig,
 	counters: RefreshCounters,
 ): Promise<RefreshSummary> {
+	if (!prior.enabled) return emptyRefreshSummary(prior.reason);
+
 	const changedPages: RefreshChangedPage[] = [];
 	let checked = 0;
 	let fresh = 0;
@@ -54,7 +56,9 @@ export async function refreshSummary(
 		if (change === "new") fresh++;
 		else if (change === "changed") changed++;
 		else unchanged++;
-		changedPages.push(changeEntry(change, record, previous));
+		if (change !== "unchanged") {
+			changedPages.push(changeEntry(change, record, previous));
+		}
 	}
 
 	const currentKeys = new Set<string>();
@@ -126,7 +130,7 @@ async function existingOutputMatches(
 }
 
 function changeEntry(
-	change: "new" | "changed" | "unchanged",
+	change: "new" | "changed",
 	record: PageOutput,
 	previous: PriorPage | undefined,
 ): RefreshChangedPage {

@@ -47,6 +47,26 @@ export const failureKinds = [
 
 export type FailureKind = (typeof failureKinds)[number];
 
+export function retryCanHelpFailureKind(failureKind?: FailureKind) {
+	return (
+		failureKind === "extract" ||
+		failureKind === "fetch" ||
+		failureKind === "http" ||
+		failureKind === "timeout"
+	);
+}
+
+export function siteRetryCanHelpFailureKind(failureKind?: FailureKind) {
+	return (
+		failureKind === "extract" ||
+		failureKind === "fetch" ||
+		failureKind === "http" ||
+		failureKind === "not_found" ||
+		failureKind === "timeout" ||
+		failureKind === "too_large"
+	);
+}
+
 export const injectionSignals = [
 	"zero-width-text",
 	"unicode-tag-text",
@@ -64,17 +84,20 @@ export const injectionSignals = [
 ] as const;
 
 export type InjectionSignal = (typeof injectionSignals)[number];
+const allowedInjectionSignals = new Set<InjectionSignal>(injectionSignals);
 
 export function filterInjectionSignals(value: unknown): InjectionSignal[] {
-	const allowed = new Set<InjectionSignal>(injectionSignals);
 	return Array.isArray(value)
-		? value.filter((item): item is InjectionSignal => allowed.has(item))
+		? value.filter((item): item is InjectionSignal =>
+				allowedInjectionSignals.has(item),
+			)
 		: [];
 }
 
 export const lowQualityConfidence = 0.6;
 
 export type RunStatus = "ok" | "partial" | "failed";
+export type CaptureMode = "page" | "site";
 export type MaxAppliesTo = "all" | "non-llms";
 
 export type HeaderMap = {
@@ -89,17 +112,6 @@ export type HttpResponse = {
 	body: Uint8Array;
 };
 
-// The single network seam. The production transport (requestPublicHttp) is the
-// default carried on every PipelineConfig; tests inject an alternate so the
-// transport flows through the call stack instead of a mutable module global.
-export type FetchTransport = (
-	raw: string,
-	headers: Record<string, string>,
-	config: PipelineConfig,
-) => Promise<HttpResponse>;
-
-// Everything the capture pipeline consumes. It is the sole input to runPipeline
-// and the only config any programmatic caller (CLI, MCP) needs to build a run.
 export type PipelineConfig = {
 	seedUrl: string;
 	outDir: string;
@@ -109,24 +121,13 @@ export type PipelineConfig = {
 	perOrigin: number;
 	clean: boolean;
 	dryRun: boolean;
-	agentFiles: boolean;
 	pageOnly: boolean;
-	ignoreRobots: boolean;
 	cache: boolean;
 	userAgent: string;
 	timeoutMs: number;
-	retryHttp?: boolean;
 	maxBytes: number;
-	// Optional network seam: when set, every fetch for this run goes through it
-	// instead of the default public-HTTP transport. The pipeline resolves the
-	// effective transport per request, so cache policy and request routing depend
-	// on a config value rather than a mutable module global.
-	transport?: FetchTransport;
 };
 
-// CLI-only presentation/exit-code surface. The pipeline never reads these; the
-// CLI applies them after a run to choose output format and exit status. Keeping
-// them out of PipelineConfig means non-CLI callers cannot leak them in.
 export type CliOptions = {
 	json: boolean;
 	quiet: boolean;
@@ -182,15 +183,23 @@ export type DiscoveryMetadata = {
 	updatedAt?: string;
 };
 
+export type DiscoveryResourceSeed = {
+	url: string;
+	finalUrl: string;
+	source: Extract<DiscoverySource, "feed" | "llms">;
+};
+
 export type DiscoveredUrl = {
 	url: string;
 	source: DiscoverySource;
+	wasSeed?: true;
 	fetched?: FetchResult;
 	metadata?: DiscoveryMetadata;
 };
 
 export type FetchedUrl = {
 	source: DiscoverySource;
+	wasSeed?: true;
 	result: FetchResult;
 	metadata?: DiscoveryMetadata;
 };
@@ -206,6 +215,7 @@ type PageBase = {
 	finalUrl: string;
 	status: number;
 	source: DiscoverySource;
+	wasSeed?: true;
 	timings: PageTimings;
 	redirects: RedirectHop[];
 	etag?: string;
@@ -230,19 +240,8 @@ export type PageSuccess = PageBase & {
 	qualityReasons: string[];
 };
 
-// The three pipeline stages are distinct constructed types, not optional fields
-// promoted in place on one shared object. Each stage transition (assign paths,
-// materialize) builds a new value, so the type checker enforces stage ordering
-// and no caller can hold a pre-promotion reference that observes post-promotion
-// state. PageSuccess has no outputPath/rendered; PathedPage adds the assigned
-// path and link-rewritten markdown; PageOutput adds the settled serialization.
 export type PathedPage = PageSuccess & { outputPath: string };
 
-// A success record promoted to the output stage: it has a concrete outputPath
-// and its serialized form materialized exactly once. `rendered` is the single
-// source of truth for the bytes written to disk, hashed into the snapshot, and
-// emitted to the manifest — every consumer reads this field instead of
-// re-serializing, so the three hashes cannot diverge by call order.
 export type PageOutput = PathedPage & { rendered: string };
 
 export type PageFailure = PageBase & {
@@ -259,19 +258,17 @@ export type PageFailure = PageBase & {
 
 export type PageRecord = PageSuccess | PageFailure;
 
-// The shape of a record after a full run: a written success is a PageOutput, a
-// success dropped beyond --max stays a PageSuccess, a failure stays a PageFailure.
-// runPipeline returns these and the manifest is built from them, so a written
-// success carries its outputPath/rendered without any union-narrowing dance.
-export type RunRecord = PageOutput | PageRecord;
+export type RunRecord = PageOutput | PageFailure;
 
 export type RunSummary = {
 	status: RunStatus;
 	seedUrl: string;
+	seed: SeedSummary;
+	warnings: RunWarning[];
 	outDir: string;
 	dryRun: boolean;
+	captureMode: CaptureMode;
 	userAgent: string;
-	ignoreRobots?: true;
 	generatedAt: string;
 	snapshotVersion: number;
 	rootHash: string;
@@ -300,7 +297,50 @@ export type RunSummary = {
 	errors: Array<{ url: string; error: string; kind: FailureKind }>;
 	refresh: RefreshSummary;
 	cache: CacheSummary;
-	agentFilesUpdated?: string[];
+};
+
+export function runSucceeded(summary: Pick<RunSummary, "written" | "seed">) {
+	return summary.written > 0 && summary.seed.included;
+}
+
+export type RunWarning =
+	| {
+			kind: "seed_omitted" | "discovery_resource_empty";
+			message: string;
+			omissionReason?: SeedSummary["omissionReason"];
+			failureKind?: FailureKind;
+			error?: string;
+	  }
+	| {
+			kind: "discovery_resource_seed";
+			message: string;
+			source?: DiscoverySource;
+			pagesWritten: number;
+	  }
+	| {
+			kind: "seed_redirected";
+			message: string;
+			url?: string;
+			finalUrl?: string;
+	  };
+
+export type SeedSummary = {
+	attempted: boolean;
+	included: boolean;
+	url?: string;
+	finalUrl?: string;
+	redirected?: true;
+	source?: DiscoverySource;
+	kind?: "page" | "discovery_resource";
+	outputPath?: string;
+	pagesWritten?: number;
+	omissionReason?:
+		| "not_discovered"
+		| "failed"
+		| "not_written"
+		| "empty_resource";
+	failureKind?: FailureKind;
+	error?: string;
 };
 
 export type CacheSummary = {
@@ -311,6 +351,7 @@ export type CacheSummary = {
 	stale: number;
 	revalidated: number;
 	written: number;
+	notStored: number;
 	bytesRead: number;
 	bytesWritten: number;
 	evictedBytes: number;
@@ -319,7 +360,7 @@ export type CacheSummary = {
 export type RefreshChange = "new" | "changed" | "unchanged" | "removed";
 
 export type RefreshChangedPage = {
-	change: RefreshChange;
+	change: Exclude<RefreshChange, "unchanged">;
 	url: string;
 	finalUrl?: string;
 	outputPath?: string;

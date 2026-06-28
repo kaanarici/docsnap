@@ -1,5 +1,5 @@
 import type { FailureKind, FetchResult, RedirectHop } from "../core/types.ts";
-import { isUnsafeUrlError } from "./retry.ts";
+import { isTooLargeError, isUnsafeUrlError } from "./retry.ts";
 
 export function failed(
 	url: string,
@@ -9,6 +9,7 @@ export function failed(
 	error: string,
 	redirects: RedirectHop[] = [],
 ): FetchResult {
+	const normalizedError = normalizeFailureError(error);
 	return {
 		url,
 		finalUrl,
@@ -19,8 +20,8 @@ export function failed(
 		fetchMs: performance.now() - started,
 		redirects,
 		fetchedAt: new Date().toISOString(),
-		error,
-		failureKind: failureKind(status, error),
+		error: normalizedError,
+		failureKind: failureKind(status, normalizedError),
 	};
 }
 
@@ -38,33 +39,28 @@ export function failureKind(status: number, error: string): FailureKind {
 	return "fetch";
 }
 
+function normalizeFailureError(error: string): string {
+	if (/response exceeds \d+ bytes/i.test(error)) return error;
+	const maxBytes = error.match(/buffer larger than (\d+) bytes/i)?.[1];
+	if (maxBytes) return `response exceeds ${maxBytes} bytes`;
+	return isTooLargeError(error)
+		? "response exceeds configured byte limit"
+		: error;
+}
+
 export function robotsBlockedResult(input: string | FetchResult): FetchResult {
-	if (typeof input === "string") {
-		return {
-			url: input,
-			finalUrl: input,
-			redirects: [],
-			status: 0,
-			contentType: "",
-			body: "",
-			fetchMs: 0,
-			ok: false,
-			error: "blocked by robots.txt",
-			failureKind: "blocked",
-		};
-	}
-	return {
-		url: input.url,
-		finalUrl: input.finalUrl,
-		redirects: input.redirects ?? [],
-		status: input.status,
-		contentType: input.contentType,
-		body: "",
-		fetchMs: input.fetchMs,
-		ok: false,
-		error: "blocked by robots.txt",
-		failureKind: "blocked",
-	};
+	return failureResult(
+		failureFields(input),
+		"blocked by robots.txt",
+		"blocked",
+	);
+}
+
+export function emptyResourceResult(
+	input: string | FetchResult,
+	error: string,
+): FetchResult {
+	return failureResult(failureFields(input, true), error, "empty");
 }
 
 type FilteredNonPageOptions = {
@@ -84,21 +80,73 @@ export function filteredNonPageResult(
 	finalUrl: string,
 	options: FilteredNonPageOptions,
 ): FetchResult {
+	const redirected =
+		url !== finalUrl ||
+		(options.redirects !== undefined && options.redirects.length > 0);
+	return failureResult(
+		{
+			url,
+			finalUrl,
+			redirects: options.redirects ?? [],
+			status: options.status,
+			contentType: options.contentType,
+			body: options.body,
+			fetchMs: options.fetchMs,
+			...(options.etag ? { etag: options.etag } : {}),
+			...(options.lastModified ? { lastModified: options.lastModified } : {}),
+			...(options.fetchedAt || options.defaultFetchedAt
+				? { fetchedAt: options.fetchedAt ?? new Date().toISOString() }
+				: {}),
+		},
+		redirected
+			? "redirected to a filtered non-page URL"
+			: "filtered non-page URL",
+		"blocked",
+	);
+}
+
+type FailedFetchFields = Omit<
+	Extract<FetchResult, { ok: false }>,
+	"ok" | "error" | "failureKind"
+>;
+
+function failureFields(
+	input: string | FetchResult,
+	includeValidators = false,
+): FailedFetchFields {
+	if (typeof input === "string") {
+		return {
+			url: input,
+			finalUrl: input,
+			redirects: [],
+			status: 0,
+			contentType: "",
+			body: "",
+			fetchMs: 0,
+		};
+	}
 	return {
-		url,
-		finalUrl,
-		redirects: options.redirects ?? [],
-		status: options.status,
-		contentType: options.contentType,
-		body: options.body,
-		fetchMs: options.fetchMs,
-		...(options.etag ? { etag: options.etag } : {}),
-		...(options.lastModified ? { lastModified: options.lastModified } : {}),
-		...(options.fetchedAt || options.defaultFetchedAt
-			? { fetchedAt: options.fetchedAt ?? new Date().toISOString() }
+		url: input.url,
+		finalUrl: input.finalUrl,
+		redirects: input.redirects ?? [],
+		status: input.status,
+		contentType: input.contentType,
+		body: "",
+		fetchMs: input.fetchMs,
+		...(includeValidators && input.etag ? { etag: input.etag } : {}),
+		...(includeValidators && input.lastModified
+			? { lastModified: input.lastModified }
 			: {}),
-		ok: false,
-		error: "redirected to a filtered non-page URL",
-		failureKind: "blocked",
+		...(includeValidators && input.fetchedAt
+			? { fetchedAt: input.fetchedAt }
+			: {}),
 	};
+}
+
+function failureResult(
+	fields: FailedFetchFields,
+	error: string,
+	failureKind: FailureKind,
+): FetchResult {
+	return { ...fields, ok: false, error, failureKind };
 }

@@ -2,6 +2,7 @@ import { cpus } from "node:os";
 import type { FetchedUrl, PageRecord } from "../core/types.ts";
 import { shouldExtractInWorker } from "./content.ts";
 import { extractPage } from "./html.ts";
+import { failedRecord } from "./page-record.ts";
 
 type Message =
 	| { id: number; record: PageRecord }
@@ -9,20 +10,20 @@ type Message =
 
 export async function extractMany(inputs: FetchedUrl[]): Promise<PageRecord[]> {
 	if (typeof Worker === "undefined")
-		return Promise.all(inputs.map(extractPage));
+		return Promise.all(inputs.map(safeExtractPage));
 
 	const results: PageRecord[] = new Array(inputs.length);
 	const heavy: Array<{ id: number; input: FetchedUrl }> = [];
 	await Promise.all(
 		inputs.map(async (input, id) => {
 			if (shouldExtractInWorker(input.result)) heavy.push({ id, input });
-			else results[id] = await extractPage(input);
+			else results[id] = await safeExtractPage(input);
 		}),
 	);
 	if (heavy.length < 2) {
 		await Promise.all(
 			heavy.map(async ({ id, input }) => {
-				results[id] = await extractPage(input);
+				results[id] = await safeExtractPage(input);
 			}),
 		);
 		return results;
@@ -52,10 +53,13 @@ export async function extractMany(inputs: FetchedUrl[]): Promise<PageRecord[]> {
 			worker.onmessage = (event: MessageEvent<Message>) => {
 				const message = event.data;
 				if ("error" in message) {
-					fail(new Error(message.error));
-					return;
+					results[message.id] = failedExtraction(
+						inputs[message.id],
+						message.error,
+					);
+				} else {
+					results[message.id] = message.record;
 				}
-				results[message.id] = message.record;
 				if (!send()) {
 					worker.terminate();
 					resolve();
@@ -74,4 +78,29 @@ export async function extractMany(inputs: FetchedUrl[]): Promise<PageRecord[]> {
 
 	await Promise.all(tasks);
 	return results;
+}
+
+async function safeExtractPage(input: FetchedUrl): Promise<PageRecord> {
+	try {
+		return await extractPage(input);
+	} catch (error) {
+		return failedExtraction(input, error);
+	}
+}
+
+function failedExtraction(
+	input: FetchedUrl | undefined,
+	error: unknown,
+): PageRecord {
+	const message = error instanceof Error ? error.message : String(error);
+	if (!input) throw new Error(message);
+	return failedRecord(
+		input.result,
+		input.source,
+		input.metadata,
+		message,
+		"extract",
+		[],
+		input.wasSeed,
+	);
 }

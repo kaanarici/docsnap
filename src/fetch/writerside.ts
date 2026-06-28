@@ -1,5 +1,5 @@
 import type { PipelineConfig } from "../core/types.ts";
-import { effectiveTransport } from "./test-transport.ts";
+import { requestPublicHttp } from "./transport.ts";
 
 type RequestHeaders = { accept: string; "user-agent": string; cookie?: string };
 
@@ -17,7 +17,7 @@ export async function withWritersideTopic(
 	if (allowUrl && !(await allowUrl(topicUrl))) return html;
 	try {
 		const cookie = headers.cookie;
-		const response = await effectiveTransport(config)(
+		const response = await requestPublicHttp(
 			topicUrl,
 			{
 				accept: "application/json,text/plain;q=0.9,*/*;q=0.8",

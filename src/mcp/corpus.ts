@@ -1,45 +1,48 @@
-import { readdir } from "node:fs/promises";
-import { isAbsolute, join, parse, relative, resolve } from "node:path";
-import { isInsideOrSame, isWindowsAbsolute } from "../core/fs-safety.ts";
+import { realpath } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import {
+	type DiscoverySource,
+	discoverySources,
 	type FailureKind,
+	failureKinds,
 	filterInjectionSignals,
 	type InjectionSignal,
+	type PageExtractor,
+	pageExtractors,
 	type RunSummary,
 } from "../core/types.ts";
 import { runFiles } from "../output/files.ts";
 import { resolvePriorOutputPath } from "../output/prior.ts";
 import {
+	assertCorpusFiles,
 	corpusLimits,
-	logDiagnostic,
-	McpReadLimitError,
 	readBoundedCorpusFile,
+	readOptionalCorpusFileFromRealRoot,
 } from "./access.ts";
-import { globMatches } from "./glob.ts";
-import { buildRankInput, type RankedSnippet, rankPages } from "./retrieval.ts";
+import { mcpCorpusInfo, mcpRunCounts, mcpWarnings } from "./results.ts";
+import { buildRankInput, rankPages } from "./retrieval.ts";
+import {
+	maxAllSearchScannedDirs,
+	type ScanOptions,
+	scanCorpora,
+} from "./scan.ts";
 
 export type CorpusPage = {
 	ok: boolean;
 	url: string;
 	finalUrl: string;
 	injectionSignals: InjectionSignal[];
+	aliases?: string[];
 	outputPath?: string;
 	title?: string;
-	source?: string;
+	source?: DiscoverySource;
 	confidence?: number;
 	qualityReasons?: string[];
 	failureKind?: FailureKind;
 	error?: string;
 	contentHash?: string;
-	extractor?: string;
-};
-
-export type PageRead = {
-	record: CorpusPage & { outputPath: string };
-	startLine: number;
-	endLine: number;
-	truncated: boolean;
-	text: string;
+	extractor?: PageExtractor;
+	fetchedAt?: string;
 };
 
 type SummaryOptions = {
@@ -54,85 +57,90 @@ type SearchOptions = {
 	maxResults: number;
 	snippetChars: number;
 	excludeInjection?: boolean;
+	genericWhenNoContentTerms?: boolean;
+	preferredOutputPaths?: readonly string[];
+	records?: CorpusPage[];
 };
 
-export type RankedSearch = {
-	matches: RankedSnippet[];
-	truncated: boolean;
-};
+type ManifestJson = Partial<Record<keyof CorpusPage, unknown>>;
 
-type DirectoryEntry = {
-	name: string;
-	isDirectory(): boolean;
-};
-
-type ManifestJson = {
-	ok?: unknown;
-	url?: unknown;
-	finalUrl?: unknown;
-	outputPath?: unknown;
-	title?: unknown;
-	source?: unknown;
-	confidence?: unknown;
-	qualityReasons?: unknown;
-	failureKind?: unknown;
-	error?: unknown;
-	injectionSignals?: unknown;
-	contentHash?: unknown;
-	extractor?: unknown;
-};
-
-const maxScannedDirs = 1000;
+const globCache = new Map<string, Bun.Glob>();
 
 export async function readSummary(outputDir: string): Promise<RunSummary> {
-	const text = await readCorpusFile(
+	const text = await readBoundedCorpusFile(
 		outputDir,
 		runFiles.summary,
 		corpusLimits.summaryBytes,
 	);
 	try {
-		const raw = JSON.parse(text) as LooseSummary;
-		if (!raw || typeof raw !== "object" || !raw.seedUrl) {
-			throw new Error("missing seedUrl");
+		const raw = JSON.parse(text) as Partial<RunSummary>;
+		if (
+			!raw ||
+			typeof raw !== "object" ||
+			typeof raw.seedUrl !== "string" ||
+			!raw.seed ||
+			typeof raw.seed !== "object" ||
+			typeof raw.seed.attempted !== "boolean" ||
+			typeof raw.seed.included !== "boolean" ||
+			!Array.isArray(raw.warnings) ||
+			(raw.captureMode !== "page" && raw.captureMode !== "site") ||
+			!Array.isArray(raw.errors) ||
+			!raw.byFailureKind ||
+			typeof raw.byFailureKind !== "object" ||
+			!raw.refresh ||
+			typeof raw.refresh !== "object" ||
+			!Array.isArray(raw.refresh.changedPages)
+		) {
+			throw new Error("invalid summary shape");
 		}
-		// a parseable but partially-written/foreign summary may omit collection
-		// fields; default them so read tools degrade gracefully instead of throwing
-		return {
-			...raw,
-			errors: raw.errors ?? [],
-			byFailureKind: raw.byFailureKind ?? {},
-			refresh: raw.refresh
-				? { ...raw.refresh, changedPages: raw.refresh.changedPages ?? [] }
-				: raw.refresh,
-		} as RunSummary;
+		return raw as RunSummary;
 	} catch {
 		throw new Error(`Invalid ${runFiles.summary} in corpus`);
 	}
 }
 
-type LooseSummary = Omit<RunSummary, "errors" | "byFailureKind" | "refresh"> &
-	Partial<Pick<RunSummary, "errors" | "byFailureKind" | "refresh">>;
-
-export async function readManifest(outputDir: string): Promise<CorpusPage[]> {
-	const text = await readCorpusFile(
+export async function readManifest(
+	outputDir: string,
+	options: { summaryAlreadyRead?: boolean } = {},
+): Promise<CorpusPage[]> {
+	if (!options.summaryAlreadyRead) await readSummary(outputDir);
+	const text = await readBoundedCorpusFile(
 		outputDir,
 		runFiles.manifest,
 		corpusLimits.manifestBytes,
 	);
-	const records: CorpusPage[] = [];
-	for (const line of text.split(/\n/)) {
-		if (!line.trim()) continue;
-		records.push(parseManifestLine(line));
+	const records = text
+		.split(/\n/)
+		.filter((line) => line.trim())
+		.map(parseManifestLine);
+	for (const record of records) {
+		if (
+			record.outputPath &&
+			!resolvePriorOutputPath({ outDir: outputDir }, record.outputPath)
+		) {
+			throw new Error(`Invalid ${runFiles.manifest} in corpus`);
+		}
 	}
 	return records;
 }
 
-export async function readCorpusFile(
+export async function readVerifiedManifest(
 	outputDir: string,
-	path: string,
-	maxBytes = corpusLimits.resourceBytes,
-): Promise<string> {
-	return await readBoundedCorpusFile(outputDir, path, maxBytes);
+	summary?: RunSummary,
+): Promise<{ summary: RunSummary; records: CorpusPage[] }> {
+	const current = summary ?? (await readSummary(outputDir));
+	const records = await readManifest(outputDir, { summaryAlreadyRead: true });
+	if (!manifestMatchesSummary(current, records)) {
+		throw new Error(`Invalid ${runFiles.manifest} in corpus`);
+	}
+	await assertCorpusFiles(
+		outputDir,
+		records.flatMap((record) =>
+			record.ok && record.outputPath ? [record.outputPath] : [],
+		),
+		corpusLimits.pageBytes,
+	);
+	return { summary: current, records };
 }
 
 export async function listCorpora(
@@ -140,23 +148,48 @@ export async function listCorpora(
 	pageSize: number,
 	cursor: string | undefined,
 	extraCorpora: Iterable<string>,
+	options: ScanOptions = {},
 ) {
 	const offset = decodeCursor(cursor);
 	const dirs = new Set<string>(extraCorpora);
-	for (const dir of await scanCorpora(rootDir)) dirs.add(dir);
-	const sorted = [...dirs].sort((a, b) => a.localeCompare(b));
-	const selected = sorted.slice(offset, offset + pageSize);
-	const corpora = [];
-	for (const outputDir of selected) {
+	const scanned = await scanCorpora(rootDir, maxAllSearchScannedDirs, options);
+	for (const dir of scanned.dirs) dirs.add(dir);
+	const corpora: ReturnType<typeof corpusListEntry>[] = [];
+	let corporaSkipped = scanned.skipped;
+	for (const outputDir of dirs) {
 		try {
-			corpora.push(corpusListEntry(await readSummary(outputDir), outputDir));
-		} catch {}
+			const { summary } = await readVerifiedManifest(outputDir);
+			corpora.push(corpusListEntry(summary, outputDir));
+		} catch {
+			corporaSkipped++;
+		}
 	}
+	corpora.sort(
+		(left, right) =>
+			right.generated_at.localeCompare(left.generated_at) ||
+			left.output_dir.localeCompare(right.output_dir),
+	);
+	const page = corpora.slice(offset, offset + pageSize);
 	return {
-		corpora,
-		...(offset + pageSize < sorted.length
+		corpora: page,
+		truncated: scanned.truncated,
+		corporaSkipped,
+		...(offset + pageSize < corpora.length
 			? { next_cursor: String(offset + pageSize) }
 			: {}),
+	};
+}
+
+export async function listAllCorpora(rootDir: string) {
+	const scanned = await scanCorpora(rootDir, maxAllSearchScannedDirs, {
+		allowAbsoluteRoot: true,
+		preserveAbsolutePaths: isAbsolute(rootDir),
+	});
+	const outputDirs = scanned.dirs.sort((a, b) => a.localeCompare(b));
+	return {
+		corpora: outputDirs.map((output_dir) => ({ output_dir })),
+		truncated: scanned.truncated,
+		skipped: scanned.skipped,
 	};
 }
 
@@ -164,30 +197,23 @@ export async function getCorpusSummary(
 	outputDir: string,
 	options: SummaryOptions,
 ) {
-	const summary = await readSummary(outputDir);
+	const { summary } = await readVerifiedManifest(outputDir);
+	const { paths, ...corpus } = mcpCorpusInfo(summary, { outputDir });
 	return {
 		corpus: {
-			output_dir: outputDir,
-			seed_url: summary.seedUrl,
+			...corpus,
 			generated_at: summary.generatedAt,
-			paths: corpusPaths(outputDir),
+			paths,
 		},
 		status: summary.status,
-		counts: {
-			written: summary.written,
-			failed: summary.failed,
-			low_quality: summary.lowQuality,
-			quality_warnings: summary.qualityWarnings,
-			injection_signal_pages: summary.injectionSignalPages,
-			discovered: summary.discovered,
-			deduped: summary.deduped,
-			max_reached: summary.maxReached,
-		},
+		warnings: mcpWarnings(summary),
+		counts: mcpRunCounts(summary, { includeMaxReached: true }),
+		limits: { max_pages: summary.max, max_reached: summary.maxReached },
 		failure_kinds: summary.byFailureKind,
 		...(options.includeErrors
 			? { errors: summary.errors.slice(0, options.errorLimit) }
 			: {}),
-		...(options.includeRefreshChanges && summary.refresh
+		...(options.includeRefreshChanges
 			? { refresh: cappedRefresh(summary.refresh) }
 			: {}),
 	};
@@ -200,7 +226,7 @@ export async function listPages(
 	includeFailures: boolean,
 ) {
 	const offset = decodeCursor(cursor);
-	const records = (await readManifest(outputDir)).filter(
+	const records = (await readVerifiedManifest(outputDir)).records.filter(
 		(record) => includeFailures || (record.ok && record.outputPath),
 	);
 	const pages = records.slice(offset, offset + pageSize).map((record) => ({
@@ -216,8 +242,9 @@ export async function listPages(
 			? { quality_reasons: record.qualityReasons }
 			: {}),
 		...(record.failureKind ? { failure_kind: record.failureKind } : {}),
+		...(record.error ? { error: record.error } : {}),
 		...(record.injectionSignals.length
-			? { injectionSignals: record.injectionSignals }
+			? { injection_signals: record.injectionSignals }
 			: {}),
 	}));
 	return {
@@ -228,49 +255,85 @@ export async function listPages(
 	};
 }
 
-export async function searchCorpus(
-	outputDir: string,
-	options: SearchOptions,
-): Promise<RankedSearch> {
+export async function searchCorpus(outputDir: string, options: SearchOptions) {
 	if (options.query.length > corpusLimits.searchQueryChars) {
 		throw new Error(
 			`query must be ${corpusLimits.searchQueryChars} characters or fewer`,
 		);
 	}
-	const records = (await readManifest(outputDir)).filter(
+	const records = (
+		options.records ?? (await readVerifiedManifest(outputDir)).records
+	).filter(
 		(record) =>
 			record.ok &&
 			record.outputPath &&
-			(!options.pathGlob || globMatches(options.pathGlob, record.outputPath)),
+			(!options.pathGlob || globMatches(options.pathGlob, record.outputPath)) &&
+			(options.excludeInjection !== true ||
+				record.injectionSignals.length === 0),
 	);
-	const { input, truncated } = await buildRankInput(
+	const realOutputDir = await realpath(outputDir);
+	const { input, truncated, skipped } = await buildRankInput(
 		records,
-		(record) => loadCorpusBody(outputDir, record.outputPath),
+		(record) =>
+			readOptionalCorpusFileFromRealRoot(
+				outputDir,
+				realOutputDir,
+				record.outputPath,
+				corpusLimits.pageBytes,
+			),
 		{ maxPages: corpusLimits.searchPages, maxBytes: corpusLimits.searchBytes },
+		{
+			query: options.query,
+			genericWhenNoContentTerms: options.genericWhenNoContentTerms === true,
+		},
 	);
-	const matches = rankPages(input, options.query, {
-		maxResults: options.maxResults,
+	const ranked = rankPages(input, options.query, {
+		maxResults: options.maxResults + 1,
 		snippetChars: options.snippetChars,
 		excludeInjection: options.excludeInjection === true,
+		genericWhenNoContentTerms: options.genericWhenNoContentTerms === true,
+		preferredOutputPaths: new Set(options.preferredOutputPaths ?? []),
 	});
-	return { matches, truncated };
+	return {
+		matches: ranked.slice(0, options.maxResults),
+		truncated,
+		limited: ranked.length > options.maxResults,
+		skipped,
+	};
 }
 
-// returns null on a per-page read-cap breach so retrieval can record the skip
-// without aborting the whole ranking pass
-async function loadCorpusBody(
-	outputDir: string,
-	outputPath: string,
-): Promise<string | null> {
-	try {
-		return await readCorpusOutput(outputDir, outputPath);
-	} catch (error) {
-		if (error instanceof McpReadLimitError) return null;
-		throw error;
+export function manifestMatchesSummary(
+	summary: RunSummary,
+	records: CorpusPage[],
+): boolean {
+	const written = records.filter(
+		(record) => record.ok && record.outputPath,
+	).length;
+	const failed = records.filter((record) => !record.ok).length;
+	if (written !== summary.written || failed !== summary.failed) return false;
+	if (!summary.seed.included) return true;
+	if (summary.seed.outputPath) {
+		return records.some(
+			(record) => record.ok && record.outputPath === summary.seed.outputPath,
+		);
 	}
+	if (summary.seed.kind === "discovery_resource" && summary.seed.source) {
+		return records.some(
+			(record) =>
+				record.ok &&
+				Boolean(record.outputPath) &&
+				record.source === summary.seed.source,
+		);
+	}
+	return written > 0;
 }
 
-export type ReadSliceOptions = {
+export function globMatches(pattern: string, path: string): boolean {
+	if (!globCache.has(pattern)) globCache.set(pattern, new Bun.Glob(pattern));
+	return globCache.get(pattern)!.match(path);
+}
+
+type ReadSliceOptions = {
 	startLine: number;
 	endLine?: number;
 	maxChars: number;
@@ -281,35 +344,46 @@ export async function readPageSlice(
 	outputDir: string,
 	outputPath: string,
 	options: ReadSliceOptions,
-): Promise<PageRead> {
-	const record = (await readManifest(outputDir)).find(
+) {
+	const record = (await readVerifiedManifest(outputDir)).records.find(
 		(item): item is CorpusPage & { outputPath: string } =>
 			item.ok && item.outputPath === outputPath,
 	);
-	if (!record) {
-		throw new Error(`Output path is not in manifest: ${outputPath}`);
-	}
-	if (!resolvePriorOutputPath({ outDir: outputDir }, outputPath)) {
+	if (!record) throw new Error(`Output path is not in manifest: ${outputPath}`);
+	if (!resolvePriorOutputPath({ outDir: outputDir }, outputPath))
 		throw new Error(`Unsafe output path: ${outputPath}`);
-	}
-	const source = options.includeFrontmatter
-		? await readCorpusOutput(outputDir, outputPath)
-		: stripFrontmatter(await readCorpusOutput(outputDir, outputPath));
-	const lines = source.split(/\n/);
-	const from = Math.min(options.startLine - 1, lines.length);
-	// optional end_line caps the slice to an exact line span before the char cap
-	const upto =
+	const body = await readBoundedCorpusFile(
+		outputDir,
+		outputPath,
+		corpusLimits.pageBytes,
+	);
+	const lines = body.split(/\n/);
+	let from = Math.min(options.startLine - 1, lines.length);
+	let upto =
 		options.endLine !== undefined
 			? Math.min(Math.max(options.endLine, options.startLine), lines.length)
 			: lines.length;
+	if (!options.includeFrontmatter) {
+		const bodyStart = lines[0] === "---" ? lines.indexOf("---", 1) + 1 : 0;
+		if (bodyStart > 0) {
+			from = Math.max(from, bodyStart);
+			upto =
+				options.endLine !== undefined && options.endLine <= bodyStart
+					? Math.min(
+							lines.length,
+							from + options.endLine - options.startLine + 1,
+						)
+					: Math.max(upto, from);
+		}
+	}
 	const selected = lines.slice(from, upto).join("\n");
 	const truncated = selected.length > options.maxChars;
 	const text = truncated ? selected.slice(0, options.maxChars) : selected;
 	const lineCount = text ? text.split(/\n/).length : 1;
 	return {
 		record,
-		startLine: options.startLine,
-		endLine: options.startLine + lineCount - 1,
+		startLine: from + 1,
+		endLine: from + lineCount,
 		truncated,
 		text,
 	};
@@ -319,20 +393,6 @@ export function decodeCursor(cursor: string | undefined): number {
 	if (cursor === undefined) return 0;
 	if (!/^\d{1,8}$/.test(cursor)) throw new Error("Invalid cursor");
 	return Number(cursor);
-}
-
-export function assertSafeProjectRoot(rootDir: string): void {
-	if (!rootDir || isAbsolute(rootDir) || isWindowsAbsolute(rootDir)) {
-		throw new Error("root_dir must be a relative directory under cwd");
-	}
-	if (rootDir.split(/[\\/]+/).includes("..")) {
-		throw new Error("root_dir must not contain '..'");
-	}
-	const cwd = resolve(process.cwd());
-	const target = resolve(cwd, rootDir);
-	if (!isInsideOrSame(cwd, target)) {
-		throw new Error("root_dir must stay under cwd");
-	}
 }
 
 function parseManifestLine(line: string): CorpusPage {
@@ -348,56 +408,46 @@ function parseManifestLine(line: string): CorpusPage {
 		finalUrl: stringValue(raw.finalUrl, "finalUrl"),
 		injectionSignals: filterInjectionSignals(raw.injectionSignals),
 	};
+	if (Array.isArray(raw.aliases)) {
+		const aliases = raw.aliases.filter(
+			(item): item is string => typeof item === "string",
+		);
+		if (aliases.length) page.aliases = aliases;
+	}
 	if (typeof raw.outputPath === "string") page.outputPath = raw.outputPath;
 	if (typeof raw.title === "string") page.title = raw.title;
-	if (typeof raw.source === "string") page.source = raw.source;
-	if (typeof raw.confidence === "number") page.confidence = raw.confidence;
+	const source = enumValue(raw.source, discoverySources);
+	if (source) page.source = source;
+	if (typeof raw.confidence === "number" && Number.isFinite(raw.confidence)) {
+		page.confidence = raw.confidence;
+	}
 	if (Array.isArray(raw.qualityReasons)) {
 		page.qualityReasons = raw.qualityReasons.filter(
 			(item): item is string => typeof item === "string",
 		);
 	}
-	if (typeof raw.failureKind === "string") {
-		page.failureKind = raw.failureKind as FailureKind;
-	}
+	const failureKind = enumValue(raw.failureKind, failureKinds);
+	if (failureKind) page.failureKind = failureKind;
 	if (typeof raw.error === "string") page.error = raw.error;
 	if (typeof raw.contentHash === "string") page.contentHash = raw.contentHash;
-	if (typeof raw.extractor === "string") page.extractor = raw.extractor;
+	const extractor = enumValue(raw.extractor, pageExtractors);
+	if (extractor) page.extractor = extractor;
+	if (typeof raw.fetchedAt === "string") page.fetchedAt = raw.fetchedAt;
+	validateManifestPage(page);
 	return page;
 }
 
-async function scanCorpora(rootDir: string): Promise<string[]> {
-	assertSafeProjectRoot(rootDir);
-	const root = resolve(process.cwd(), rootDir);
-	const found: string[] = [];
-	let visited = 0;
-	async function walk(dir: string): Promise<void> {
-		if (visited++ > maxScannedDirs) return;
-		let entries: DirectoryEntry[];
-		try {
-			entries = await readdir(dir, { withFileTypes: true });
-		} catch (error) {
-			if (
-				error instanceof Error &&
-				"code" in error &&
-				error.code === "ENOENT"
-			) {
-				return;
-			}
-			logDiagnostic(error);
-			throw new Error("Unable to scan corpus directories under root_dir");
-		}
-		const names = new Set(entries.map((entry) => entry.name));
-		if (names.has(runFiles.summary) && names.has(runFiles.manifest)) {
-			found.push(displayPath(dir));
-			return;
-		}
-		for (const entry of entries) {
-			if (entry.isDirectory()) await walk(join(dir, entry.name));
-		}
+function validateManifestPage(page: CorpusPage): void {
+	const valid = page.ok
+		? page.outputPath &&
+			page.source &&
+			page.contentHash &&
+			page.extractor &&
+			page.confidence !== undefined
+		: page.failureKind && page.error;
+	if (!valid) {
+		throw new Error(`Invalid ${runFiles.manifest} in corpus`);
 	}
-	await walk(root);
-	return found;
 }
 
 function corpusListEntry(summary: RunSummary, outputDir: string) {
@@ -406,36 +456,18 @@ function corpusListEntry(summary: RunSummary, outputDir: string) {
 		seed_url: summary.seedUrl,
 		generated_at: summary.generatedAt,
 		status: summary.status,
+		capture_mode: summary.captureMode,
 		written: summary.written,
 		failed: summary.failed,
 		low_quality: summary.lowQuality,
+		quality_warnings: summary.qualityWarnings,
+		injection_signal_pages: summary.injectionSignalPages,
+		seed_included: summary.seed.included,
+		seed_output_path: summary.seed.outputPath,
+		seed_failure_kind: summary.seed.failureKind,
+		max_pages: summary.max,
 		max_reached: summary.maxReached,
 	};
-}
-
-function corpusPaths(outputDir: string) {
-	return {
-		summary: `${outputDir}/${runFiles.summary}`,
-		manifest: `${outputDir}/${runFiles.manifest}`,
-		tree: `${outputDir}/${runFiles.tree}`,
-		agent_readme: `${outputDir}/${runFiles.agentReadme}`,
-	};
-}
-
-async function readCorpusOutput(
-	outputDir: string,
-	outputPath: string,
-): Promise<string> {
-	return await readBoundedCorpusFile(
-		outputDir,
-		outputPath,
-		corpusLimits.pageBytes,
-	);
-}
-
-function displayPath(path: string) {
-	const rel = relative(process.cwd(), path);
-	return rel && !rel.startsWith("..") && !parse(rel).root ? rel : path;
 }
 
 function stringValue(value: unknown, field: string) {
@@ -444,10 +476,13 @@ function stringValue(value: unknown, field: string) {
 	return value;
 }
 
-function stripFrontmatter(text: string) {
-	if (!text.startsWith("---\n")) return text;
-	const end = text.indexOf("\n---\n", 4);
-	return end >= 0 ? text.slice(end + 5) : text;
+function enumValue<T extends string>(
+	value: unknown,
+	allowed: readonly T[],
+): T | undefined {
+	return typeof value === "string" && allowed.includes(value as T)
+		? (value as T)
+		: undefined;
 }
 
 function cappedRefresh(summary: RunSummary["refresh"]) {
