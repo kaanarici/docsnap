@@ -7,18 +7,18 @@ import {
 	readVerifiedManifest,
 } from "../mcp/corpus.ts";
 import {
-	IncompatibleExistingCorpusError,
-	rejectIncompatibleExistingCorpus,
-	replaceableExistingCorpus,
-	reusableCorpus,
+	CorpusMismatchError,
+	canReplaceCorpus,
+	canReuseCorpus,
 	runFetchTool,
+	throwCorpusMismatch,
 } from "../mcp/fetch.ts";
 import type { FetchToolInput } from "../mcp/inputs.ts";
 import type { FetchInput } from "./args.ts";
 import {
 	jsonFetchResult,
 	textFetchResult,
-	writeIncompatibleCorpusError,
+	writeCorpusMismatchError,
 } from "./fetch-output.ts";
 import { logLine } from "./progress.ts";
 
@@ -38,8 +38,8 @@ export async function runFetch(input: FetchInput): Promise<void> {
 			state,
 		);
 	} catch (error) {
-		if (error instanceof IncompatibleExistingCorpusError) {
-			writeIncompatibleCorpusError(error, input);
+		if (error instanceof CorpusMismatchError) {
+			writeCorpusMismatchError(error, input);
 			return;
 		}
 		throw error;
@@ -81,7 +81,7 @@ async function cliOutputDir(
 async function reusableLibraryCorpus(
 	requested: PipelineConfig,
 ): Promise<string | null> {
-	let best: { outputDir: string; generatedAt: string } | null = null;
+	let latest: { outputDir: string; generatedAt: string } | null = null;
 	let listed: Awaited<ReturnType<typeof listAllCorpora>>;
 	try {
 		listed = await listAllCorpora("docsnap");
@@ -92,12 +92,12 @@ async function reusableLibraryCorpus(
 		try {
 			const summary = await readSummary(output_dir);
 			const records = (await readVerifiedManifest(output_dir, summary)).records;
-			if (reusableCorpus(summary, requested, records)) {
-				best = newerCorpus(best, output_dir, summary.generatedAt);
+			if (canReuseCorpus(summary, requested, records)) {
+				latest = newerCorpus(latest, output_dir, summary.generatedAt);
 			}
 		} catch {}
 	}
-	return best?.outputDir ?? null;
+	return latest?.outputDir ?? null;
 }
 
 function newerCorpus(
@@ -131,12 +131,11 @@ async function readExistingCliSummary(
 	try {
 		records = (await readVerifiedManifest(outputDir, summary)).records;
 	} catch {
-		if (replaceableExistingCorpus(summary, requested, allowReplace))
-			return null;
+		if (canReplaceCorpus(summary, requested, allowReplace)) return null;
 		throw new Error(`Invalid manifest in existing corpus: ${outputDir}`);
 	}
-	if (reusableCorpus(summary, requested, records)) return summary;
-	return replaceableExistingCorpus(summary, requested, allowReplace)
+	if (canReuseCorpus(summary, requested, records)) return summary;
+	return canReplaceCorpus(summary, requested, allowReplace)
 		? null
-		: rejectIncompatibleExistingCorpus(outputDir, summary, requested);
+		: throwCorpusMismatch(outputDir, summary, requested);
 }

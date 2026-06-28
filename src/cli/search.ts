@@ -2,9 +2,9 @@ import { realpath } from "node:fs/promises";
 import { nextCaptureMax } from "../core/config.ts";
 import { runBounded } from "../core/parallel.ts";
 import {
+	canBroadenAfterFailure,
+	canRetryAfterFailure,
 	type RunSummary,
-	retryCanHelpFailureKind,
-	siteRetryCanHelpFailureKind,
 } from "../core/types.ts";
 import {
 	corpusLimits,
@@ -277,7 +277,7 @@ function corpusHintsForSummaries(
 				seedUrl: summary.seedUrl,
 				commands: {
 					inspect_summary: inspectSummaryCommand(outputDir),
-					...(retryCanHelpFailureKind(summary.seed.failureKind)
+					...(canRetryAfterFailure(summary.seed.failureKind)
 						? {
 								retry_capture: retryCaptureCommand(
 									summary.seedUrl,
@@ -288,7 +288,7 @@ function corpusHintsForSummaries(
 							}
 						: {}),
 					...(summary.captureMode === "page" &&
-					siteRetryCanHelpFailureKind(summary.seed.failureKind)
+					canBroadenAfterFailure(summary.seed.failureKind)
 						? {
 								capture_site: captureSiteCommand(
 									summary.seedUrl,

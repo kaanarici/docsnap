@@ -3,12 +3,12 @@ import { join } from "node:path";
 import { citationId } from "../core/citation.ts";
 import { nextCaptureMax } from "../core/config.ts";
 import {
+	canBroadenAfterFailure,
+	canRetryAfterFailure,
 	type InjectionSignal,
 	type RunSummary,
 	type RunWarning,
-	retryCanHelpFailureKind,
 	runSucceeded,
-	siteRetryCanHelpFailureKind,
 } from "../core/types.ts";
 import { siteDiscoverySeedUrl } from "../core/url.ts";
 import { runFiles } from "../output/files.ts";
@@ -278,7 +278,7 @@ function nextActions(summary: RunSummary): string[] {
 			"Use docsnap_search_corpus to find relevant pages, then docsnap_read_page for bounded page text.",
 		);
 	} else {
-		if (retryCanHelpFailureKind(summary.seed.failureKind)) {
+		if (canRetryAfterFailure(summary.seed.failureKind)) {
 			actions.push(
 				`No Markdown pages were captured; inspect failures, then retry with docsnap_capture ${JSON.stringify(
 					summaryCaptureArgs(summary),
@@ -287,7 +287,7 @@ function nextActions(summary: RunSummary): string[] {
 		}
 		if (
 			summary.captureMode === "page" &&
-			siteRetryCanHelpFailureKind(summary.seed.failureKind)
+			canBroadenAfterFailure(summary.seed.failureKind)
 		) {
 			actions.push(
 				`If the exact page URL is too narrow, try site discovery with docsnap_capture ${JSON.stringify(
@@ -296,10 +296,10 @@ function nextActions(summary: RunSummary): string[] {
 			);
 		}
 		if (
-			!retryCanHelpFailureKind(summary.seed.failureKind) &&
+			!canRetryAfterFailure(summary.seed.failureKind) &&
 			!(
 				summary.captureMode === "page" &&
-				siteRetryCanHelpFailureKind(summary.seed.failureKind)
+				canBroadenAfterFailure(summary.seed.failureKind)
 			)
 		) {
 			actions.push(

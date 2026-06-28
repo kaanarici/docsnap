@@ -2,9 +2,9 @@ import { join } from "node:path";
 import { nextCaptureMax } from "../core/config.ts";
 import { countLabel, shellArg } from "../core/text.ts";
 import {
+	canBroadenAfterFailure,
+	canRetryAfterFailure,
 	type RunSummary,
-	retryCanHelpFailureKind,
-	siteRetryCanHelpFailureKind,
 } from "../core/types.ts";
 import {
 	captureMoreCommand,
@@ -69,22 +69,22 @@ export function printSummary(summary: RunSummary): void {
 			logLine(
 				`docsnap: inspect with cat ${shellArg(artifactPath(summary, runFiles.summary))}`,
 			);
-			if (retryCanHelpFailureKind(summary.seed.failureKind)) {
+			if (canRetryAfterFailure(summary.seed.failureKind)) {
 				logLine(`docsnap: retry with ${retryCommand(summary)}`);
 			}
 			if (
 				summary.captureMode === "page" &&
-				siteRetryCanHelpFailureKind(summary.seed.failureKind)
+				canBroadenAfterFailure(summary.seed.failureKind)
 			) {
 				logLine(
 					`docsnap: try site with ${captureSiteCommand(summary.seedUrl, summary.outDir, summary.max)}`,
 				);
 			}
 			if (
-				!retryCanHelpFailureKind(summary.seed.failureKind) &&
+				!canRetryAfterFailure(summary.seed.failureKind) &&
 				!(
 					summary.captureMode === "page" &&
-					siteRetryCanHelpFailureKind(summary.seed.failureKind)
+					canBroadenAfterFailure(summary.seed.failureKind)
 				)
 			) {
 				logLine("docsnap: choose another reachable public docs URL");

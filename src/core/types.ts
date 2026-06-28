@@ -47,7 +47,7 @@ export const failureKinds = [
 
 export type FailureKind = (typeof failureKinds)[number];
 
-export function retryCanHelpFailureKind(failureKind?: FailureKind) {
+export function canRetryAfterFailure(failureKind?: FailureKind) {
 	return (
 		failureKind === "extract" ||
 		failureKind === "fetch" ||
@@ -56,7 +56,7 @@ export function retryCanHelpFailureKind(failureKind?: FailureKind) {
 	);
 }
 
-export function siteRetryCanHelpFailureKind(failureKind?: FailureKind) {
+export function canBroadenAfterFailure(failureKind?: FailureKind) {
 	return (
 		failureKind === "extract" ||
 		failureKind === "fetch" ||

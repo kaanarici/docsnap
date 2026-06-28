@@ -1,11 +1,11 @@
 import { buildPipelineConfig, nextCaptureMax } from "../core/config.ts";
 import { runPipeline } from "../core/pipeline.ts";
 import {
+	canBroadenAfterFailure,
+	canRetryAfterFailure,
 	type PipelineConfig,
 	type RunSummary,
-	retryCanHelpFailureKind,
 	runSucceeded,
-	siteRetryCanHelpFailureKind,
 } from "../core/types.ts";
 import {
 	canonicalUrlSearch,
@@ -51,7 +51,7 @@ const topPagesLimit = 10;
 const autoSiteCap = 25;
 const defaultSnippets = 8;
 
-export class IncompatibleExistingCorpusError extends Error {
+export class CorpusMismatchError extends Error {
 	constructor(
 		readonly outputDir: string,
 		readonly existingSeedUrl: string,
@@ -60,7 +60,7 @@ export class IncompatibleExistingCorpusError extends Error {
 		super(
 			`Existing corpus at ${outputDir} was captured from ${existingSeedUrl} and does not contain ${requestedSeedUrl}.`,
 		);
-		this.name = "IncompatibleExistingCorpusError";
+		this.name = "CorpusMismatchError";
 	}
 }
 
@@ -213,17 +213,16 @@ async function existingCorpus(
 	try {
 		records = (await readVerifiedManifest(dir, summary)).records;
 	} catch {
-		if (replaceableExistingCorpus(summary, requested, allowReplace))
-			return null;
+		if (canReplaceCorpus(summary, requested, allowReplace)) return null;
 		throw new Error(`Invalid manifest in existing corpus: ${dir}`);
 	}
-	if (reusableCorpus(summary, requested, records)) return summary;
-	return replaceableExistingCorpus(summary, requested, allowReplace)
+	if (canReuseCorpus(summary, requested, records)) return summary;
+	return canReplaceCorpus(summary, requested, allowReplace)
 		? null
-		: rejectIncompatibleExistingCorpus(dir, summary, requested);
+		: throwCorpusMismatch(dir, summary, requested);
 }
 
-export function reusableCorpus(
+export function canReuseCorpus(
 	summary: RunSummary,
 	requested: PipelineConfig,
 	records: CorpusPage[],
@@ -261,7 +260,7 @@ function corpusContainsUrl(
 	);
 }
 
-export function replaceableExistingCorpus(
+export function canReplaceCorpus(
 	summary: RunSummary,
 	requested: PipelineConfig,
 	allowReplace: boolean,
@@ -278,16 +277,12 @@ function sameCaptureMode(summary: RunSummary, requested: PipelineConfig) {
 	return summary.captureMode === (requested.pageOnly ? "page" : "site");
 }
 
-export function rejectIncompatibleExistingCorpus(
+export function throwCorpusMismatch(
 	outputDir: string,
 	summary: RunSummary,
 	requested: PipelineConfig,
 ): never {
-	throw new IncompatibleExistingCorpusError(
-		outputDir,
-		summary.seedUrl,
-		requested.seedUrl,
-	);
+	throw new CorpusMismatchError(outputDir, summary.seedUrl, requested.seedUrl);
 }
 
 function normalizedUrlVariants(raw: string): Set<string> {
@@ -402,10 +397,10 @@ function fetchNextActions(
 				"Search adjacent captured pages only if they are still relevant to the task.",
 			);
 		} else {
-			const canRetry = retryCanHelpFailureKind(summary.seed.failureKind);
+			const canRetry = canRetryAfterFailure(summary.seed.failureKind);
 			const canTrySite =
 				summary.captureMode === "page" &&
-				siteRetryCanHelpFailureKind(summary.seed.failureKind);
+				canBroadenAfterFailure(summary.seed.failureKind);
 			if (canRetry) {
 				actions.push(
 					`Retry after inspecting with docsnap_fetch ${JSON.stringify(fetchArgs(summary, summary.captureMode === "site" ? summary.max : undefined, question))}.`,

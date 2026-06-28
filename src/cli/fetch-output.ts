@@ -1,20 +1,14 @@
 import { join } from "node:path";
 import { nextCaptureMax } from "../core/config.ts";
 import { countLabel, shellArg } from "../core/text.ts";
-import {
-	retryCanHelpFailureKind,
-	siteRetryCanHelpFailureKind,
-} from "../core/types.ts";
+import { canBroadenAfterFailure, canRetryAfterFailure } from "../core/types.ts";
 import { siteDiscoverySeedUrl } from "../core/url.ts";
-import type {
-	IncompatibleExistingCorpusError,
-	runFetchTool,
-} from "../mcp/fetch.ts";
+import type { CorpusMismatchError, runFetchTool } from "../mcp/fetch.ts";
 import {
 	corpusFilesCommand,
+	corpusMismatchCommands,
 	expandLinesCommand,
 	fetchCorpusCommand,
-	incompatibleFetchCommands,
 	rawSearchCommand,
 	refreshCorpusCommand,
 	searchCorpusCommand,
@@ -27,12 +21,12 @@ type FetchCitation = FetchWithCitations["citations"][number];
 type FetchWithTopPages = Extract<FetchResult, { top_pages: unknown[] }>;
 type FetchTopPage = FetchWithTopPages["top_pages"][number];
 
-export function writeIncompatibleCorpusError(
-	error: IncompatibleExistingCorpusError,
+export function writeCorpusMismatchError(
+	error: CorpusMismatchError,
 	input: FetchInput,
 ) {
 	const scope = repeatScope(input);
-	const commands = incompatibleFetchCommands({
+	const commands = corpusMismatchCommands({
 		url: input.url,
 		outputDir: error.outputDir,
 		...(input.question ? { question: input.question } : {}),
@@ -397,11 +391,11 @@ function skippedPageCount(result: FetchResult) {
 }
 
 function retryCanHelp(result: FetchResult) {
-	return retryCanHelpFailureKind(result.corpus.seed_status.failure_kind);
+	return canRetryAfterFailure(result.corpus.seed_status.failure_kind);
 }
 
 function siteFetchCanHelp(result: FetchResult) {
-	return siteRetryCanHelpFailureKind(result.corpus.seed_status.failure_kind);
+	return canBroadenAfterFailure(result.corpus.seed_status.failure_kind);
 }
 
 function hasTopPages(result: FetchResult): result is FetchWithTopPages {

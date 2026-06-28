@@ -1,10 +1,7 @@
 import { isAbsolute } from "node:path";
 import { nextCaptureMax } from "../core/config.ts";
 import { countLabel } from "../core/text.ts";
-import {
-	retryCanHelpFailureKind,
-	siteRetryCanHelpFailureKind,
-} from "../core/types.ts";
+import { canBroadenAfterFailure, canRetryAfterFailure } from "../core/types.ts";
 import { listCorpora } from "../mcp/corpus.ts";
 import {
 	listCorporaCommand,
@@ -74,23 +71,23 @@ function jsonNextActions(input: ListInput, result: ListResult) {
 				actions.push(
 					`Raw grep captured Markdown with ${commands.raw_search_all}.`,
 				);
-			const firstRead = firstCorpusCommand(result, "read_seed");
+			const firstRead = firstCommand(result, "read_seed");
 			if (firstRead)
 				actions.push(`Read a captured seed page with ${firstRead}.`);
-			const firstFetch = firstCorpusCommand(result, "fetch");
+			const firstFetch = firstCommand(result, "fetch");
 			if (firstFetch)
 				actions.push(`Fetch cited context from a corpus with ${firstFetch}.`);
 			actions.push(...rawSearchAllOmittedActions(result));
 		}
-		const captureMore = firstCorpusCommand(result, "capture_more");
+		const captureMore = firstCommand(result, "capture_more");
 		if (captureMore)
 			actions.push(
 				`Capture more pages for a capped corpus with ${captureMore}.`,
 			);
 		if (result.corpora.some((corpus) => corpus.written === 0)) {
-			const inspectSummary = firstCorpusCommand(result, "inspect_summary");
-			const retry = firstCorpusCommand(result, "retry_capture");
-			const captureSite = firstCorpusCommand(result, "capture_site");
+			const inspectSummary = firstCommand(result, "inspect_summary");
+			const retry = firstCommand(result, "retry_capture");
+			const captureSite = firstCommand(result, "capture_site");
 			actions.push(
 				inspectSummary
 					? `Inspect a zero-page corpus with ${inspectSummary}.`
@@ -118,33 +115,16 @@ type CorpusCommandKey =
 	| "inspect_summary"
 	| "retry_capture"
 	| "capture_site";
+type CorpusCommandMap = Partial<Record<CorpusCommandKey, string>>;
 
-function firstCorpusCommand(
+function firstCommand(
 	result: ListResult,
 	key: CorpusCommandKey,
 ): string | undefined {
 	for (const corpus of result.corpora) {
-		const commands = corpusCommands(corpus);
-		const command = commandByKey(commands, key);
+		const command = (corpusCommands(corpus) as CorpusCommandMap)[key];
 		if (command) return command;
 	}
-	return undefined;
-}
-
-function commandByKey(
-	commands: ReturnType<typeof corpusCommands>,
-	key: CorpusCommandKey,
-) {
-	if (key === "read_seed" && "read_seed" in commands) return commands.read_seed;
-	if (key === "fetch" && "fetch" in commands) return commands.fetch;
-	if (key === "capture_more" && "capture_more" in commands)
-		return commands.capture_more;
-	if (key === "inspect_summary" && "inspect_summary" in commands)
-		return commands.inspect_summary;
-	if (key === "retry_capture" && "retry_capture" in commands)
-		return commands.retry_capture;
-	if (key === "capture_site" && "capture_site" in commands)
-		return commands.capture_site;
 	return undefined;
 }
 
@@ -273,8 +253,8 @@ function corpusCommands(corpus: ListEntry) {
 		...(corpus.seed_output_path
 			? { seedOutputPath: corpus.seed_output_path }
 			: {}),
-		retryCapture: retryCanHelpFailureKind(corpus.seed_failure_kind),
-		siteRetry: siteRetryCanHelpFailureKind(corpus.seed_failure_kind),
+		retryCapture: canRetryAfterFailure(corpus.seed_failure_kind),
+		siteRetry: canBroadenAfterFailure(corpus.seed_failure_kind),
 	});
 }
 

@@ -86,7 +86,7 @@ export function fetchCorpusCommand(
 	return parts.join(" ");
 }
 
-export function incompatibleFetchCommands(input: {
+export function corpusMismatchCommands(input: {
 	url: string;
 	outputDir: string;
 	question?: string;

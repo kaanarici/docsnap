@@ -2,10 +2,10 @@ import { join } from "node:path";
 import { nextCaptureMax } from "../core/config.ts";
 import {
 	type CliOptions,
+	canBroadenAfterFailure,
+	canRetryAfterFailure,
 	type RunSummary,
-	retryCanHelpFailureKind,
 	runSucceeded,
-	siteRetryCanHelpFailureKind,
 } from "../core/types.ts";
 import {
 	inspectSummaryCommand,
@@ -96,7 +96,7 @@ function corpusCommands(summary: RunSummary) {
 		...(summary.seed.outputPath
 			? { seedOutputPath: summary.seed.outputPath }
 			: {}),
-		retryCapture: retryCanHelpFailureKind(summary.seed.failureKind),
-		siteRetry: siteRetryCanHelpFailureKind(summary.seed.failureKind),
+		retryCapture: canRetryAfterFailure(summary.seed.failureKind),
+		siteRetry: canBroadenAfterFailure(summary.seed.failureKind),
 	});
 }
