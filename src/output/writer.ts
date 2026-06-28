@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import {
 	mkdir,
+	readdir,
 	readFile,
 	realpath,
 	rename,
 	rm,
+	rmdir,
 	writeFile,
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -20,27 +22,23 @@ import {
 	isInsideOrSame,
 	realPathIsInside,
 } from "../core/fs-safety.ts";
+import { runBounded } from "../core/parallel.ts";
+import { hashContent } from "../core/snapshot.ts";
 import type {
 	PageOutput,
 	PipelineConfig,
 	RunRecord,
 	RunSummary,
 } from "../core/types.ts";
-import { installAgentFiles } from "./agent-files.ts";
 import { runFiles } from "./files.ts";
-import { manifestLines, summaryJson } from "./manifest.ts";
-import { agentReadme, treeText } from "./readme.ts";
+import { type PriorState, resolvePriorOutputPath } from "./prior.ts";
 
 export type WriteStats = {
 	pageWrites: number;
 	skippedWrites: number;
 };
 
-// The write stage returns new PageOutput values with the measured writeMs settled
-// into timings, alongside the counts. The manifest is built from `outputs`, so the
-// persisted write timing is the value produced by the write rather than a field
-// back-patched onto an already-consumed record.
-export type WriteResult = {
+type WriteResult = {
 	outputs: PageOutput[];
 	stats: WriteStats;
 };
@@ -49,9 +47,6 @@ export async function prepareOutput(config: PipelineConfig): Promise<void> {
 	assertOutputRootSafe(config);
 	if (config.dryRun) return;
 	const outDir = resolve(config.outDir);
-	// validate the path is writable (a relative --out must stay under cwd) BEFORE any
-	// destructive --clean rm; otherwise `--clean --out ../x` deletes ../x and only then
-	// refuses it
 	await assertSafeOutputRoot(outDir, config.outDir);
 	if (config.clean) {
 		assertSafeCleanDir(outDir, config.outDir);
@@ -61,14 +56,23 @@ export async function prepareOutput(config: PipelineConfig): Promise<void> {
 	await assertSafeOutputRoot(outDir, config.outDir);
 }
 
+export async function outputDirHasContent(raw: string): Promise<boolean> {
+	const outDir = resolve(raw);
+	await assertSafeOutputRoot(outDir, raw);
+	try {
+		const entries = await readdir(outDir);
+		return entries.some((entry) => entry !== ".DS_Store");
+	} catch (error) {
+		if (isNotFound(error)) return false;
+		throw error;
+	}
+}
+
 export function assertOutputRootSafe(config: PipelineConfig): void {
 	const outDir = resolve(config.outDir);
 	assertSafeOutputDir(outDir, config.outDir);
 }
 
-// Sibling lock so two concurrent non-dry runs cannot interleave page/manifest/summary
-// writes (or have one `--clean` rm wipe the other) in a shared output directory. It lives
-// outside outDir because `--clean` removes that tree.
 export async function acquireOutputLock(
 	config: PipelineConfig,
 ): Promise<DirLock | undefined> {
@@ -105,39 +109,79 @@ export async function writePages(
 	return { outputs: settled, stats };
 }
 
+export async function removeStalePages(
+	prior: PriorState,
+	outputs: PageOutput[],
+	config: PipelineConfig,
+): Promise<void> {
+	if (config.dryRun || config.clean) return;
+	if (!prior.enabled) return;
+	const current = new Set(outputs.map((record) => record.outputPath));
+	const stale = new Set(
+		prior.records
+			.map((record) => record.outputPath)
+			.filter((path) => !current.has(path)),
+	);
+	if (stale.size === 0) return;
+	const base = await realpath(config.outDir);
+	await runWrites([...stale], (path) => removeStalePage(base, path, config));
+}
+
 export async function writeRunFiles(
 	records: RunRecord[],
-	outputs: PageOutput[],
 	summary: RunSummary,
 	config: PipelineConfig,
 ): Promise<void> {
 	if (config.dryRun) return;
-	if (config.agentFiles)
-		summary.agentFilesUpdated = await installAgentFiles(summary);
-	const files: Array<readonly [file: string, body: string]> = [
-		[runFiles.manifest, manifestLines(records)],
-		[runFiles.summary, summaryJson(summary)],
-		[runFiles.agentReadme, agentReadme(outputs, summary)],
-		[runFiles.tree, treeText(outputs)],
-	];
-	await runWrites(files, ([file, body]) =>
-		atomicWrite(join(config.outDir, file), body, config.outDir),
+	await atomicWrite(
+		join(config.outDir, runFiles.manifest),
+		manifestLines(records),
+		config.outDir,
 	);
+	await atomicWrite(
+		join(config.outDir, runFiles.summary),
+		summaryJson(summary),
+		config.outDir,
+	);
+}
+
+function manifestLines(records: RunRecord[]): string {
+	return `${records.map((record) => JSON.stringify(toManifest(record))).join("\n")}\n`;
+}
+
+function summaryJson(summary: RunSummary): string {
+	return `${JSON.stringify(summary, null, 2)}\n`;
+}
+
+function toManifest(record: RunRecord) {
+	const entry: Record<string, unknown> = { ...record };
+	for (const key of ["markdown", "links", "timings", "rendered"]) {
+		delete entry[key];
+	}
+	if ("rendered" in record) {
+		return compactManifestRecord({
+			...entry,
+			outputHash: hashContent(record.rendered),
+		});
+	}
+	return compactManifestRecord(entry);
+}
+
+function compactManifestRecord(entry: Record<string, unknown>) {
+	for (const [key, value] of Object.entries(entry)) {
+		if (Array.isArray(value) && value.length === 0) delete entry[key];
+	}
+	return entry;
 }
 
 async function runWrites<T>(
 	items: readonly T[],
 	write: (item: T) => Promise<void>,
 ): Promise<void> {
-	let index = 0;
-	await Promise.all(
-		Array.from({ length: Math.min(64, items.length) }, async () => {
-			for (;;) {
-				const item = items[index++];
-				if (!item) return;
-				await write(item);
-			}
-		}),
+	await runBounded(
+		[...items],
+		{ concurrency: 64, perOrigin: 64, key: () => "" },
+		write,
 	);
 }
 
@@ -152,6 +196,42 @@ async function writePage(record: PageOutput, config: PipelineConfig) {
 		wrote,
 		record: { ...record, timings: { ...record.timings, writeMs } },
 	};
+}
+
+async function removeStalePage(
+	base: string,
+	outputPath: string,
+	config: PipelineConfig,
+) {
+	const target = resolvePriorOutputPath(config, outputPath);
+	if (!target) return;
+	let realTarget: string;
+	try {
+		realTarget = await realpath(target);
+	} catch (error) {
+		if (isNotFound(error)) return;
+		throw error;
+	}
+	if (!isInsideOrSame(base, realTarget)) {
+		throw new Error(
+			`Refusing to remove stale page outside output directory: ${outputPath}`,
+		);
+	}
+	await rm(realTarget, { force: true });
+	await pruneEmptyParents(dirname(realTarget), base);
+}
+
+async function pruneEmptyParents(dir: string, base: string) {
+	let current = dir;
+	while (current !== base && isInsideOrSame(base, current)) {
+		try {
+			await rmdir(current);
+		} catch (error) {
+			if (isNotFound(error) || isNotEmpty(error)) return;
+			throw error;
+		}
+		current = dirname(current);
+	}
 }
 
 async function existingBody(path: string) {
@@ -211,4 +291,16 @@ function assertSafeCleanDir(outDir: string, raw: string) {
 
 function assertSafeOutputDir(outDir: string, raw: string) {
 	assertSafeRoot(outDir, `Refusing to use unsafe output directory: ${raw}`);
+}
+
+function isNotFound(error: unknown) {
+	return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+function isNotEmpty(error: unknown) {
+	return (
+		error instanceof Error &&
+		"code" in error &&
+		(error.code === "ENOTEMPTY" || error.code === "EEXIST")
+	);
 }

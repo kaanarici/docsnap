@@ -1,6 +1,6 @@
 import { readFile, realpath, stat } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
-import { isInsideOrSame } from "../core/fs-safety.ts";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { assertSafeRoot, isInsideOrSame } from "../core/fs-safety.ts";
 import { resolvePriorOutputPath } from "../output/prior.ts";
 
 export type McpState = {
@@ -13,7 +13,6 @@ export const corpusLimits = {
 	manifestBytes: 16 * 1024 * 1024,
 	pageBytes: 2 * 1024 * 1024,
 	resourceBytes: 2 * 1024 * 1024,
-	resourceChars: 25_000,
 	searchQueryChars: 500,
 	searchPages: 2_000,
 	searchBytes: 32 * 1024 * 1024,
@@ -22,7 +21,7 @@ export const corpusLimits = {
 	refreshChangedPages: 200,
 };
 
-export class McpReadLimitError extends Error {}
+export class CorpusReadLimitError extends Error {}
 
 export async function readableCorpusDir(
 	outputDir: string,
@@ -30,26 +29,39 @@ export async function readableCorpusDir(
 ): Promise<string> {
 	const target = await realpathOrMessage(
 		outputDir,
-		"output_dir must point to an existing docsnap corpus under the MCP server cwd or one captured by this server session",
+		"output_dir must point to an existing docsnap corpus under the MCP server cwd, a safe absolute path, or one captured by this server session",
 	);
 	const cwd = await realpath(process.cwd());
 	if (isInsideOrSame(cwd, target)) return target;
+	if (isAbsolute(outputDir)) {
+		assertSafeRoot(
+			target,
+			"output_dir must not be a filesystem root, home directory, or protected home directory",
+		);
+		return target;
+	}
 	for (const known of knownCorpora) {
 		const knownReal = await realpathOrUndefined(known);
 		if (knownReal === target) return target;
 	}
 	throw new Error(
-		"output_dir must be under the MCP server cwd or captured by this server session",
+		"output_dir must be under the MCP server cwd, a safe absolute path, or captured by this server session",
 	);
 }
 
-// capture writes (and with clean:true, rm -rf) a target dir; unlike reads the
-// dir need not exist yet, so realpath the deepest existing ancestor (resolving
-// symlinks consistently with cwd) and reattach the missing tail before checking
-// containment — defeats a symlinked ancestor escaping cwd
+// Capture writes can target new dirs, so resolve the deepest existing ancestor
+// before checking containment. This blocks symlinked ancestors from escaping cwd.
 export async function writableCorpusDir(outputDir: string): Promise<string> {
 	const cwd = await realpath(process.cwd());
-	const resolved = await resolveRealPath(resolve(cwd, outputDir));
+	const target = resolve(outputDir);
+	const resolved = await resolveRealPath(target);
+	if (isAbsolute(outputDir)) {
+		assertSafeRoot(
+			resolved,
+			"output_dir must not be a filesystem root, home directory, or protected home directory",
+		);
+		return resolved;
+	}
 	if (!isInsideOrSame(cwd, resolved)) {
 		throw new Error("output_dir must be under the MCP server cwd");
 	}
@@ -69,14 +81,77 @@ export async function readBoundedCorpusFile(
 	outputPath: string,
 	maxBytes: number,
 ): Promise<string> {
+	const base = await realpathOrMessage(outputDir, "output_dir does not exist");
+	return readBoundedCorpusFileFromRealRoot(
+		outputDir,
+		base,
+		outputPath,
+		maxBytes,
+	);
+}
+
+export async function readBoundedCorpusFileFromRealRoot(
+	outputDir: string,
+	realOutputDir: string,
+	outputPath: string,
+	maxBytes: number,
+): Promise<string> {
+	const file = await corpusFileFromRealRoot(
+		outputDir,
+		realOutputDir,
+		outputPath,
+		maxBytes,
+	);
+	try {
+		return await readFile(file, "utf8");
+	} catch (error) {
+		logDiagnostic(error);
+		throw new Error(`Corpus file could not be read: ${outputPath}`);
+	}
+}
+
+export async function assertCorpusFileFromRealRoot(
+	outputDir: string,
+	realOutputDir: string,
+	outputPath: string,
+	maxBytes: number,
+): Promise<void> {
+	await corpusFileFromRealRoot(outputDir, realOutputDir, outputPath, maxBytes);
+}
+
+export async function assertCorpusFiles(
+	outputDir: string,
+	outputPaths: string[],
+	maxBytes: number,
+): Promise<void> {
+	const realOutputDir = await realpathOrMessage(
+		outputDir,
+		"output_dir does not exist",
+	);
+	for (const outputPath of outputPaths) {
+		await assertCorpusFileFromRealRoot(
+			outputDir,
+			realOutputDir,
+			outputPath,
+			maxBytes,
+		);
+	}
+}
+
+async function corpusFileFromRealRoot(
+	outputDir: string,
+	realOutputDir: string,
+	outputPath: string,
+	maxBytes: number,
+): Promise<string> {
 	const target = resolvePriorOutputPath({ outDir: outputDir }, outputPath);
 	if (!target)
 		throw new Error(`Corpus file is not a safe relative path: ${outputPath}`);
-	const [base, file] = await Promise.all([
-		realpathOrMessage(outputDir, "output_dir does not exist"),
-		realpathOrMessage(target, `Corpus file not found: ${outputPath}`),
-	]);
-	if (!isInsideOrSame(base, file)) {
+	const file = await realpathOrMessage(
+		target,
+		`Corpus file not found: ${outputPath}`,
+	);
+	if (!isInsideOrSame(realOutputDir, file)) {
 		throw new Error(`Corpus file is not inside output_dir: ${outputPath}`);
 	}
 	let info: Awaited<ReturnType<typeof stat>>;
@@ -89,16 +164,34 @@ export async function readBoundedCorpusFile(
 	if (!info.isFile())
 		throw new Error(`Corpus path is not a file: ${outputPath}`);
 	if (info.size > maxBytes) {
-		throw new McpReadLimitError(
-			`Corpus file exceeds MCP read limit (${Math.ceil(maxBytes / 1024 / 1024)}MB): ${outputPath}`,
+		throw new CorpusReadLimitError(
+			`Corpus file exceeds read limit (${Math.ceil(maxBytes / 1024 / 1024)}MB): ${outputPath}`,
 		);
 	}
+	return file;
+}
+
+export async function readOptionalCorpusFileFromRealRoot(
+	outputDir: string,
+	realOutputDir: string,
+	outputPath: string,
+	maxBytes: number,
+): Promise<string | null> {
 	try {
-		return await readFile(file, "utf8");
+		return await readBoundedCorpusFileFromRealRoot(
+			outputDir,
+			realOutputDir,
+			outputPath,
+			maxBytes,
+		);
 	} catch (error) {
-		logDiagnostic(error);
-		throw new Error(`Corpus file could not be read: ${outputPath}`);
+		if (optionalCorpusReadError(error)) return null;
+		throw error;
 	}
+}
+
+function optionalCorpusReadError(error: unknown): boolean {
+	return error instanceof Error && error.message.startsWith("Corpus file ");
 }
 
 export function rememberCorpus(state: McpState, outputDir: string): void {

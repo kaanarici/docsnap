@@ -1,11 +1,14 @@
 import { pruneCache } from "../cache/eviction.ts";
 import { cacheSummary } from "../cache/store.ts";
-import { discover } from "../discover/index.ts";
+import { discoverRun } from "../discover/index.ts";
 import { loadRobots, type Robots } from "../discover/robots.ts";
+import { candidateKey } from "../discover/seed.ts";
+import { candidateWindowConfig } from "../discover/topic.ts";
 import { normalizeUrl } from "../discover/url.ts";
 import { extractMany } from "../extract/pool.ts";
 import { fetchMany, fetchText } from "../fetch/fetcher.ts";
 import { filteredNonPageResult } from "../fetch/result.ts";
+import { runFiles } from "../output/files.ts";
 import { rewriteLocalLinks } from "../output/links.ts";
 import { renderPage } from "../output/page.ts";
 import { assignOutputPaths, pathMap } from "../output/paths.ts";
@@ -15,25 +18,28 @@ import {
 	type PriorState,
 	readPriorOutput,
 	recoverPriorPage,
+	resolvePriorOutputPath,
 } from "../output/prior.ts";
 import {
 	acquireOutputLock,
 	assertOutputRootSafe,
+	outputDirHasContent,
 	prepareOutput,
 	releaseOutputLock,
+	removeStalePages,
 	writePages,
 	writeRunFiles,
 } from "../output/writer.ts";
 import { buildSummary } from "../report/summary.ts";
 import { dedupeRecords } from "./dedupe.ts";
 import { applyInlineState } from "./inline-state.ts";
-import { isPageSuccess } from "./records.ts";
 import {
 	type RefreshCounters,
 	refreshCounters,
 	refreshSummary,
 } from "./refresh.ts";
 import { snapshotStats } from "./snapshot.ts";
+import { countLabel } from "./text.ts";
 import type {
 	DiscoveredUrl,
 	FetchedUrl,
@@ -43,8 +49,8 @@ import type {
 	PathedPage,
 	PipelineConfig,
 	PipelineResult,
+	RunRecord,
 } from "./types.ts";
-import { urlWithoutFragmentAndQuery } from "./url.ts";
 
 type Progress = (message: string) => void;
 const backfillExtraLimit = 8;
@@ -67,29 +73,62 @@ async function runLocked(
 	const started = performance.now();
 	let firstPageMs: number | null = null;
 	const prior = await loadPrior(config);
+	if (prior.reason === "invalid_manifest") {
+		throw new Error(
+			`Invalid ${runFiles.manifest} in ${config.outDir}; use a clean capture, fetch with --freshness force, or choose a different -o so raw search cannot mix stale Markdown with the new corpus.`,
+		);
+	}
+	if (
+		prior.reason === "missing_manifest" &&
+		!config.clean &&
+		(await outputDirHasContent(config.outDir))
+	) {
+		throw new Error(
+			`Existing output directory has no valid ${runFiles.manifest}: ${config.outDir}. Use --clean or choose a different -o so raw search cannot mix stale Markdown with the new corpus.`,
+		);
+	}
 	const refresh = refreshCounters();
 	await prepareOutput(config);
 	progress?.("docsnap: discovering");
-	const discovered = await discover(config);
-	progress?.(`docsnap: fetching ${discovered.length} pages`);
+	const discovery = await discoverRun(config);
+	const discovered = discovery.urls;
+	progress?.(`docsnap: fetching ${countLabel(discovered.length, "page")}`);
 	const attempted = [...discovered];
 	const seen = new Set(discovered.map((item) => candidateKey(item.url)));
-	const records = await fetchAndExtract(discovered, config, prior, refresh);
-	progress?.(`docsnap: extracting ${records.length} pages`);
+	const records = await fetchAndExtract(
+		discovered,
+		config,
+		prior,
+		refresh,
+		progress,
+	);
 	let dedupe = dedupeRecords(records);
-	if (shouldBackfill(config, dedupe.records, discovered)) {
-		progress?.("docsnap: backfilling failed pages");
+	let deduped = dedupe.deduped;
+	if (shouldBackfill(config, dedupe.records, discovered, deduped)) {
+		progress?.("docsnap: backfilling page window");
 		const extra = await backfillCandidates(config, seen);
 		if (extra.length > 0) {
 			attempted.push(...extra);
-			const extraRecords = await fetchAndExtract(extra, config, prior, refresh);
-			dedupe = dedupeRecords([...dedupe.records, ...extraRecords]);
+			const extraRecords = await fetchAndExtract(
+				extra,
+				config,
+				prior,
+				refresh,
+				progress,
+			);
+			const backfilled = dedupeRecords([...dedupe.records, ...extraRecords]);
+			deduped += backfilled.deduped;
+			dedupe = backfilled;
 		}
 	}
 	const finalRecords = dedupe.records;
 
 	const candidates = outputCandidates(finalRecords, config);
-	const pathed = assignOutputPaths(candidates);
+	const pathed = preservePriorOutputPaths(
+		assignOutputPaths(candidates),
+		prior,
+		config,
+	);
 	const links = pathMap(pathed);
 	const rewritten = pathed.map((record) => rewriteLocalLinks(record, links));
 	const outputs = await materializeOutputs(rewritten, prior, config);
@@ -112,53 +151,55 @@ async function runLocked(
 	const written = await writePages(outputs, config, () => {
 		firstPageMs ??= performance.now() - started;
 	});
+	await removeStalePages(prior, written.outputs, config);
 	refreshReport.skippedWrites = written.stats.skippedWrites;
 	await pruneCache(config);
-	// Merge the settled outputs (rewritten markdown, settled writeMs, rendered)
-	// back onto the attempted-record list by source identity so the manifest and
-	// the returned records carry the materialized state without any in-place
-	// mutation of the original records.
-	const settled = settledBySource(candidates, written.outputs);
-	const manifestRecords = finalRecords.map(
-		(record) => settled.get(record) ?? record,
-	);
+	const runRecords = recordsForRun(finalRecords, candidates, written.outputs);
 	const summary = buildSummary(
 		finalRecords,
 		written.outputs,
 		config,
 		attempted.length,
-		dedupe.deduped,
+		deduped,
 		snapshot,
 		performance.now() - started,
 		firstPageMs,
 		refreshReport,
 		cacheSummary(config),
+		discovery.seedResource,
 	);
-	await writeRunFiles(manifestRecords, written.outputs, summary, config);
-	return { records: manifestRecords, summary };
+	await writeRunFiles(runRecords, summary, config);
+	return { records: runRecords, summary };
 }
 
-function settledBySource(
+function recordsForRun(
+	records: PageRecord[],
 	candidates: PageSuccess[],
 	outputs: PageOutput[],
-): Map<PageRecord, PageOutput> {
+): RunRecord[] {
 	const map = new Map<PageRecord, PageOutput>();
 	candidates.forEach((source, index) => {
 		const output = outputs[index];
 		if (output) map.set(source, output);
 	});
-	return map;
+	const out: RunRecord[] = [];
+	for (const record of records) {
+		const output = record.ok ? map.get(record) : record;
+		if (output) out.push(output);
+	}
+	return out;
 }
+
 async function fetchAndExtract(
 	discovered: DiscoveredUrl[],
 	config: PipelineConfig,
 	prior: PriorState,
 	refresh: RefreshCounters,
+	progress?: Progress,
 ): Promise<PageRecord[]> {
 	const robotsByOrigin = new Map<string, Robots>();
-	const allowUrl = config.ignoreRobots
-		? undefined
-		: (url: string) => allowedByRobots(url, config, robotsByOrigin);
+	const allowUrl = (url: string) =>
+		allowedByRobots(url, config, robotsByOrigin);
 	const fetched = await fetchMany(
 		discovered,
 		config,
@@ -177,6 +218,9 @@ async function fetchAndExtract(
 		);
 		if (recovered) reused.push(recovered);
 		else extractable.push(rejectNonPageFinal(item));
+	}
+	if (extractable.length) {
+		progress?.(`docsnap: extracting ${countLabel(extractable.length, "page")}`);
 	}
 	const staticRecords = applyInlineState(
 		extractable,
@@ -222,7 +266,6 @@ async function allowedByRobots(
 	config: PipelineConfig,
 	robotsByOrigin: Map<string, Robots>,
 ) {
-	if (config.ignoreRobots) return true;
 	const origin = new URL(url).origin;
 	const robots =
 		robotsByOrigin.get(origin) ?? (await loadRobots(origin, config));
@@ -237,6 +280,7 @@ function mergeRecoveredDiscovery(
 		...recovered,
 		...(item.metadata ?? {}),
 		source: item.source,
+		...(item.wasSeed ? { wasSeed: true as const } : {}),
 	};
 	return renderPage(current) === renderPage(recovered) ? recovered : current;
 }
@@ -244,20 +288,25 @@ function shouldBackfill(
 	config: PipelineConfig,
 	records: PageRecord[],
 	discovered: DiscoveredUrl[],
+	deduped: number,
 ) {
 	return (
 		config.maxExplicit &&
 		!config.pageOnly &&
 		discovered.length >= config.max &&
-		records.filter(isPageSuccess).length < config.max &&
-		records.some((record) => !record.ok && record.failureKind === "empty")
+		records.filter((record) => record.ok).length < config.max &&
+		(deduped > 0 || records.some(backfillableFailure))
+	);
+}
+function backfillableFailure(record: PageRecord) {
+	if (record.ok) return false;
+	if (record.failureKind === "empty") return true;
+	return (
+		record.failureKind === "blocked" && record.error !== "blocked by robots.txt"
 	);
 }
 async function backfillCandidates(config: PipelineConfig, seen: Set<string>) {
-	const discovered = await discover({
-		...config,
-		max: config.max + backfillExtraLimit,
-	});
+	const discovered = (await discoverRun(candidateWindowConfig(config))).urls;
 	const out: DiscoveredUrl[] = [];
 	for (const item of discovered) {
 		const key = candidateKey(item.url);
@@ -269,15 +318,38 @@ async function backfillCandidates(config: PipelineConfig, seen: Set<string>) {
 	return out;
 }
 function outputCandidates(records: PageRecord[], config: PipelineConfig) {
-	const ok = records.filter(isPageSuccess);
+	const ok = records.filter((record): record is PageSuccess => record.ok);
 	return config.maxExplicit ? ok.slice(0, config.max) : ok;
 }
-// The single stage transition where a PathedPage becomes a PageOutput: it settles
-// fetchedAt (preserving the prior run's timestamp when the rendered body is
-// otherwise unchanged on disk) and attaches the canonical `rendered` string in one
-// constructed value. Every downstream consumer reads record.rendered, so the
-// snapshot hash, the written file, and the manifest outputHash are the same bytes
-// by construction rather than by call order.
+
+function preservePriorOutputPaths(
+	records: PathedPage[],
+	prior: PriorState,
+	config: PipelineConfig,
+): PathedPage[] {
+	if (!prior.enabled) return records;
+	const assignedOwners = new Map(
+		records.map((record) => [record.outputPath, record]),
+	);
+	const priorPaths = new Map<PathedPage, string>();
+	const priorCounts = new Map<string, number>();
+	for (const record of records) {
+		const outputPath = prior.find(record)?.outputPath;
+		if (!outputPath || !resolvePriorOutputPath(config, outputPath)) continue;
+		priorPaths.set(record, outputPath);
+		priorCounts.set(outputPath, (priorCounts.get(outputPath) ?? 0) + 1);
+	}
+	return records.map((record) => {
+		const outputPath = priorPaths.get(record);
+		if (!outputPath || priorCounts.get(outputPath) !== 1) return record;
+		const assignedOwner = assignedOwners.get(outputPath);
+		if (assignedOwner && assignedOwner !== record) return record;
+		return outputPath === record.outputPath
+			? record
+			: { ...record, outputPath };
+	});
+}
+
 async function materializeOutputs(
 	records: PathedPage[],
 	prior: PriorState,
@@ -291,11 +363,6 @@ async function materializeOutputs(
 	);
 }
 
-// Pure decision: prefer the prior run's fetchedAt when rendering with it yields a
-// body byte-identical to what is already on disk. Both candidate bodies are
-// computed without mutating the record, so no concurrent reader can observe an
-// intermediate fetchedAt across the disk read, and the winning fetchedAt always
-// matches the winning serialization.
 async function settleRender(
 	record: PathedPage,
 	prior: PriorState,
@@ -318,12 +385,6 @@ async function settleRender(
 		preserved.rendered
 		? preserved
 		: current;
-}
-function candidateKey(raw: string) {
-	const url = new URL(urlWithoutFragmentAndQuery(raw));
-	if (url.pathname !== "/") url.pathname = url.pathname.replace(/\/+$/, "");
-	url.pathname = url.pathname.replace(/\.(?:html?|mdx?|txt)$/i, "");
-	return url.href;
 }
 function rejectNonPageFinal(input: FetchedUrl): FetchedUrl {
 	const { result } = input;
