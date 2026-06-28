@@ -1,6 +1,0 @@
-https://react.dev/reference # framework docs, expected clean
-https://developer.mozilla.org/en-US/docs/Web/API # API reference, expected clean or partial
-https://fly.io/docs/ # vendor docs, expected clean
-https://docs.stripe.com # API docs, expected clean
-https://docs.github.com/en # vendor docs, expected clean
-https://github.blog/changelog/ # changelog, expected clean

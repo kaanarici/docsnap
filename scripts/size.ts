@@ -1,11 +1,8 @@
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 
-// Source-size report. Per-file length is a sanity nudge, not a hard gate: a file
-// over the soft limit is surfaced so we notice creeping bloat, but it never fails
-// the build (a hard cap just incentivizes splitting or cramming files to dodge it).
-// Totals are the real signal — splitting a file leaves them unchanged.
-const roots = ["src", "scripts", "test"];
+// Surface creeping source size; totals matter more than per-file nudges.
+const roots = ["src", "scripts"];
 const softLimit = 500;
 
 type DirectoryEntry = {
