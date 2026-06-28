@@ -78,7 +78,7 @@ export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
 	}
 }
 
-// cheap guard so the feed-root DOM parse only runs for xml-ish responses
+// Fast precheck so the feed-root DOM parse only runs for XML-ish responses
 // or text/plain bodies that start like feed XML
 function shouldCheckFeedResponse(result: FetchResult): boolean {
 	return (
@@ -141,7 +141,7 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 		};
 	}
 
-	// Skip Defuddle only when the cheap structured pass is already substantial,
+	// Skip Defuddle only when the structured pass is already substantial,
 	// high-confidence, and not a shell.
 	const fast = strongStructuredFastPath(
 		document,
@@ -366,8 +366,8 @@ function elementWithText(element: Element | null): Element | undefined {
 
 function renderTextAsset(title: string, body: string, url: string) {
 	const language = languageFromUrl(url);
-	// fence must be longer than the longest backtick run in the body, or it
-	// closes early and strands content (mirrors codeBlock in structured-fallback)
+	// Fence must be longer than the longest backtick run in the body, or it
+	// closes early and splits the rendered block.
 	const fence = "`".repeat(Math.max(3, maxBacktickRun(body) + 1));
 	return `# ${title}\n\n${fence}${language}\n${body.trim()}\n${fence}`;
 }

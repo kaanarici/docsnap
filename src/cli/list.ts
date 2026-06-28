@@ -67,43 +67,40 @@ function jsonNextActions(input: ListInput, result: ListResult) {
 	}
 	if (result.corpora.length > 0) {
 		if (result.corpora.some((corpus) => corpus.written > 0)) {
-			actions.push(
-				"Use commands.search_all for ranked search across this local library.",
-				"Use corpora[].commands.read_seed when present for the first local read.",
-				"Use corpora[].commands.fetch on corpora with pages when you need cited context.",
-			);
-			if (libraryCommands(input, result)?.raw_search_all) {
+			const commands = libraryCommands(input, result);
+			if (commands?.search_all)
+				actions.push(`Search all corpora with ${commands.search_all}.`);
+			if (commands?.raw_search_all)
 				actions.push(
-					"Use commands.raw_search_all for fastest local grep across the listed corpora with pages.",
+					`Raw grep captured Markdown with ${commands.raw_search_all}.`,
 				);
-			}
+			const firstRead = firstCorpusCommand(result, "read_seed");
+			if (firstRead)
+				actions.push(`Read a captured seed page with ${firstRead}.`);
+			const firstFetch = firstCorpusCommand(result, "fetch");
+			if (firstFetch)
+				actions.push(`Fetch cited context from a corpus with ${firstFetch}.`);
 			actions.push(...rawSearchAllOmittedActions(result));
 		}
-		if (
-			result.corpora.some((corpus) => "capture_more" in corpusCommands(corpus))
-		) {
+		const captureMore = firstCorpusCommand(result, "capture_more");
+		if (captureMore)
 			actions.push(
-				"Use corpora[].commands.capture_more when a capped corpus needs broader coverage.",
+				`Capture more pages for a capped corpus with ${captureMore}.`,
 			);
-		}
 		if (result.corpora.some((corpus) => corpus.written === 0)) {
-			const hasRetry = result.corpora.some(
-				(corpus) => "retry_capture" in corpusCommands(corpus),
-			);
+			const inspectSummary = firstCorpusCommand(result, "inspect_summary");
+			const retry = firstCorpusCommand(result, "retry_capture");
+			const captureSite = firstCorpusCommand(result, "capture_site");
 			actions.push(
-				hasRetry
-					? "Use corpora[].commands.inspect_summary for zero-page corpora before retrying."
-					: "Use corpora[].commands.inspect_summary for zero-page corpora before choosing another URL.",
+				inspectSummary
+					? `Inspect a zero-page corpus with ${inspectSummary}.`
+					: "Inspect zero-page corpus summaries before retrying or choosing another URL.",
 			);
-			if (
-				result.corpora.some(
-					(corpus) => "capture_site" in corpusCommands(corpus),
-				)
-			) {
+			if (retry) actions.push(`Retry a zero-page capture with ${retry}.`);
+			if (captureSite)
 				actions.push(
-					"Use corpora[].commands.capture_site when an exact page corpus should be broadened to site discovery.",
+					`Broaden an exact page corpus to site discovery with ${captureSite}.`,
 				);
-			}
 		}
 	}
 	if (result.next_cursor) {
@@ -112,6 +109,43 @@ function jsonNextActions(input: ListInput, result: ListResult) {
 		);
 	}
 	return actions.length ? { next_actions: actions } : {};
+}
+
+type CorpusCommandKey =
+	| "read_seed"
+	| "fetch"
+	| "capture_more"
+	| "inspect_summary"
+	| "retry_capture"
+	| "capture_site";
+
+function firstCorpusCommand(
+	result: ListResult,
+	key: CorpusCommandKey,
+): string | undefined {
+	for (const corpus of result.corpora) {
+		const commands = corpusCommands(corpus);
+		const command = commandByKey(commands, key);
+		if (command) return command;
+	}
+	return undefined;
+}
+
+function commandByKey(
+	commands: ReturnType<typeof corpusCommands>,
+	key: CorpusCommandKey,
+) {
+	if (key === "read_seed" && "read_seed" in commands) return commands.read_seed;
+	if (key === "fetch" && "fetch" in commands) return commands.fetch;
+	if (key === "capture_more" && "capture_more" in commands)
+		return commands.capture_more;
+	if (key === "inspect_summary" && "inspect_summary" in commands)
+		return commands.inspect_summary;
+	if (key === "retry_capture" && "retry_capture" in commands)
+		return commands.retry_capture;
+	if (key === "capture_site" && "capture_site" in commands)
+		return commands.capture_site;
+	return undefined;
 }
 
 function textResult(input: ListInput, result: ListResult) {

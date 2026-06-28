@@ -17,7 +17,7 @@ docsnap/react-dev-reference/
   ...
 ```
 
-docsnap works best on public sites with readable HTML, `llms.txt`, sitemaps, regular links, or extractable inline state.
+docsnap works on public sites with readable HTML, `llms.txt`, sitemaps, regular links, or extractable inline state.
 
 ## Install
 
@@ -95,7 +95,7 @@ MCP resources expose known corpora's `summary.json`, `manifest.jsonl`, and bound
 ## Output
 
 - `manifest.jsonl`: one JSON record per retained attempt, including URLs, output paths, hashes, aliases, and failures when present
-- `summary.json`: machine-readable truth for status, URLs, seed state, counts, failures, quality warnings, redirects, hashes, timing, refresh, and cache
+- `summary.json`: machine-readable run record for status, URLs, seed state, counts, failures, quality warnings, redirects, hashes, timing, refresh, and cache
 - Markdown files: readable page captures with source metadata
 
 Use `rg --files` or `find` when you need the file layout.

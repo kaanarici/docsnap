@@ -48,7 +48,7 @@ function nextActions(summary: RunSummary, ok: boolean) {
 	const commands = corpusCommands(summary);
 	if (!ok) {
 		actions.push(
-			`Inspect run truth with ${inspectSummaryCommand(summary.outDir)}`,
+			`Inspect run record with ${inspectSummaryCommand(summary.outDir)}`,
 		);
 		if (commands && "inspect_summary" in commands) {
 			if ("retry_capture" in commands) {

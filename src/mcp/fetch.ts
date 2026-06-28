@@ -395,7 +395,7 @@ function fetchNextActions(
 	const actions: string[] = [];
 	if (!runSucceeded(summary)) {
 		actions.push(
-			"Inspect docsnap_get_corpus_summary before using this corpus; the requested URL was not captured as trustworthy local Markdown.",
+			"Inspect docsnap_get_corpus_summary before using this corpus; the requested URL was not captured as the seed page.",
 		);
 		if (summary.written > 0) {
 			actions.push(

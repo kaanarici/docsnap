@@ -208,7 +208,7 @@ function scopePartVariants(part: string) {
 	const lower = part.toLowerCase();
 	// the part is a URL path segment (attacker-controllable via the seed); escape
 	// regex metacharacters before building a RegExp so a segment like "(a+)+"
-	// can't trigger catastrophic backtracking, and skip absurdly long segments
+	// can't trigger catastrophic backtracking, and skip overlong segments
 	if (lower.length > 64) return [];
 	const escaped = escapeRegExp(lower).replaceAll("-", "[_-]");
 	const variants = [escaped];

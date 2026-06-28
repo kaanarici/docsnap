@@ -1,7 +1,7 @@
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 
-// Surface creeping source size; totals matter more than per-file nudges.
+// Report source totals and files over the soft limit.
 const roots = ["src", "scripts"];
 const softLimit = 500;
 
@@ -57,7 +57,7 @@ for (const file of largest) console.log(`  ${file.path}: ${file.lines}`);
 const oversized = sizes.filter((file) => file.lines > softLimit);
 if (oversized.length) {
 	console.log(
-		`\nover ${softLimit} lines (a nudge to simplify, not a hard limit):\n${oversized
+		`\nover ${softLimit} lines (soft limit, not a failing check):\n${oversized
 			.map((file) => `  ${file.path}: ${file.lines}`)
 			.join("\n")}`,
 	);

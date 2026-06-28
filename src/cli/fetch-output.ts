@@ -114,7 +114,7 @@ export function textFetchResult(result: FetchResult, input: FetchInput) {
 	}
 	if (!result.ok) {
 		lines.push(
-			"docsnap: no trustworthy corpus for requested URL",
+			"docsnap: requested URL was not captured as the seed page",
 			`docsnap: inspect summary with cat ${shellArg(corpus.paths.summary)}`,
 		);
 		if (corpus.written > 0) {
@@ -260,7 +260,7 @@ function cliNextActions(result: FetchResult, input: FetchInput): string[] {
 	const actions: string[] = [];
 	if (!result.ok) {
 		actions.push(
-			`Fetch did not produce a trustworthy corpus for the requested URL; inspect it with cat ${shellArg(result.corpus.paths.summary)} before using it.`,
+			`The requested URL was not captured as the seed page; inspect ${shellArg(result.corpus.paths.summary)} before using this corpus.`,
 		);
 		if (result.corpus.written > 0) {
 			actions.push(
