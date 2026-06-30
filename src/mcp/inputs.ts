@@ -6,7 +6,7 @@ import { assertSafeProjectRoot } from "./scan.ts";
 // so max_pages does not force maxExplicit.
 
 type FetchScope = "page" | "site" | "auto";
-type Freshness = "reuse" | "refresh" | "force";
+type Freshness = "auto" | "reuse" | "refresh" | "force";
 type Safety = "exclude_injection" | "flag_all";
 type ValidatedValue = string | number | boolean;
 
@@ -236,7 +236,7 @@ export function fetchInput(value: unknown): FetchToolInput {
 		...(v.scope !== undefined ? { scope: v.scope } : {}),
 		...(v.output_dir !== undefined ? { output_dir: v.output_dir } : {}),
 		...(v.max_pages !== undefined ? { max_pages: v.max_pages } : {}),
-		freshness: v.freshness ?? "reuse",
+		freshness: v.freshness ?? "auto",
 		context_chars: v.context_chars ?? 500,
 		safety: v.safety ?? "flag_all",
 	};

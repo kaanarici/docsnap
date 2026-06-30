@@ -7,7 +7,7 @@ const maxListResults = 100;
 const minContextChars = 120;
 const maxContextChars = 1200;
 const fetchScopes = ["page", "site", "auto"] as const;
-const freshnessModes = ["reuse", "refresh", "force"] as const;
+const freshnessModes = ["auto", "reuse", "refresh", "force"] as const;
 const valueFlags = new Set([
 	"-o",
 	"--out",
@@ -53,7 +53,7 @@ Flags:
   -o, --out <dir>           local corpus dir; defaults to docsnap's normal slug
   -m, --max <count>         max pages for site captures; max 500
   --scope <mode>            page, site, or auto; default auto
-  --freshness <mode>        reuse, refresh, or force; default reuse
+  --freshness <mode>        auto, reuse, refresh, or force; default auto
   --context-chars <count>   chars per cited snippet; default 500, max 1200
   --exclude-injection       omit injection-signal pages
   --no-cache                disable the shared fetch cache when capturing or refreshing
@@ -205,7 +205,7 @@ function parseFetchArgs(argv: string[]): ParsedArgs {
 	const fetch: FetchInput = {
 		url: "",
 		scope: "auto",
-		freshness: "reuse",
+		freshness: "auto",
 		contextChars: 500,
 		excludeInjection: false,
 		cache: true,

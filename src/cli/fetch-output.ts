@@ -93,6 +93,7 @@ export function textFetchResult(result: FetchResult, input: FetchInput) {
 	const lines = [
 		`docsnap: ${corpus.action} ${countLabel(corpus.written, "page")} in ${corpus.output_dir}`,
 		`docsnap: status ${corpus.status}; scope ${corpus.scope}; failed ${corpus.failed}`,
+		memoryLine(result),
 	];
 	if (result.limits.max_reached) {
 		const question = resultQuestion(result);
@@ -341,7 +342,7 @@ function fetchCommand(
 		scope?: "page" | "site";
 		url?: string;
 		broadenSeed?: boolean;
-		freshness?: "reuse" | "refresh" | "force";
+		freshness?: "auto" | "reuse" | "refresh" | "force";
 	} = {},
 ) {
 	const url = options.url ?? input.url;
@@ -353,6 +354,23 @@ function fetchCommand(
 		options.maxPages,
 		options.freshness,
 	);
+}
+
+function memoryLine(result: FetchResult) {
+	const memory = result.memory;
+	const age = ageLabel(memory.age_seconds);
+	const stale = memory.stale ? "stale" : "fresh";
+	const prior =
+		"prior_age_seconds" in memory &&
+		typeof memory.prior_age_seconds === "number"
+			? `; prior age ${ageLabel(memory.prior_age_seconds)}`
+			: "";
+	return `docsnap: memory ${memory.requested_freshness} -> ${memory.decision}; ${stale}; age ${age}; stale after ${memory.stale_after_days}d${prior}`;
+}
+
+function ageLabel(seconds: number) {
+	const days = seconds / 86_400;
+	return days >= 1 ? `${days.toFixed(1)}d` : `${Math.max(0, seconds)}s`;
 }
 
 function repeatScope(input: FetchInput) {

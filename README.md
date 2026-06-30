@@ -56,7 +56,7 @@ docsnap https://docs.djangoproject.com/en/stable/
 
 Specific page URLs auto-capture as one page unless `--site` or `-m`/`--max` asks for site discovery. Use an absolute `--out` path for output outside the current directory. With `--json`, captures return artifact paths plus command-oriented `commands` and `next_actions`.
 
-`docsnap fetch <url> "question"` reuses an existing corpus, captures it if missing, and returns cited local Markdown context. Without `--out`, fetch checks `./docsnap` for a reusable corpus before recapturing. `--freshness refresh` re-checks the original seed, and `--freshness force` recaptures.
+`docsnap fetch <url> "question"` resolves a reusable local corpus, captures it if missing, and returns cited local Markdown context. Without `--out`, fetch checks `./docsnap` first. The default `--freshness auto` reuses recent corpora and refreshes stale ones; `reuse` never re-fetches an existing corpus, `refresh` re-checks the original seed, and `force` recaptures.
 
 Use `rg` for raw local search speed. Use `docsnap search` when you want ranked local hits with source URLs, page titles, confidence, line spans, and expand commands. With `--all`, plain words are query text; pass a path-like or existing root first to search outside `./docsnap`.
 

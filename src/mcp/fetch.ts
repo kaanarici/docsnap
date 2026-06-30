@@ -1,4 +1,9 @@
 import { buildPipelineConfig, nextCaptureMax } from "../core/config.ts";
+import {
+	corpusFreshness,
+	corpusIsStale,
+	type FreshnessDecision,
+} from "../core/freshness.ts";
 import { runPipeline } from "../core/pipeline.ts";
 import {
 	canBroadenAfterFailure,
@@ -45,7 +50,6 @@ export type FetchToolDeps = {
 };
 
 export type FetchScope = "page" | "site";
-type FetchAction = "captured" | "refreshed" | "reused";
 
 const topPagesLimit = 10;
 const autoSiteCap = 25;
@@ -82,7 +86,7 @@ export async function runFetchTool(
 		deps,
 		input.freshness === "force",
 	);
-	const action = decideAction(input.freshness, existing !== null);
+	const action = decideAction(input.freshness, existing);
 
 	const summary =
 		action === "reused" && existing
@@ -92,6 +96,7 @@ export async function runFetchTool(
 
 	const ok = runSucceeded(summary);
 	const corpus = corpusInfo(summary, action, outputDir);
+	const memory = corpusFreshness(input.freshness, action, summary, existing);
 	const warnings = mcpWarnings(summary);
 	const limits = {
 		max_pages: summary.max,
@@ -109,6 +114,7 @@ export async function runFetchTool(
 		return {
 			ok,
 			corpus,
+			memory,
 			warnings,
 			limits,
 			question: input.question,
@@ -127,6 +133,7 @@ export async function runFetchTool(
 	return {
 		ok,
 		corpus,
+		memory,
 		warnings,
 		limits,
 		top_pages: await topPages(outputDir, input.url),
@@ -151,7 +158,7 @@ async function capture(
 	input: FetchToolInput,
 	base: PipelineConfig,
 	outputDir: string,
-	action: FetchAction,
+	action: FreshnessDecision,
 	existing: RunSummary | null,
 	deps: FetchToolDeps,
 ): Promise<RunSummary> {
@@ -183,9 +190,11 @@ function refreshConfig(
 
 function decideAction(
 	freshness: FetchToolInput["freshness"],
-	hasCorpus: boolean,
-): FetchAction {
-	if (!hasCorpus) return "captured";
+	existing: RunSummary | null,
+): FreshnessDecision {
+	if (!existing) return "captured";
+	if (freshness === "auto")
+		return corpusIsStale(existing) ? "refreshed" : "reused";
 	if (freshness === "reuse") return "reused";
 	if (freshness === "refresh") return "refreshed";
 	return "captured";
@@ -269,12 +278,8 @@ export function canReplaceCorpus(
 		allowReplace ||
 		!runSucceeded(summary) ||
 		(summary.seedUrl === requested.seedUrl &&
-			sameCaptureMode(summary, requested))
+			summary.captureMode === (requested.pageOnly ? "page" : "site"))
 	);
-}
-
-function sameCaptureMode(summary: RunSummary, requested: PipelineConfig) {
-	return summary.captureMode === (requested.pageOnly ? "page" : "site");
 }
 
 export function throwCorpusMismatch(
@@ -365,7 +370,7 @@ function resolveScope(input: FetchToolInput): FetchScope {
 
 function corpusInfo(
 	summary: RunSummary,
-	action: FetchAction,
+	action: FreshnessDecision,
 	outputDir: string,
 ) {
 	const { paths, ...corpus } = mcpCorpusInfo(summary, { outputDir });

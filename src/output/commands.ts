@@ -76,7 +76,7 @@ export function fetchCorpusCommand(
 	scope?: "page" | "site",
 	question?: string,
 	maxPages?: number,
-	freshness?: "reuse" | "refresh" | "force",
+	freshness?: "auto" | "reuse" | "refresh" | "force",
 ) {
 	const parts = ["docsnap", "fetch", shellArg(url), "-o", shellArg(corpusDir)];
 	if (scope) parts.push("--scope", scope);
