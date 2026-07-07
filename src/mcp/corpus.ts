@@ -1,5 +1,6 @@
-import { realpath } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { realpath, stat } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
+import { runBounded } from "../core/parallel.ts";
 import {
 	type DiscoverySource,
 	discoverySources,
@@ -63,8 +64,14 @@ type SearchOptions = {
 };
 
 type ManifestJson = Partial<Record<keyof CorpusPage, unknown>>;
+type VerifiedManifest = { summary: RunSummary; records: CorpusPage[] };
 
 const globCache = new Map<string, Bun.Glob>();
+const manifestCache = new Map<
+	string,
+	{ stamp: string; value: VerifiedManifest }
+>();
+const manifestCacheMax = 16;
 
 export async function readSummary(outputDir: string): Promise<RunSummary> {
 	const text = await readBoundedCorpusFile(
@@ -143,6 +150,29 @@ export async function readVerifiedManifest(
 	return { summary: current, records };
 }
 
+async function manifestStamp(outputDir: string): Promise<string> {
+	const [summaryInfo, manifestInfo] = await Promise.all([
+		stat(join(outputDir, runFiles.summary)),
+		stat(join(outputDir, runFiles.manifest)),
+	]);
+	return `${summaryInfo.mtimeMs}:${summaryInfo.size}:${manifestInfo.mtimeMs}:${manifestInfo.size}`;
+}
+
+export async function cachedVerifiedManifest(
+	outputDir: string,
+): Promise<VerifiedManifest> {
+	const stamp = await manifestStamp(outputDir);
+	const hit = manifestCache.get(outputDir);
+	if (hit && hit.stamp === stamp) return hit.value;
+	const value = await readVerifiedManifest(outputDir);
+	if (manifestCache.size >= manifestCacheMax) {
+		const oldest = manifestCache.keys().next().value;
+		if (oldest !== undefined) manifestCache.delete(oldest);
+	}
+	manifestCache.set(outputDir, { stamp, value });
+	return value;
+}
+
 export async function listCorpora(
 	rootDir: string,
 	pageSize: number,
@@ -154,16 +184,23 @@ export async function listCorpora(
 	const dirs = new Set<string>(extraCorpora);
 	const scanned = await scanCorpora(rootDir, maxAllSearchScannedDirs, options);
 	for (const dir of scanned.dirs) dirs.add(dir);
-	const corpora: ReturnType<typeof corpusListEntry>[] = [];
-	let corporaSkipped = scanned.skipped;
-	for (const outputDir of dirs) {
-		try {
-			const { summary } = await readVerifiedManifest(outputDir);
-			corpora.push(corpusListEntry(summary, outputDir));
-		} catch {
-			corporaSkipped++;
-		}
-	}
+	const dirList = [...dirs];
+	const entries = await runBounded(
+		dirList,
+		{ concurrency: 8, perOrigin: 1, key: (dir) => dir },
+		async (outputDir) => {
+			try {
+				const { summary } = await cachedVerifiedManifest(outputDir);
+				return corpusListEntry(summary, outputDir);
+			} catch {
+				return undefined;
+			}
+		},
+	);
+	const corpora = entries.filter(
+		(entry): entry is ReturnType<typeof corpusListEntry> => entry !== undefined,
+	);
+	const corporaSkipped = scanned.skipped + (dirList.length - corpora.length);
 	corpora.sort(
 		(left, right) =>
 			right.generated_at.localeCompare(left.generated_at) ||
@@ -197,7 +234,7 @@ export async function getCorpusSummary(
 	outputDir: string,
 	options: SummaryOptions,
 ) {
-	const { summary } = await readVerifiedManifest(outputDir);
+	const { summary } = await cachedVerifiedManifest(outputDir);
 	const { paths, ...corpus } = mcpCorpusInfo(summary, { outputDir });
 	return {
 		corpus: {
@@ -226,7 +263,7 @@ export async function listPages(
 	includeFailures: boolean,
 ) {
 	const offset = decodeCursor(cursor);
-	const records = (await readVerifiedManifest(outputDir)).records.filter(
+	const records = (await cachedVerifiedManifest(outputDir)).records.filter(
 		(record) => includeFailures || (record.ok && record.outputPath),
 	);
 	const pages = records.slice(offset, offset + pageSize).map((record) => ({
@@ -262,7 +299,7 @@ export async function searchCorpus(outputDir: string, options: SearchOptions) {
 		);
 	}
 	const records = (
-		options.records ?? (await readVerifiedManifest(outputDir)).records
+		options.records ?? (await cachedVerifiedManifest(outputDir)).records
 	).filter(
 		(record) =>
 			record.ok &&
@@ -345,7 +382,7 @@ export async function readPageSlice(
 	outputPath: string,
 	options: ReadSliceOptions,
 ) {
-	const record = (await readVerifiedManifest(outputDir)).records.find(
+	const record = (await cachedVerifiedManifest(outputDir)).records.find(
 		(item): item is CorpusPage & { outputPath: string } =>
 			item.ok && item.outputPath === outputPath,
 	);
