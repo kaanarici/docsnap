@@ -67,6 +67,21 @@ export function canBroadenAfterFailure(failureKind?: FailureKind) {
 	);
 }
 
+export type FailureRecovery = {
+	retry: boolean;
+	broaden: boolean;
+	giveUp: boolean;
+};
+
+export function resolveFailureRecovery(
+	failureKind: FailureKind | undefined,
+	captureMode: "page" | "site",
+): FailureRecovery {
+	const retry = canRetryAfterFailure(failureKind);
+	const broaden = captureMode === "page" && canBroadenAfterFailure(failureKind);
+	return { retry, broaden, giveUp: !retry && !broaden };
+}
+
 export const injectionSignals = [
 	"zero-width-text",
 	"unicode-tag-text",

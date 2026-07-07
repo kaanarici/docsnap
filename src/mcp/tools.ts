@@ -2,10 +2,9 @@ import { citationId } from "../core/citation.ts";
 import { buildPipelineConfig, nextCaptureMax } from "../core/config.ts";
 import { runPipeline } from "../core/pipeline.ts";
 import {
-	canBroadenAfterFailure,
-	canRetryAfterFailure,
 	type PipelineConfig,
 	type RunSummary,
+	resolveFailureRecovery,
 } from "../core/types.ts";
 import { siteDiscoverySeedUrl } from "../core/url.ts";
 import {
@@ -196,26 +195,21 @@ function summaryNextActions(result: SummaryResult, outputDir: string) {
 		);
 	} else {
 		const failureKind = result.corpus.seed_status.failure_kind;
-		if (canRetryAfterFailure(failureKind)) {
+		const recovery = resolveFailureRecovery(
+			failureKind,
+			result.corpus.capture_mode,
+		);
+		if (recovery.retry) {
 			actions.push(
 				`No Markdown pages were captured; retry from the seed with docsnap_capture ${JSON.stringify(mcpCaptureArgs({ seedUrl: result.corpus.seed_url, outputDir, captureMode: result.corpus.capture_mode, maxPages: result.limits.max_pages }))}.`,
 			);
 		}
-		if (
-			result.corpus.capture_mode === "page" &&
-			canBroadenAfterFailure(failureKind)
-		) {
+		if (recovery.broaden) {
 			actions.push(
 				`If the exact page URL is too narrow, try site discovery with docsnap_capture ${JSON.stringify(mcpCaptureArgs({ seedUrl: siteDiscoverySeedUrl(result.corpus.seed_url), outputDir, captureMode: "site", maxPages: result.limits.max_pages }))}.`,
 			);
 		}
-		if (
-			!canRetryAfterFailure(failureKind) &&
-			!(
-				result.corpus.capture_mode === "page" &&
-				canBroadenAfterFailure(failureKind)
-			)
-		) {
+		if (recovery.giveUp) {
 			actions.push(
 				"No Markdown pages were captured; choose another reachable public docs URL after inspecting the failure kind.",
 			);

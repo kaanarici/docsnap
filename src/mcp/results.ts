@@ -3,11 +3,10 @@ import { join } from "node:path";
 import { citationId } from "../core/citation.ts";
 import { nextCaptureMax } from "../core/config.ts";
 import {
-	canBroadenAfterFailure,
-	canRetryAfterFailure,
 	type InjectionSignal,
 	type RunSummary,
 	type RunWarning,
+	resolveFailureRecovery,
 	runSucceeded,
 } from "../core/types.ts";
 import { siteDiscoverySeedUrl } from "../core/url.ts";
@@ -290,30 +289,25 @@ function nextActions(summary: RunSummary): string[] {
 			"Use docsnap_search_corpus to find relevant pages, then docsnap_read_page for bounded page text.",
 		);
 	} else {
-		if (canRetryAfterFailure(summary.seed.failureKind)) {
+		const recovery = resolveFailureRecovery(
+			summary.seed.failureKind,
+			summary.captureMode,
+		);
+		if (recovery.retry) {
 			actions.push(
 				`No Markdown pages were captured; inspect failures, then retry with docsnap_capture ${JSON.stringify(
 					summaryCaptureArgs(summary),
 				)}.`,
 			);
 		}
-		if (
-			summary.captureMode === "page" &&
-			canBroadenAfterFailure(summary.seed.failureKind)
-		) {
+		if (recovery.broaden) {
 			actions.push(
 				`If the exact page URL is too narrow, try site discovery with docsnap_capture ${JSON.stringify(
 					summarySiteCaptureArgs(summary),
 				)}.`,
 			);
 		}
-		if (
-			!canRetryAfterFailure(summary.seed.failureKind) &&
-			!(
-				summary.captureMode === "page" &&
-				canBroadenAfterFailure(summary.seed.failureKind)
-			)
-		) {
+		if (recovery.giveUp) {
 			actions.push(
 				"No Markdown pages were captured; choose another reachable public docs URL after inspecting the failure kind.",
 			);

@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { nextCaptureMax } from "../core/config.ts";
 import { countLabel, shellArg } from "../core/text.ts";
-import { canBroadenAfterFailure, canRetryAfterFailure } from "../core/types.ts";
+import { resolveFailureRecovery } from "../core/types.ts";
 import { siteDiscoverySeedUrl } from "../core/url.ts";
 import type { CorpusMismatchError, runFetchTool } from "../mcp/fetch.ts";
 import {
@@ -118,20 +118,21 @@ export function textFetchResult(result: FetchResult, input: FetchInput) {
 			);
 		} else {
 			const question = resultQuestion(result);
-			if (retryCanHelp(result)) {
+			const recovery = resolveFailureRecovery(
+				corpus.seed_status.failure_kind,
+				corpus.scope,
+			);
+			if (recovery.retry) {
 				lines.push(
 					`docsnap: retry same fetch with ${fetchCommand(result, input, { ...(question ? { question } : {}) })}`,
 				);
 			}
-			if (corpus.scope === "page" && siteFetchCanHelp(result)) {
+			if (recovery.broaden) {
 				lines.push(
 					`docsnap: if this page is too narrow, run ${fetchCommand(result, input, { ...(question ? { question } : {}), scope: "site", broadenSeed: true, freshness: "force" })}`,
 				);
 			}
-			if (
-				!retryCanHelp(result) &&
-				!(corpus.scope === "page" && siteFetchCanHelp(result))
-			) {
+			if (recovery.giveUp) {
 				lines.push("docsnap: choose another reachable public docs URL");
 			}
 		}
@@ -193,16 +194,20 @@ function cliCommands(result: FetchResult, input: FetchInput) {
 	const question = resultQuestion(result);
 	const nextMax = nextCaptureMax(result.limits.max_pages);
 	if (result.corpus.written === 0) {
+		const recovery = resolveFailureRecovery(
+			result.corpus.seed_status.failure_kind,
+			result.corpus.scope,
+		);
 		return {
 			inspect_summary: `cat ${shellArg(result.corpus.paths.summary)}`,
-			...(retryCanHelp(result)
+			...(recovery.retry
 				? {
 						retry_fetch: fetchCommand(result, input, {
 							question: question ?? "<question>",
 						}),
 					}
 				: {}),
-			...(result.corpus.scope === "page" && siteFetchCanHelp(result)
+			...(recovery.broaden
 				? {
 						fetch_site: fetchCommand(result, input, {
 							question: question ?? "<question>",
@@ -263,20 +268,21 @@ function cliNextActions(result: FetchResult, input: FetchInput): string[] {
 			);
 		} else {
 			const question = resultQuestion(result);
-			if (retryCanHelp(result)) {
+			const recovery = resolveFailureRecovery(
+				result.corpus.seed_status.failure_kind,
+				result.corpus.scope,
+			);
+			if (recovery.retry) {
 				actions.push(
 					`Retry the same fetch after inspecting with ${fetchCommand(result, input, { ...(question ? { question } : {}) })}`,
 				);
 			}
-			if (result.corpus.scope === "page" && siteFetchCanHelp(result)) {
+			if (recovery.broaden) {
 				actions.push(
 					`If this page URL is too narrow, run ${fetchCommand(result, input, { ...(question ? { question } : {}), scope: "site", broadenSeed: true, freshness: "force" })}`,
 				);
 			}
-			if (
-				!retryCanHelp(result) &&
-				!(result.corpus.scope === "page" && siteFetchCanHelp(result))
-			) {
+			if (recovery.giveUp) {
 				actions.push("Choose another reachable public docs URL.");
 			}
 		}
@@ -406,14 +412,6 @@ function skippedPageCount(result: FetchResult) {
 	return "pages_skipped" in result && typeof result.pages_skipped === "number"
 		? result.pages_skipped
 		: 0;
-}
-
-function retryCanHelp(result: FetchResult) {
-	return canRetryAfterFailure(result.corpus.seed_status.failure_kind);
-}
-
-function siteFetchCanHelp(result: FetchResult) {
-	return canBroadenAfterFailure(result.corpus.seed_status.failure_kind);
 }
 
 function hasTopPages(result: FetchResult): result is FetchWithTopPages {
