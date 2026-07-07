@@ -32,7 +32,11 @@ export const toolDefinitions: ToolDefinition[] = [
 			additionalProperties: false,
 			required: ["url"],
 			properties: {
-				url: { type: "string", description: "Public http(s) URL to fetch." },
+				url: {
+					type: "string",
+					maxLength: 2048,
+					description: "Public http(s) URL to fetch.",
+				},
 				question: {
 					type: "string",
 					minLength: 1,
@@ -49,6 +53,7 @@ export const toolDefinitions: ToolDefinition[] = [
 				},
 				output_dir: {
 					type: "string",
+					maxLength: 1024,
 					description:
 						"Local corpus output directory. Relative paths resolve under the MCP server cwd; safe absolute paths are allowed. Defaults to docsnap's normal slug under ./docsnap/.",
 				},
@@ -86,9 +91,14 @@ export const toolDefinitions: ToolDefinition[] = [
 			additionalProperties: false,
 			required: ["url"],
 			properties: {
-				url: { type: "string", description: "Public http(s) URL to capture." },
+				url: {
+					type: "string",
+					maxLength: 2048,
+					description: "Public http(s) URL to capture.",
+				},
 				output_dir: {
 					type: "string",
+					maxLength: 1024,
 					description:
 						"Local corpus output directory. Relative paths resolve under the MCP server cwd; safe absolute paths are allowed. Defaults to docsnap's normal slug under ./docsnap/.",
 				},
@@ -125,6 +135,7 @@ export const toolDefinitions: ToolDefinition[] = [
 			properties: {
 				output_dir: {
 					type: "string",
+					maxLength: 1024,
 					description: "Existing docsnap corpus directory.",
 				},
 				max_pages: { type: "integer", minimum: 1, maximum: 500 },
@@ -142,6 +153,7 @@ export const toolDefinitions: ToolDefinition[] = [
 			properties: {
 				root_dir: {
 					type: "string",
+					maxLength: 1024,
 					default: "docsnap",
 					description:
 						"Relative directory under the current working directory to scan.",
@@ -160,7 +172,7 @@ export const toolDefinitions: ToolDefinition[] = [
 			additionalProperties: false,
 			required: ["output_dir"],
 			properties: {
-				output_dir: { type: "string" },
+				output_dir: { type: "string", maxLength: 1024 },
 				include_errors: { type: "boolean", default: true },
 				include_refresh_changes: { type: "boolean", default: true },
 				error_limit: { type: "integer", minimum: 0, maximum: 100, default: 10 },
@@ -176,7 +188,7 @@ export const toolDefinitions: ToolDefinition[] = [
 			additionalProperties: false,
 			required: ["output_dir"],
 			properties: {
-				output_dir: { type: "string" },
+				output_dir: { type: "string", maxLength: 1024 },
 				page_size: { type: "integer", minimum: 1, maximum: 200, default: 50 },
 				cursor: { type: "string" },
 				include_failures: { type: "boolean", default: false },
@@ -192,7 +204,7 @@ export const toolDefinitions: ToolDefinition[] = [
 			additionalProperties: false,
 			required: ["output_dir", "query"],
 			properties: {
-				output_dir: { type: "string" },
+				output_dir: { type: "string", maxLength: 1024 },
 				query: { type: "string", minLength: 1, maxLength: 500 },
 				path_glob: {
 					type: "string",
@@ -224,9 +236,10 @@ export const toolDefinitions: ToolDefinition[] = [
 			additionalProperties: false,
 			required: ["output_dir", "output_path"],
 			properties: {
-				output_dir: { type: "string" },
+				output_dir: { type: "string", maxLength: 1024 },
 				output_path: {
 					type: "string",
+					maxLength: 1024,
 					description:
 						"Relative Markdown path from manifest.jsonl, for example guide/install.md.",
 				},
@@ -262,7 +275,7 @@ export const toolDefinitions: ToolDefinition[] = [
 			additionalProperties: false,
 			required: ["output_dir", "query"],
 			properties: {
-				output_dir: { type: "string" },
+				output_dir: { type: "string", maxLength: 1024 },
 				query: { type: "string", minLength: 1, maxLength: 500 },
 				max_snippets: { type: "integer", minimum: 1, maximum: 25, default: 8 },
 				context_chars: {

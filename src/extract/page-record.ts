@@ -101,6 +101,7 @@ export function recordFromExtracted(
 	}
 	const injectionSignals = uniqueSignals([
 		...rawSignals,
+		...(title ? scanMarkdownForInjectionSignals(title) : []),
 		...scanMarkdownForInjectionSignals(extracted.markdown),
 		...scanMarkdownForInjectionSignals(markdown),
 	]);
