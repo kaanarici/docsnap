@@ -28,10 +28,6 @@ export function countLabel(count: number, singular: string, plural?: string) {
 	return `${count} ${count === 1 ? singular : (plural ?? `${singular}s`)}`;
 }
 
-export function shellArg(value: string) {
-	return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
 export const invisibleTextPattern =
 	"(?:\\u034f|\\p{Variation_Selector}|[\\u00ad\\u115f\\u1160\\u180e\\u200b-\\u200d\\u2060-\\u2064\\u2800\\u3164\\ufeff\\uffa0])";
 

@@ -51,16 +51,6 @@ export function looksLikeSpecificContentUrl(raw: string): boolean {
 	);
 }
 
-export function siteDiscoverySeedUrl(raw: string): string {
-	const url = new URL(raw);
-	url.hash = "";
-	url.search = "";
-	const parts = url.pathname.split("/").filter(Boolean);
-	if (parts.length > 0) parts.pop();
-	url.pathname = parts.length ? `/${parts.join("/")}/` : "/";
-	return url.href;
-}
-
 export function scopeFromFeedResource(seed: string): string {
 	const url = new URL(seed);
 	if (url.searchParams.has("feed")) {

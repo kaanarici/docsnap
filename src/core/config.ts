@@ -66,11 +66,6 @@ export function buildPipelineConfig(input: ConfigInput): PipelineConfig {
 	};
 }
 
-export function nextCaptureMax(currentMax: number) {
-	if (currentMax >= maxGeneratedCapturePages) return undefined;
-	return Math.min(currentMax * 2, maxGeneratedCapturePages);
-}
-
 export function captureSelectionTerms(topic?: string) {
 	return [
 		...new Set(

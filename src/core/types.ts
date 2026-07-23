@@ -47,41 +47,6 @@ export const failureKinds = [
 
 export type FailureKind = (typeof failureKinds)[number];
 
-export function canRetryAfterFailure(failureKind?: FailureKind) {
-	return (
-		failureKind === "extract" ||
-		failureKind === "fetch" ||
-		failureKind === "http" ||
-		failureKind === "timeout"
-	);
-}
-
-export function canBroadenAfterFailure(failureKind?: FailureKind) {
-	return (
-		failureKind === "extract" ||
-		failureKind === "fetch" ||
-		failureKind === "http" ||
-		failureKind === "not_found" ||
-		failureKind === "timeout" ||
-		failureKind === "too_large"
-	);
-}
-
-export type FailureRecovery = {
-	retry: boolean;
-	broaden: boolean;
-	giveUp: boolean;
-};
-
-export function resolveFailureRecovery(
-	failureKind: FailureKind | undefined,
-	captureMode: "page" | "site",
-): FailureRecovery {
-	const retry = canRetryAfterFailure(failureKind);
-	const broaden = captureMode === "page" && canBroadenAfterFailure(failureKind);
-	return { retry, broaden, giveUp: !retry && !broaden };
-}
-
 export const injectionSignals = [
 	"zero-width-text",
 	"unicode-tag-text",

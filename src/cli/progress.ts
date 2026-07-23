@@ -1,18 +1,6 @@
 import { join } from "node:path";
-import { nextCaptureMax } from "../core/config.ts";
-import { countLabel, shellArg } from "../core/text.ts";
-import { type RunSummary, resolveFailureRecovery } from "../core/types.ts";
-import {
-	captureMoreCommand,
-	captureSiteCommand,
-	corpusFilesCommand,
-	expandLinesCommand,
-	fetchCorpusCommand,
-	rawSearchCommand,
-	refreshCorpusCommand,
-	retryCaptureCommand,
-	searchCorpusCommand,
-} from "../output/commands.ts";
+import { countLabel } from "../core/text.ts";
+import type { RunSummary } from "../core/types.ts";
 import { runFiles } from "../output/files.ts";
 
 export function logLine(message: string): void {
@@ -31,13 +19,12 @@ export function printSummary(summary: RunSummary): void {
 		);
 	}
 	if (summary.maxReached) {
-		const nextMax = nextCaptureMax(summary.max);
-		if (nextMax !== undefined) {
-			logLine(
-				`docsnap: page limit reached; run ${captureMoreCommand(summary.seedUrl, summary.outDir, summary.captureMode, nextMax)} for more`,
-			);
-		}
+		logLine(`docsnap: page limit ${summary.max} reached`);
 	}
+	const assetWarning = summary.warnings.find(
+		(warning) => warning.kind === "asset_recovery_truncated",
+	);
+	if (assetWarning) logLine(`docsnap: warning ${assetWarning.message}`);
 	if (summary.failed || summary.lowQuality) {
 		const notFound = summary.byFailureKind.not_found ?? 0;
 		const failed = summary.failed - notFound;
@@ -61,56 +48,16 @@ export function printSummary(summary: RunSummary): void {
 	if (!summary.dryRun) {
 		logLine(`docsnap: summary ${artifactPath(summary, runFiles.summary)}`);
 		logLine(`docsnap: manifest ${artifactPath(summary, runFiles.manifest)}`);
-		if (summary.written === 0) {
-			logLine(
-				`docsnap: inspect with cat ${shellArg(artifactPath(summary, runFiles.summary))}`,
-			);
-			const recovery = resolveFailureRecovery(
-				summary.seed.failureKind,
-				summary.captureMode,
-			);
-			if (recovery.retry) {
-				logLine(`docsnap: retry with ${retryCommand(summary)}`);
-			}
-			if (recovery.broaden) {
-				logLine(
-					`docsnap: try site with ${captureSiteCommand(summary.seedUrl, summary.outDir, summary.max)}`,
-				);
-			}
-			if (recovery.giveUp) {
-				logLine("docsnap: choose another reachable public docs URL");
-			}
-		} else {
-			logLine(`docsnap: files with ${corpusFilesCommand(summary.outDir)}`);
-			if (summary.seed.outputPath) {
-				logLine(
-					`docsnap: read seed with ${expandLinesCommand(join(summary.outDir, summary.seed.outputPath), 1, 200)}`,
-				);
-			}
-			logLine(`docsnap: raw search with ${rawSearchCommand(summary.outDir)}`);
-			logLine(
-				`docsnap: fetch with ${fetchCorpusCommand(summary.seedUrl, summary.outDir, summary.captureMode, "<question>")}`,
-			);
-			logLine(`docsnap: search with ${searchCorpusCommand(summary.outDir)}`);
-			if (!summary.refresh.enabled)
-				logLine(
-					`docsnap: refresh with ${refreshCorpusCommand(summary.outDir)}`,
-				);
-		}
+	}
+	if (summary.seed.failureKind || summary.seed.error) {
+		logLine(
+			`docsnap: seed failure ${summary.seed.failureKind ?? "unknown"}${summary.seed.error ? `: ${summary.seed.error}` : ""}`,
+		);
 	}
 }
 
 function artifactPath(summary: RunSummary, file: string) {
 	return join(outputDir(summary), file);
-}
-
-function retryCommand(summary: RunSummary) {
-	return retryCaptureCommand(
-		summary.seedUrl,
-		summary.outDir,
-		summary.captureMode,
-		summary.max,
-	);
 }
 
 function outputDir(summary: RunSummary) {
