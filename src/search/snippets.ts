@@ -1,4 +1,4 @@
-export type Snippet = { lineStart: number; lineEnd: number; text: string };
+type Snippet = { lineStart: number; lineEnd: number; text: string };
 
 type SnippetDoc = {
 	body: string;

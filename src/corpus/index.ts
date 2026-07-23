@@ -177,7 +177,7 @@ function legacySummary(value: unknown): Partial<RunSummary> | undefined {
 	};
 }
 
-export async function readManifest(
+async function readManifest(
 	outputDir: string,
 	options: { summaryAlreadyRead?: boolean } = {},
 ): Promise<CorpusPage[]> {
@@ -268,7 +268,7 @@ async function manifestStamp(
 		.join("|");
 }
 
-export async function cachedVerifiedManifest(
+async function cachedVerifiedManifest(
 	outputDir: string,
 ): Promise<VerifiedManifest> {
 	const hit = manifestCache.get(outputDir);
@@ -425,7 +425,7 @@ export function globMatches(pattern: string, path: string): boolean {
 	return globCache.get(pattern)!.match(path);
 }
 
-export function decodeCursor(cursor: string | undefined): number {
+function decodeCursor(cursor: string | undefined): number {
 	if (cursor === undefined) return 0;
 	if (!/^\d{1,8}$/.test(cursor)) throw new Error("Invalid cursor");
 	return Number(cursor);

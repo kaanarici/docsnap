@@ -5,7 +5,7 @@ import { docSnippet, lineNumberAt } from "./snippets.ts";
 
 type PageRecord = CorpusPage & { outputPath: string };
 
-export type RankedSnippet = {
+type RankedSnippet = {
 	record: PageRecord;
 	contentHash: string;
 	extractor: string;
@@ -16,14 +16,14 @@ export type RankedSnippet = {
 	text: string;
 };
 
-export type RankInput = {
+type RankInput = {
 	pages: PageDoc[];
 	totalDocs: number;
 	avgBodyLength: number;
 	docFreq: Map<string, number>;
 };
 
-export type PageDoc = {
+type PageDoc = {
 	record: PageRecord;
 	body: string;
 	bodyLineOffset: number;
@@ -54,7 +54,7 @@ const stopTerms = new Set(
 	),
 );
 
-export type PageLoader = (record: PageRecord) => Promise<string | null>;
+type PageLoader = (record: PageRecord) => Promise<string | null>;
 
 export async function buildRankInput(
 	records: CorpusPage[],
