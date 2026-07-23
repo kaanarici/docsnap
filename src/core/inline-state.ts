@@ -5,6 +5,7 @@ import {
 	recordFromExtracted,
 } from "../extract/page-record.ts";
 import { titleFromMarkdown } from "../extract/title.ts";
+import { wordCount } from "./text.ts";
 import type {
 	FetchedUrl,
 	FetchResult,
@@ -104,13 +105,12 @@ function inlineStateReason(
 ): InlineStateReason | undefined {
 	const result = input.result;
 	if (input.source === "asset" || !isHtmlResult(result)) return undefined;
-	// Skip the app-shell DOM parse on the hot path: a confident html record can
-	// never trigger inline-state recovery (no reason below gates it), so probing
-	// its full body would add unnecessary work to every normal page in a crawl.
+	// High-confidence HTML does not need the expensive inline-state scan.
 	if (
 		record.ok &&
-		record.confidence >= lowQualityConfidence &&
-		record.extractor === "html"
+		record.confidence >= 0.9 &&
+		(record.extractor === "html" ||
+			(record.extractor === "structured" && wordCount(record.markdown) >= 200))
 	) {
 		return undefined;
 	}

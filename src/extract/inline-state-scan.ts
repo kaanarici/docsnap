@@ -147,14 +147,21 @@ type BalancedExpression = {
 	end: number;
 };
 
-function balancedExpression(
+export function balancedExpression(
 	input: string,
 	start: number,
 	maxEnd = input.length,
 ): BalancedExpression {
 	const limit = Math.min(input.length, Math.max(start, maxEnd));
 	const opening = input[start];
-	const closing = opening === "{" ? "}" : opening === "[" ? "]" : undefined;
+	const closing =
+		opening === "{"
+			? "}"
+			: opening === "["
+				? "]"
+				: opening === "("
+					? ")"
+					: undefined;
 	if (!closing) return untilSemicolon(input, start, limit);
 	let depth = 0;
 	let quote = "";
@@ -173,7 +180,7 @@ function balancedExpression(
 			if (char === quote) quote = "";
 			continue;
 		}
-		if (char === '"' || char === "'") {
+		if (char === '"' || char === "'" || char === "`") {
 			quote = char;
 			continue;
 		}

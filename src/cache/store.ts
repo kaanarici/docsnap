@@ -243,6 +243,7 @@ export async function refreshCacheEntry(
 	const cacheControl = result.cacheControl ?? entry.cacheControl;
 	const freshUntil = freshUntilFor({
 		...cacheResultFromEntry(entry, "", 0, cacheControl),
+		...(result.ageSeconds ? { ageSeconds: result.ageSeconds } : {}),
 		...(result.vary ? { vary: result.vary } : {}),
 		...(result.setCookie ? { setCookie: true } : {}),
 	});

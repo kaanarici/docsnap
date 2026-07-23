@@ -8,6 +8,11 @@ type Message =
 	| { id: number; record: PageRecord }
 	| { id: number; error: string };
 
+// Worker startup costs more than inline extraction for ordinary small captures.
+const workerPageThreshold = 48;
+// A byte threshold still offloads a few unusually large pages.
+const workerByteThreshold = 8 * 1024 * 1024;
+
 export async function extractMany(inputs: FetchedUrl[]): Promise<PageRecord[]> {
 	if (typeof Worker === "undefined")
 		return Promise.all(inputs.map(safeExtractPage));
@@ -20,7 +25,11 @@ export async function extractMany(inputs: FetchedUrl[]): Promise<PageRecord[]> {
 			else results[id] = await safeExtractPage(input);
 		}),
 	);
-	if (heavy.length < 2) {
+	const heavyBytes = heavy.reduce(
+		(total, { input }) => total + Buffer.byteLength(input.result.body),
+		0,
+	);
+	if (heavy.length < workerPageThreshold && heavyBytes < workerByteThreshold) {
 		await Promise.all(
 			heavy.map(async ({ id, input }) => {
 				results[id] = await safeExtractPage(input);

@@ -3,14 +3,14 @@ import {
 	type PriorState,
 	readPriorOutput,
 } from "../output/prior.ts";
+import { captureSelectionHash } from "./config.ts";
 import { identityKeys } from "./identity.ts";
 import type {
-	DiscoveredUrl,
 	PageOutput,
-	PageRecord,
 	PipelineConfig,
 	RefreshChangedPage,
 	RefreshSummary,
+	RunSummary,
 } from "./types.ts";
 
 export type RefreshCounters = {
@@ -29,11 +29,23 @@ export function refreshCounters(): RefreshCounters {
 	};
 }
 
+export function assertRefreshSelection(
+	prior: Pick<RunSummary, "selectionHash">,
+	topic?: string,
+) {
+	if (
+		prior.selectionHash &&
+		captureSelectionHash(topic) !== prior.selectionHash
+	) {
+		throw new Error(
+			"Question-selected corpora require the original question when refreshing.",
+		);
+	}
+}
+
 export async function refreshSummary(
 	prior: PriorState,
-	records: PageRecord[],
 	outputs: PageOutput[],
-	attempted: DiscoveredUrl[],
 	config: PipelineConfig,
 	counters: RefreshCounters,
 ): Promise<RefreshSummary> {
@@ -62,8 +74,7 @@ export async function refreshSummary(
 	}
 
 	const currentKeys = new Set<string>();
-	for (const item of attempted) addKeys(currentKeys, item);
-	for (const record of records) addKeys(currentKeys, record);
+	for (const record of outputs) addKeys(currentKeys, record);
 	const removed = prior.records.filter(
 		(record) => !identityKeys(record).some((key) => currentKeys.has(key)),
 	);

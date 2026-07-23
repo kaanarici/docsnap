@@ -53,7 +53,7 @@ export async function loadPrior(config: PipelineConfig): Promise<PriorState> {
 	}
 }
 
-export function conditionalForPrior(
+export function conditionalRequestForPrior(
 	prior: PriorState,
 	input: Parameters<typeof identityKeys>[0],
 ): ConditionalRequest | undefined {
@@ -156,13 +156,13 @@ function disabled(reason: NonNullable<PriorState["reason"]>): PriorState {
 
 function parsePriorManifest(text: string, config: PipelineConfig): PriorPage[] {
 	const lines = text.split(/\n/).filter((line) => line.trim());
-	const out: PriorPage[] = [];
+	const pages: PriorPage[] = [];
 	for (const line of lines) {
 		const record = JSON.parse(line) as unknown;
 		if (!isManifestRecord(record)) throw new Error("invalid manifest record");
-		if (isReusablePrior(record, config)) out.push(normalizePrior(record));
+		if (isReusablePrior(record, config)) pages.push(normalizePrior(record));
 	}
-	return out;
+	return pages;
 }
 
 function priorMatchesSummary(
@@ -196,8 +196,8 @@ function isReusablePrior(
 		resolvePriorOutputPath(config, record.outputPath) !== undefined &&
 		typeof record.contentHash === "string" &&
 		typeof record.status === "number" &&
-		isSource(record.source) &&
-		isExtractor(record.extractor) &&
+		isDiscoverySource(record.source) &&
+		isPageExtractor(record.extractor) &&
 		typeof record.confidence === "number"
 	);
 }
@@ -214,7 +214,7 @@ function normalizePrior(record: PriorPage): PriorPage {
 	};
 }
 
-function isSource(value: unknown): value is DiscoverySource {
+function isDiscoverySource(value: unknown): value is DiscoverySource {
 	return (
 		value === "seed" ||
 		value === "llms" ||
@@ -226,7 +226,7 @@ function isSource(value: unknown): value is DiscoverySource {
 	);
 }
 
-function isExtractor(value: unknown): value is PageExtractor {
+function isPageExtractor(value: unknown): value is PageExtractor {
 	return (
 		value === "markdown" ||
 		value === "html" ||
@@ -251,22 +251,22 @@ function buildIndex(records: PriorPage[]): PriorIndex {
 	const ambiguousRoute = new Set<string>();
 	for (const record of records) {
 		const keys = identityKeyGroups(record);
-		for (const key of keys.exact) addIndex(exact, ambiguousExact, key, record);
-		for (const key of keys.route) addIndex(route, ambiguousRoute, key, record);
+		for (const key of keys.exact) indexPage(exact, ambiguousExact, key, record);
+		for (const key of keys.route) indexPage(route, ambiguousRoute, key, record);
 	}
 	return { exact, route, ambiguousExact, ambiguousRoute };
 }
 
-function addIndex(
+function indexPage(
 	index: Map<string, PriorPage>,
 	ambiguous: Set<string>,
 	key: string,
 	record: PriorPage,
 ) {
 	if (ambiguous.has(key)) return;
-	const current = index.get(key);
-	if (!current) index.set(key, record);
-	else if (current !== record) {
+	const existing = index.get(key);
+	if (!existing) index.set(key, record);
+	else if (existing !== record) {
 		index.delete(key);
 		ambiguous.add(key);
 	}
@@ -290,7 +290,7 @@ function findPrior(
 	return undefined;
 }
 
-function markdownFromRendered(rendered: string) {
+export function markdownFromRendered(rendered: string): string {
 	if (!rendered.startsWith("---\n")) return stripOneTrailingNewline(rendered);
 	const end = rendered.indexOf("\n---\n", 4);
 	if (end < 0) return stripOneTrailingNewline(rendered);

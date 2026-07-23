@@ -1,3 +1,4 @@
+import { awaitWithSignal } from "../core/parallel.ts";
 import type { PipelineConfig } from "../core/types.ts";
 import { requestPublicHttp } from "./transport.ts";
 
@@ -9,12 +10,19 @@ export async function withWritersideTopic(
 	headers: RequestHeaders,
 	config: PipelineConfig,
 	allowUrl?: (url: string) => boolean | Promise<boolean>,
+	signal?: AbortSignal,
 ): Promise<string> {
 	const topicUrl = writersideTopicUrl(html, base);
 	if (!topicUrl) return html;
 	// the topic JSON is a same-origin subrequest on its own path; respect robots
 	// for it like every other secondary fetch
-	if (allowUrl && !(await allowUrl(topicUrl))) return html;
+	signal?.throwIfAborted();
+	if (
+		allowUrl &&
+		!(await awaitWithSignal(Promise.resolve(allowUrl(topicUrl)), signal))
+	)
+		return html;
+	signal?.throwIfAborted();
 	try {
 		const cookie = headers.cookie;
 		const response = await requestPublicHttp(
@@ -25,6 +33,7 @@ export async function withWritersideTopic(
 				...(cookie ? { cookie } : {}),
 			},
 			config,
+			signal ? { signal } : undefined,
 		);
 		if (response.status < 200 || response.status > 299) return html;
 		const topic = new TextDecoder().decode(response.body).trim();

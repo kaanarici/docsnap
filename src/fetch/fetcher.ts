@@ -1,5 +1,6 @@
-import { fetchWithCache } from "../cache/cached-fetch.ts";
-import { runBounded } from "../core/parallel.ts";
+import { fetchWithCache, type UncachedFetch } from "../cache/cached-fetch.ts";
+import { awaitWithSignal, runBounded } from "../core/parallel.ts";
+import { hasMarkdownBody } from "../core/text.ts";
 import type {
 	ConditionalRequest,
 	DiscoveredUrl,
@@ -16,29 +17,64 @@ import { isRetryableFetchError, retryDelayMs, shouldRetry } from "./retry.ts";
 import { type HttpResponse, requestPublicHttp } from "./transport.ts";
 import { withWritersideTopic } from "./writerside.ts";
 export type FetchUrlGate = (url: string) => boolean | Promise<boolean>;
+export const preferredMarkdownAccept = "text/markdown, text/plain, */*;q=0.8";
+interface FetchTextOptions {
+	followRouteFallbacks?: boolean;
+	signal?: AbortSignal;
+	maxBytes?: number;
+}
 export async function fetchText(
 	url: string,
 	config: PipelineConfig,
 	accept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 	conditional?: ConditionalRequest,
 	allowUrl?: FetchUrlGate,
+	options?: FetchTextOptions,
 ): Promise<FetchResult> {
-	return fetchWithCache(
-		url,
-		config,
-		accept,
-		conditional,
-		fetchTextUncached,
-		allowUrl,
-	);
+	const started = performance.now();
+	const signal = deadlineSignal(options?.signal, config.timeoutMs);
+	const fetchOptions = { ...(options ?? {}), signal };
+	const uncached: UncachedFetch = (
+		raw,
+		fetchConfig,
+		nextAccept,
+		nextConditional,
+		nextAllowUrl,
+	) =>
+		fetchTextUncached(
+			raw,
+			fetchConfig,
+			nextAccept,
+			nextConditional,
+			nextAllowUrl,
+			fetchOptions,
+		);
+	try {
+		return await awaitWithSignal(
+			fetchWithCache(url, config, accept, conditional, uncached, allowUrl),
+			signal,
+		);
+	} catch (error) {
+		if (signal.aborted) {
+			return fail(url, url, 0, started, "request timed out", []);
+		}
+		throw error;
+	}
 }
+
 export async function fetchTextUncached(
 	url: string,
 	config: PipelineConfig,
 	accept: string,
 	conditional?: ConditionalRequest,
 	allowUrl?: FetchUrlGate,
+	options: FetchTextOptions = {},
 ): Promise<FetchResult> {
+	const signal = deadlineSignal(options.signal, config.timeoutMs);
+	const maxBytes = Math.min(
+		config.maxBytes,
+		options.maxBytes ?? config.maxBytes,
+	);
 	const started = performance.now();
 	let currentUrl = url;
 	let redirects: RedirectHop[] = [];
@@ -54,17 +90,22 @@ export async function fetchTextUncached(
 			started,
 			redirects,
 			allowUrl,
+			signal,
+			maxBytes,
 		);
-		const fallback = routeFallback(result, currentUrl);
+		const fallback =
+			options.followRouteFallbacks !== false
+				? routeFallback(result, currentUrl)
+				: undefined;
 		if (fallback && !triedRouteFallbacks.has(fallback)) {
 			redirects = result.redirects ?? redirects;
-			if (!(await urlAllowed(fallback, allowUrl))) {
+			if (!(await urlAllowed(fallback, allowUrl, signal))) {
 				return fail(
 					url,
 					fallback,
 					result.status,
 					started,
-					"blocked by robots.txt",
+					signal.aborted ? "request timed out" : "blocked by robots.txt",
 					redirects,
 				);
 			}
@@ -77,13 +118,13 @@ export async function fetchTextUncached(
 		redirects = [...(result.redirects ?? [])];
 		const hop = redirectHop(result.finalUrl, next, "refresh", result.status);
 		if (hop) redirects.push(hop);
-		if (!(await urlAllowed(next, allowUrl))) {
+		if (!(await urlAllowed(next, allowUrl, signal))) {
 			return fail(
 				url,
 				next,
 				result.status,
 				started,
-				"blocked by robots.txt",
+				signal.aborted ? "request timed out" : "blocked by robots.txt",
 				redirects,
 			);
 		}
@@ -100,6 +141,11 @@ export async function fetchTextUncached(
 	);
 }
 
+function deadlineSignal(signal: AbortSignal | undefined, timeoutMs: number) {
+	const timeout = AbortSignal.timeout(timeoutMs);
+	return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
 async function fetchOnce(
 	url: string,
 	currentUrl: string,
@@ -109,6 +155,8 @@ async function fetchOnce(
 	started: number,
 	redirectsSoFar: RedirectHop[],
 	allowUrl: FetchUrlGate | undefined,
+	signal: AbortSignal | undefined,
+	maxBytes: number,
 ): Promise<FetchResult> {
 	let requestUrl = currentUrl;
 	const redirects = [...redirectsSoFar];
@@ -116,6 +164,7 @@ async function fetchOnce(
 	const cookies: Cookie[] = [];
 	for (let attempt = 0; attempt < 3; attempt++) {
 		try {
+			signal?.throwIfAborted();
 			const headers: { accept: string; "user-agent": string; cookie?: string } =
 				{
 					accept,
@@ -125,7 +174,11 @@ async function fetchOnce(
 			Object.assign(headers, sentConditional);
 			const cookie = cookieHeader(cookies, requestUrl);
 			if (cookie) headers.cookie = cookie;
-			const response = await requestPublicHttp(requestUrl, headers, config);
+			const requestStarted = performance.now();
+			const response = await requestPublicHttp(requestUrl, headers, config, {
+				...(signal ? { signal } : {}),
+				maxBytes,
+			});
 			storeCookies(cookies, requestUrl, response);
 			const redirect = redirectUrl(response, requestUrl);
 			if (redirect) {
@@ -151,13 +204,13 @@ async function fetchOnce(
 				}
 				const hop = redirectHop(requestUrl, redirect, "http", response.status);
 				if (hop) redirects.push(hop);
-				if (!(await urlAllowed(redirect, allowUrl))) {
+				if (!(await urlAllowed(redirect, allowUrl, signal))) {
 					return fail(
 						url,
 						redirect,
 						response.status,
 						started,
-						"blocked by robots.txt",
+						signal?.aborted ? "request timed out" : "blocked by robots.txt",
 						redirects,
 					);
 				}
@@ -167,12 +220,13 @@ async function fetchOnce(
 				continue;
 			}
 			const contentLength = Number(response.headers.get("content-length") ?? 0);
-			if (contentLength > config.maxBytes) {
-				return tooLarge(url, response, started, config, redirects);
+			if (contentLength > maxBytes) {
+				return tooLarge(url, response, started, maxBytes, redirects);
 			}
 			if (shouldRetry(response.status, attempt)) {
-				await Bun.sleep(
-					retryDelayMs(attempt, response.headers.get("retry-after")),
+				await awaitWithSignal(
+					Bun.sleep(retryDelayMs(attempt, response.headers.get("retry-after"))),
+					signal,
 				);
 				continue;
 			}
@@ -195,7 +249,7 @@ async function fetchOnce(
 				fetchMs: performance.now() - started,
 				redirects,
 				...responseValidators(response, fetchedAt),
-				...responseCache(response),
+				...responseCache(response, requestStarted),
 			};
 			// 304 only counts as not-modified when we sent a validator for this URL.
 			if (response.status === 304 && Object.keys(sentConditional).length > 0) {
@@ -207,14 +261,14 @@ async function fetchOnce(
 					notModified: true,
 				} satisfies FetchResult;
 			}
-			const body = await readBody(response, url, started, config, redirects);
-			if (!body.ok) return body.result;
+			const decoded = decodeResponseBody(response, response.body);
 			const text = await withWritersideTopic(
-				body.text,
+				decoded,
 				requestUrl,
 				headers,
 				config,
 				allowUrl,
+				signal,
 			);
 			const full = { ...base, body: text };
 			if (response.status >= 200 && response.status <= 299) {
@@ -227,8 +281,18 @@ async function fetchOnce(
 				failureKind: failureKind(response.status, `HTTP ${response.status}`),
 			} satisfies FetchResult;
 		} catch (error) {
+			if (signal?.aborted) {
+				return fail(
+					url,
+					requestUrl,
+					0,
+					started,
+					"request timed out",
+					redirects,
+				);
+			}
 			if (attempt < 2 && isRetryableFetchError(error)) {
-				await Bun.sleep(retryDelayMs(attempt));
+				await awaitWithSignal(Bun.sleep(retryDelayMs(attempt)), signal);
 				continue;
 			}
 			return fail(
@@ -244,7 +308,11 @@ async function fetchOnce(
 	return fail(url, currentUrl, 0, started, "fetch failed", redirects);
 }
 
-async function urlAllowed(url: string, allowUrl: FetchUrlGate | undefined) {
+async function urlAllowed(
+	url: string,
+	allowUrl: FetchUrlGate | undefined,
+	signal?: AbortSignal,
+) {
 	if (!allowUrl) return true;
 	try {
 		const parsed = new URL(url);
@@ -254,7 +322,7 @@ async function urlAllowed(url: string, allowUrl: FetchUrlGate | undefined) {
 		return true;
 	}
 	try {
-		return await allowUrl(url);
+		return await awaitWithSignal(Promise.resolve(allowUrl(url)), signal);
 	} catch {
 		return false;
 	}
@@ -314,23 +382,36 @@ function responseValidators(response: HttpResponse, fetchedAt: string) {
 	};
 }
 
-function responseCache(response: HttpResponse) {
+function responseCache(response: HttpResponse, started: number) {
 	const cacheControl = cleanHeader(response.headers.get("cache-control"));
+	const ageSeconds = responseAgeSeconds(response, started);
 	const vary = cleanHeader(response.headers.get("vary"));
 	const setCookie =
 		(response.headers.getSetCookie?.().length ?? 0) > 0 ||
 		response.headers.get("set-cookie") !== null;
 	return {
 		...(cacheControl ? { cacheControl } : {}),
+		...(ageSeconds ? { ageSeconds } : {}),
 		...(vary ? { vary } : {}),
 		...(setCookie ? { setCookie: true } : {}),
 	};
 }
 
-function cleanHeader(value: string | null) {
-	const trimmed = value?.trim();
-	return trimmed || undefined;
+function responseAgeSeconds(response: HttpResponse, started: number) {
+	const age = cleanHeader(response.headers.get("age"));
+	const ageValue = age && /^\d+$/.test(age) ? Number(age) : 0;
+	const dateValue = Date.parse(response.headers.get("date") ?? "");
+	const apparentAge = Number.isNaN(dateValue)
+		? 0
+		: Math.max(0, (Date.now() - dateValue) / 1000);
+	const responseDelay = (performance.now() - started) / 1000;
+	return Math.min(
+		Math.ceil(Math.max(apparentAge, ageValue + responseDelay)),
+		86_400,
+	);
 }
+
+const cleanHeader = (value: string | null) => value?.trim() || undefined;
 
 function redirectHop(
 	from: string,
@@ -396,8 +477,7 @@ function routeFallback(
 	if (
 		result.status !== 404 &&
 		result.status !== 410 &&
-		(!result.ok ||
-			!(result.body.trim() === "" || isFrontmatterOnly(result.body)))
+		(!result.ok || hasMarkdownBody(result.body))
 	) {
 		return undefined;
 	}
@@ -418,41 +498,14 @@ function docsMarkdownFallback(url: URL): string | undefined {
 	return next.href;
 }
 
-function isFrontmatterOnly(markdown: string): boolean {
-	const trimmed = markdown.trim();
-	if (!trimmed.startsWith("---")) return false;
-	const end = trimmed.indexOf("\n---", 3);
-	if (end < 0) return false;
-	return trimmed.slice(end + 4).trim().length === 0;
-}
-
-async function readBody(
-	response: HttpResponse,
-	url: string,
-	started: number,
-	config: PipelineConfig,
-	redirects: RedirectHop[],
-) {
-	if (response.body.byteLength > config.maxBytes) {
-		return {
-			ok: false as const,
-			result: tooLarge(url, response, started, config, redirects),
-		};
-	}
-	return {
-		ok: true as const,
-		text: decodeResponseBody(response, response.body),
-	};
-}
-
 function tooLarge(
 	url: string,
 	response: HttpResponse,
 	started: number,
-	config: PipelineConfig,
+	maxBytes: number,
 	redirects: RedirectHop[],
 ) {
-	const error = `response exceeds ${config.maxBytes} bytes`;
+	const error = `response exceeds ${maxBytes} bytes`;
 	return fail(url, response.url, response.status, started, error, redirects);
 }
 export function fetchMany(
@@ -468,19 +521,26 @@ export function fetchMany(
 			perOrigin: config.perOrigin,
 			key: (item) => new URL(item.url).origin,
 		},
-		async (item): Promise<FetchedUrl> => ({
-			source: item.source,
-			...(item.wasSeed ? { wasSeed: true as const } : {}),
-			...(item.metadata ? { metadata: item.metadata } : {}),
-			result:
+		async (item): Promise<FetchedUrl> => {
+			const discovery = {
+				source: item.source,
+				...(item.wasSeed ? { wasSeed: true as const } : {}),
+				...(item.metadata ? { metadata: item.metadata } : {}),
+			};
+			if (
+				item.fetched &&
+				!item.fetched.ok &&
+				item.fetched.error === "blocked by robots.txt"
+			) {
+				return { ...discovery, result: item.fetched };
+			}
+			const conditional = conditionalFor?.(item);
+			const accept =
+				config.pageOnly && item.wasSeed ? preferredMarkdownAccept : undefined;
+			const result =
 				item.fetched ??
-				(await fetchText(
-					item.url,
-					config,
-					undefined,
-					conditionalFor?.(item),
-					allowUrl,
-				)),
-		}),
+				(await fetchText(item.url, config, accept, conditional, allowUrl));
+			return { ...discovery, result };
+		},
 	);
 }

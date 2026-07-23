@@ -50,7 +50,7 @@ export function structuredFallback(
 	const scan = scanRoot(root);
 	const chosen = scan.preferred?.element ?? scan.best?.element ?? root;
 	const stats = scan.stats.get(chosen) ?? emptyStats();
-	const maxDensity = isPreferredRoot(chosen) ? 0.8 : 0.5;
+	const maxDensity = rootLinkDensityLimit(chosen, stats.textChars);
 	if (stats.textChars < 40 || linkDensity(stats) > maxDensity) return "";
 
 	const markdown = serializeRoot(chosen, baseUrl).trim();
@@ -80,7 +80,7 @@ function scanRoot(root: Element) {
 			const total = sumChildStats(node, stats);
 			stats.set(node, total);
 			const preferredRoot = isPreferredRoot(node);
-			const maxDensity = preferredRoot ? 0.8 : 0.5;
+			const maxDensity = rootLinkDensityLimit(node, total.textChars);
 			if (
 				total.textChars >= 80 &&
 				linkDensity(total) <= maxDensity &&
@@ -122,6 +122,11 @@ function scanRoot(root: Element) {
 		...(preferred ? { preferred } : {}),
 		stats,
 	};
+}
+
+function rootLinkDensityLimit(element: Element, textChars: number) {
+	if (!isPreferredRoot(element)) return 0.5;
+	return textChars >= 2_000 && element.querySelector("h1") ? 0.99 : 0.8;
 }
 
 function sumChildStats(

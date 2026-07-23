@@ -10,9 +10,7 @@ type SitemapOptions = {
 	accept?: (url: string) => boolean;
 	scope?: string;
 	allowResource?: FetchUrlGate | undefined;
-	// only fetch sitemaps explicitly declared in robots.txt; required when the
-	// seed path is robots-disallowed, where probing default sitemap paths would
-	// itself violate the rules while declared sitemaps are an explicit invitation
+	// A blocked seed may use only sitemaps explicitly declared by robots.txt.
 	declaredOnly?: boolean;
 };
 
@@ -206,9 +204,7 @@ function sitemapHintScore(raw: string, scope: string) {
 
 function scopePartVariants(part: string) {
 	const lower = part.toLowerCase();
-	// the part is a URL path segment (attacker-controllable via the seed); escape
-	// regex metacharacters before building a RegExp so a segment like "(a+)+"
-	// can't trigger catastrophic backtracking, and skip overlong segments
+	// Bound and escape the seed-derived segment before building a RegExp.
 	if (lower.length > 64) return [];
 	const escaped = escapeRegExp(lower).replaceAll("-", "[_-]");
 	const variants = [escaped];

@@ -5,8 +5,7 @@ import type {
 	PipelineConfig,
 } from "../core/types.ts";
 import type { FetchUrlGate } from "../fetch/fetcher.ts";
-import { emptyResourceResult, filteredNonPageResult } from "../fetch/result.ts";
-import { discoverAssetPages } from "./assets.ts";
+import { filteredNonPageResult } from "../fetch/result.ts";
 import { discoverLlmsUrls, type LlmsCorpusOptions } from "./corpus.ts";
 import { crawlScoped } from "./crawl.ts";
 import { discoverFeed, discoverRelNextPages } from "./feed.ts";
@@ -94,7 +93,6 @@ export async function runProbes(
 	await probeLlmsBackfill(ctx);
 	await probeRelNext(ctx);
 	await probeScopedCrawl(ctx);
-	if (await probeAssetMining(ctx)) return ctx.out;
 	ensureSeedFallback(ctx);
 	return ctx.out;
 }
@@ -147,7 +145,12 @@ function addOrderedLinks(
 	links: string[],
 	source: "crawl" | "nav",
 ) {
-	for (const url of orderByTopic(links, ctx.seed, ctx.scope)) {
+	for (const url of orderByTopic(
+		links,
+		ctx.seed,
+		ctx.scope,
+		ctx.config.topic,
+	)) {
 		if (ctx.seedIsShell && normalizeUrl(url) === ctx.seed) continue;
 		ctx.add(url, source);
 		if (ctx.atMax()) break;
@@ -243,41 +246,20 @@ async function probeScopedCrawl(ctx: DiscoveryContext) {
 	}
 }
 
-async function probeAssetMining(ctx: DiscoveryContext): Promise<boolean> {
-	if (ctx.out.length > 1 || !ctx.seedResponse.ok) return false;
-	const assetPages = await discoverAssetPages(
-		ctx.seed,
-		ctx.seedResponse.body,
-		ctx.config,
-		{
-			limit: ctx.config.max,
-			scope: ctx.scope,
-			accept: (url) =>
-				!ctx.seen.has(url) &&
-				inScope(url, ctx.seed, ctx.scope) &&
-				ctx.allowed(url),
-			allowResource: ctx.allowResource,
-		},
-	);
-	if (assetPages.length === 0) return false;
-	ctx.out.length = 0;
-	if (ctx.seedIsShell) {
-		ctx.out.push({
-			url: ctx.seed,
-			source: "seed",
-			wasSeed: true,
-			fetched: emptyResourceResult(
-				ctx.seedResponse,
-				"app shell without static text",
-			),
-		});
-	}
-	ctx.out.push(...assetPages);
-	return true;
-}
-
 function ensureSeedFallback(ctx: DiscoveryContext) {
-	if (ctx.out.length > 0) return;
+	if (ctx.out.length > 0) {
+		if (ctx.seedIsShell && ctx.finalSeed) {
+			const index = ctx.out.findIndex((item) => item.url === ctx.seed);
+			if (index >= 0) ctx.out.splice(index, 1);
+			ctx.out.unshift({
+				url: ctx.seed,
+				source: "seed",
+				wasSeed: true,
+				fetched: ctx.seedResponse,
+			});
+		}
+		return;
+	}
 	if (!ctx.finalSeed) {
 		const r = ctx.seedResponse;
 		ctx.out.push({
@@ -303,7 +285,7 @@ async function addLlms(ctx: DiscoveryContext) {
 		candidateWindowConfig(ctx.config),
 		ctx.llmsOptions,
 	);
-	for (const url of orderByTopic(urls, ctx.seed, ctx.scope)) {
+	for (const url of orderByTopic(urls, ctx.seed, ctx.scope, ctx.config.topic)) {
 		ctx.add(url, "llms");
 	}
 }

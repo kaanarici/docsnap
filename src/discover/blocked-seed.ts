@@ -15,14 +15,8 @@ import type { Robots } from "./robots.ts";
 import { discoverSitemaps } from "./sitemap.ts";
 import { normalizeUrl } from "./url.ts";
 
-// bare apex domains often refuse connections on /robots.txt while the
-// canonical www origin serves both content and robots; one bounded seed fetch
-// finds that origin, and discovery restarts there robots-first. Only a
-// cross-origin redirect target counts; same-origin means genuinely closed.
-// When the seed itself fails, the fetch failure is returned so the run
-// reports the real network error instead of a robots block.
-// allowResource gates the probe so a cross-origin redirect target's body is
-// never fetched before that origin's robots policy is loaded and allows it.
+// A robots-blocked apex may redirect to a usable canonical origin. The gate
+// prevents reading that origin's body before its own robots policy allows it.
 export async function canonicalOriginSeed(
 	inputSeed: string,
 	config: PipelineConfig,

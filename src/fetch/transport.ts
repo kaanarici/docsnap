@@ -19,9 +19,16 @@ export async function requestPublicHttp(
 	raw: string,
 	headers: Record<string, string>,
 	config: PipelineConfig,
+	options: { signal?: AbortSignal; maxBytes?: number } = {},
 ): Promise<HttpResponse> {
-	const resolved = await resolvePublicHttpUrl(raw);
+	options.signal?.throwIfAborted();
+	const resolved = await resolvePublicHttpUrl(raw, options.signal);
+	options.signal?.throwIfAborted();
 	const deadlineAt = Date.now() + config.timeoutMs;
+	const maxBytes = Math.min(
+		config.maxBytes,
+		options.maxBytes ?? config.maxBytes,
+	);
 	let lastError: unknown;
 	for (const address of resolved.addresses) {
 		const remainingMs = deadlineAt - Date.now();
@@ -34,6 +41,8 @@ export async function requestPublicHttp(
 				resolved,
 				address,
 				remainingMs,
+				maxBytes,
+				options.signal,
 			);
 		} catch (error) {
 			lastError = error;
@@ -49,6 +58,8 @@ function requestAddress(
 	resolved: PublicHttpAddress,
 	address: PublicAddress,
 	deadlineMs: number,
+	maxBytes: number,
+	signal?: AbortSignal,
 ): Promise<HttpResponse> {
 	const request =
 		resolved.url.protocol === "https:" ? httpsRequest : httpRequest;
@@ -77,6 +88,25 @@ function requestAddress(
 		done(null, address.address, address.family);
 	}) as LookupFunction;
 	return new Promise((resolve, reject) => {
+		let settled = false;
+		let deadline: ReturnType<typeof setTimeout> | undefined;
+		let removeAbort = () => {};
+		const cleanup = () => {
+			if (deadline) clearTimeout(deadline);
+			removeAbort();
+		};
+		const resolveOnce = (response: HttpResponse) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			resolve(response);
+		};
+		const rejectOnce = (error: unknown) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			reject(error);
+		};
 		const req = request(
 			{
 				protocol: resolved.url.protocol,
@@ -87,6 +117,7 @@ function requestAddress(
 				headers: { ...headers, "accept-encoding": "gzip, deflate, br" },
 				agent: resolved.url.protocol === "https:" ? httpsAgent : httpAgent,
 				lookup,
+				signal,
 				servername:
 					resolved.hostname === address.address ? undefined : resolved.hostname,
 				timeout: config.timeoutMs,
@@ -96,35 +127,50 @@ function requestAddress(
 				const headers = responseHeaders(res);
 				if (status >= 300 && status <= 399) {
 					res.resume();
-					clearTimeout(deadline);
-					resolve({ url: raw, status, headers, body: new Uint8Array() });
+					resolveOnce({ url: raw, status, headers, body: new Uint8Array() });
 					return;
 				}
-				void readIncoming(res, config.maxBytes)
-					.then((body) => decodeContent(body, res, config.maxBytes))
+				void readIncoming(res, maxBytes)
+					.then((body) => decodeContent(body, res, maxBytes))
 					.then((body) =>
-						resolve({
+						resolveOnce({
 							url: raw,
 							status,
 							headers,
 							body,
 						}),
 					)
-					.catch((error) => reject(deadlineHit ? deadlineError() : error))
-					.finally(() => clearTimeout(deadline));
+					.catch(rejectOnce);
 			},
 		);
+		req.on("error", rejectOnce);
+		if (signal) {
+			const onAbort = () => {
+				const error =
+					signal.reason instanceof Error
+						? signal.reason
+						: new Error("request aborted");
+				req.destroy(error);
+				rejectOnce(error);
+			};
+			signal.addEventListener("abort", onAbort, { once: true });
+			removeAbort = () => signal.removeEventListener("abort", onAbort);
+			if (signal.aborted) {
+				onAbort();
+				return;
+			}
+		}
 		// the socket timeout above is idle-based; a server trickling bytes resets
 		// it forever, so a whole-request wall-clock deadline bounds the worst case
-		let deadlineHit = false;
-		const deadline = setTimeout(() => {
-			deadlineHit = true;
-			req.destroy(deadlineError());
+		deadline = setTimeout(() => {
+			const error = deadlineError();
+			req.destroy(error);
+			rejectOnce(error);
 		}, deadlineMs);
-		req.on("timeout", () => req.destroy(new Error("request timed out")));
-		req.on("error", (error) => {
-			clearTimeout(deadline);
-			reject(deadlineHit ? deadlineError() : error);
+		req.on("timeout", () => {
+			const error = new Error("request timed out");
+			req.destroy(error);
+			rejectOnce(error);
 		});
 		req.end();
 	});

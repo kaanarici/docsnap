@@ -4,6 +4,25 @@ type LimitOptions<T> = {
 	key: (item: T) => string;
 };
 
+export async function awaitWithSignal<T>(
+	promise: Promise<T>,
+	signal?: AbortSignal,
+): Promise<T> {
+	if (!signal) return promise;
+	signal.throwIfAborted();
+	let rejectAbort: (reason?: unknown) => void = () => {};
+	const aborted = new Promise<never>((_, reject) => {
+		rejectAbort = reject;
+	});
+	const onAbort = () => rejectAbort(signal.reason);
+	signal.addEventListener("abort", onAbort, { once: true });
+	try {
+		return await Promise.race([promise, aborted]);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
+}
+
 export async function runBounded<T, R>(
 	items: T[],
 	options: LimitOptions<T>,
@@ -13,11 +32,13 @@ export async function runBounded<T, R>(
 	const results: R[] = new Array(items.length);
 	const activeByKey = new Map<string, number>();
 	const waiters: Array<() => void> = [];
+	let failure: unknown;
+	let failed = false;
 
 	const workers = Array.from(
 		{ length: Math.min(options.concurrency, items.length) },
 		async () => {
-			while (queue.length > 0) {
+			while (queue.length > 0 && !failed) {
 				const next = takeNext();
 				if (!next) {
 					await waitForSlot();
@@ -25,6 +46,9 @@ export async function runBounded<T, R>(
 				}
 				try {
 					results[next.index] = await worker(next.item);
+				} catch (error) {
+					failure = error;
+					failed = true;
 				} finally {
 					release(options.key(next.item));
 				}
@@ -33,6 +57,7 @@ export async function runBounded<T, R>(
 	);
 
 	await Promise.all(workers);
+	if (failed) throw failure;
 	return results;
 
 	function takeNext(): { item: T; index: number } | undefined {

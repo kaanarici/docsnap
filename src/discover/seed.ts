@@ -1,10 +1,19 @@
-import type { DiscoveredUrl, PipelineConfig } from "../core/types.ts";
+import { hasMarkdownBody } from "../core/text.ts";
+import type {
+	ConditionalRequest,
+	DiscoveredUrl,
+	PipelineConfig,
+} from "../core/types.ts";
 import { canonicalUrlSearch, classifyDiscoveryResource } from "../core/url.ts";
+import { looksLikeAppShell } from "../extract/app-shell.ts";
 import { isMarkdownLike } from "../extract/content.ts";
-import { fetchText } from "../fetch/fetcher.ts";
+import { fetchText, preferredMarkdownAccept } from "../fetch/fetcher.ts";
 import { robotsBlockedResult } from "../fetch/result.ts";
 import type { Robots } from "./robots.ts";
 import { normalizeDiscoveryResourceUrl, normalizeUrl } from "./url.ts";
+
+// Give native Markdown a brief head start, then overlap its usual miss with HTML.
+const markdownProbeHedgeMs = 40;
 
 export function seedInputUrl(raw: string) {
 	const resource = classifyDiscoveryResource(raw);
@@ -17,6 +26,7 @@ export async function pageOnlyDiscovery(
 	config: PipelineConfig,
 	inputSeed: string,
 	seedRobots: Robots,
+	pageConditional?: ConditionalRequest,
 ): Promise<DiscoveredUrl[]> {
 	const pageSeed = withRequestedSearch(config.seedUrl, inputSeed);
 	if (!seedRobots.allowed(pageSeed)) {
@@ -29,28 +39,119 @@ export async function pageOnlyDiscovery(
 			},
 		];
 	}
-	const alternate = await markdownAlternateSeed(config, pageSeed, seedRobots);
-	if (alternate) return [alternate];
-	return [{ url: pageSeed, source: "seed", wasSeed: true }];
+	if (config.perOrigin < 2) {
+		const alternate = await markdownAlternateSeed(
+			config,
+			pageSeed,
+			seedRobots,
+			pageConditional,
+		);
+		return [
+			alternate ??
+				(await fetchPageSeed(config, pageSeed, seedRobots, pageConditional)),
+		];
+	}
+	const controller = new AbortController();
+	const started: Promise<unknown>[] = [];
+	try {
+		const alternatePromise = markdownAlternateSeed(
+			config,
+			pageSeed,
+			seedRobots,
+			pageConditional,
+			controller.signal,
+		);
+		started.push(alternatePromise);
+		const earlyAlternate = await Promise.race([
+			alternatePromise,
+			Bun.sleep(markdownProbeHedgeMs),
+		]);
+		if (earlyAlternate) return [earlyAlternate];
+
+		const pagePromise = fetchPageSeed(
+			config,
+			pageSeed,
+			seedRobots,
+			pageConditional,
+			controller.signal,
+		);
+		started.push(pagePromise);
+		const winner = await Promise.race([
+			pagePromise.then((page) => ({ page })),
+			alternatePromise.then((alternate) => ({ alternate })),
+		]);
+		if ("alternate" in winner) {
+			return [winner.alternate ?? (await pagePromise)];
+		}
+		if (usablePageSeed(winner.page)) return [winner.page];
+		return [(await alternatePromise) ?? winner.page];
+	} finally {
+		controller.abort();
+		await Promise.allSettled(started);
+	}
+}
+
+function usablePageSeed(page: DiscoveredUrl) {
+	const response = page.fetched;
+	return Boolean(
+		response?.ok &&
+			(response.notModified ||
+				(hasMarkdownBody(response.body) && !looksLikeAppShell(response.body))),
+	);
+}
+
+async function fetchPageSeed(
+	config: PipelineConfig,
+	pageSeed: string,
+	seedRobots: Robots,
+	conditional?: ConditionalRequest,
+	signal?: AbortSignal,
+): Promise<DiscoveredUrl> {
+	const fetched = await fetchText(
+		pageSeed,
+		config,
+		preferredMarkdownAccept,
+		conditional,
+		(url) =>
+			new URL(url).origin === new URL(pageSeed).origin &&
+			seedRobots.allowed(url),
+		signal ? { signal } : undefined,
+	);
+	return {
+		url: pageSeed,
+		source: "seed",
+		wasSeed: true,
+		...(fetched.ok || fetched.error !== "blocked by robots.txt"
+			? { fetched }
+			: {}),
+	};
 }
 
 async function markdownAlternateSeed(
 	config: PipelineConfig,
 	pageSeed: string,
 	seedRobots: Robots,
+	conditional?: ConditionalRequest,
+	signal?: AbortSignal,
 ): Promise<DiscoveredUrl | undefined> {
 	const alternate = markdownAlternateUrl(pageSeed);
 	if (!alternate || !seedRobots.allowed(alternate)) return;
 	const response = await fetchText(
 		alternate,
 		config,
-		"text/markdown,text/plain,*/*;q=0.8",
-		undefined,
+		preferredMarkdownAccept,
+		conditional,
 		(url) =>
 			new URL(url).origin === new URL(pageSeed).origin &&
 			seedRobots.allowed(url),
+		{ followRouteFallbacks: false, ...(signal ? { signal } : {}) },
 	);
-	if (!response.ok || !isMarkdownLike(response)) return;
+	if (!response.ok) return;
+	if (
+		!response.notModified &&
+		(!isMarkdownLike(response) || !hasMarkdownBody(response.body))
+	)
+		return;
 	return { url: alternate, source: "seed", wasSeed: true, fetched: response };
 }
 

@@ -125,7 +125,7 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 	}
 
 	const cleaned = stripScriptStyleTags(result.body);
-	const { document } = parseHTML(cleaned);
+	const document = freshDocument(cleaned);
 	const canonical = resolveCanonical(
 		document.querySelector('link[rel="canonical"]')?.getAttribute("href"),
 		result.finalUrl,
@@ -245,7 +245,12 @@ function strongStructuredFastPath(
 	const markdown = structuredFallback(document, baseUrl);
 	if (!markdown || wordCount(markdown) < fastPathMinWords) return undefined;
 	if (isShellPlaceholder(markdown, title, html)) return undefined;
-	if (scoreMarkdown(markdown, title).confidence < fastPathMinConfidence) {
+	const referenceLinkCount =
+		markdown.match(/^- \[[^\]]+\]\([^)]+\)$/gm)?.length ?? 0;
+	if (
+		scoreMarkdown(markdown, title).confidence < fastPathMinConfidence &&
+		referenceLinkCount < 50
+	) {
 		return undefined;
 	}
 	return markdown;

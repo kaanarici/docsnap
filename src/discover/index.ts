@@ -1,4 +1,5 @@
 import type {
+	ConditionalRequest,
 	DiscoveredUrl,
 	DiscoveryResourceSeed,
 	FetchResult,
@@ -11,7 +12,11 @@ import {
 	scopeFromFeedResource,
 } from "../core/url.ts";
 import { isLanguageSelector, looksLikeAppShell } from "../extract/app-shell.ts";
-import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
+import {
+	type FetchUrlGate,
+	fetchText,
+	preferredMarkdownAccept,
+} from "../fetch/fetcher.ts";
 import { emptyResourceResult, robotsBlockedResult } from "../fetch/result.ts";
 import {
 	canonicalOriginSeed,
@@ -47,18 +52,29 @@ export type DiscoveryRun = {
 
 export async function discoverRun(
 	config: PipelineConfig,
+	pageConditional?: ConditionalRequest,
 ): Promise<DiscoveryRun> {
-	const run = await discoverRawRun(config);
+	const run = await discoverRawRun(config, pageConditional);
 	return { ...run, urls: seedFirstDiscovery(config, run.urls) };
 }
 
-async function discoverRawRun(config: PipelineConfig): Promise<DiscoveryRun> {
+async function discoverRawRun(
+	config: PipelineConfig,
+	pageConditional?: ConditionalRequest,
+): Promise<DiscoveryRun> {
 	const inputSeed = seedInputUrl(config.seedUrl);
 	const inputUrl = new URL(inputSeed);
 	const seedRobots = await loadRobots(inputUrl.origin, config);
 
 	if (config.pageOnly)
-		return { urls: await pageOnlyDiscovery(config, inputSeed, seedRobots) };
+		return {
+			urls: await pageOnlyDiscovery(
+				config,
+				inputSeed,
+				seedRobots,
+				pageConditional,
+			),
+		};
 
 	const robotsByOrigin: LlmsCorpusOptions["robotsByOrigin"] = new Map([
 		[inputUrl.origin, seedRobots],
@@ -76,38 +92,57 @@ async function discoverRawRun(config: PipelineConfig): Promise<DiscoveryRun> {
 	);
 	if (blocked) return { urls: blocked };
 
-	const corpus = await resolveLlmsCorpus(config, inputSeed, llmsOptions);
-	if ("done" in corpus) {
-		if (classifyDiscoveryResource(inputSeed)?.source === "llms") {
-			const done = corpus.done.map((item) =>
-				item.url === inputSeed ? { ...item, wasSeed: true as const } : item,
-			);
-			const response = await llmsOptions.cache?.get(inputSeed);
-			const seedResource: DiscoveryResourceSeed = {
-				url: inputSeed,
-				finalUrl:
-					(response && normalizeDiscoveryResourceUrl(response.finalUrl)) ??
-					inputSeed,
-				source: "llms",
-			};
-			return {
-				urls:
-					done.length > 0
-						? done
-						: [await explicitLlmsSeedFailure(config, inputSeed, allowResource)],
-				...(done.length > 0 ? { seedResource } : {}),
-			};
-		}
-		return { urls: corpus.done };
+	const seedIsLlms = classifyDiscoveryResource(inputSeed)?.source === "llms";
+	const overlapSeed =
+		!seedIsLlms && config.concurrency > 1 && config.perOrigin > 1;
+	const seedResponsePromise = overlapSeed
+		? fetchText(inputSeed, config, undefined, undefined, allowResource)
+		: undefined;
+	const corpusConfig = overlapSeed
+		? {
+				...config,
+				concurrency: config.concurrency - 1,
+				perOrigin: config.perOrigin - 1,
+			}
+		: config;
+	const corpus = await resolveLlmsCorpus(corpusConfig, inputSeed, llmsOptions);
+	if ("done" in corpus && seedIsLlms) {
+		const done = corpus.done.map((item) =>
+			item.url === inputSeed ? { ...item, wasSeed: true as const } : item,
+		);
+		const response = await llmsOptions.cache?.get(inputSeed);
+		const seedResource: DiscoveryResourceSeed = {
+			url: inputSeed,
+			finalUrl:
+				(response && normalizeDiscoveryResourceUrl(response.finalUrl)) ??
+				inputSeed,
+			source: "llms",
+		};
+		return {
+			urls:
+				done.length > 0
+					? done
+					: [await explicitLlmsSeedFailure(config, inputSeed, allowResource)],
+			...(done.length > 0 ? { seedResource } : {}),
+		};
 	}
 
-	const seedResponse = await fetchText(
-		inputSeed,
-		config,
-		undefined,
-		undefined,
-		allowResource,
-	);
+	const seedResponse = await (seedResponsePromise ??
+		fetchText(inputSeed, config, undefined, undefined, allowResource));
+	if ("done" in corpus) {
+		return {
+			urls: seedFirstCorpus(
+				{
+					url: inputSeed,
+					source: "seed",
+					wasSeed: true,
+					fetched: seedResponse,
+				},
+				corpus.done,
+				config,
+			),
+		};
+	}
 	if (!seedResponse.ok) {
 		return {
 			urls: [
@@ -151,7 +186,7 @@ async function explicitLlmsSeedFailure(
 	const response = await fetchText(
 		inputSeed,
 		config,
-		"text/markdown,text/plain,*/*;q=0.8",
+		preferredMarkdownAccept,
 		undefined,
 		allowResource,
 	);

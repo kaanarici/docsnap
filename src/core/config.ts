@@ -7,7 +7,7 @@ import { canonicalUrlSearch, looksLikeSpecificContentUrl } from "./url.ts";
 const cpuCount = cpus().length;
 const defaultConcurrency = Math.min(64, Math.max(16, cpuCount * 6));
 const defaultPerOrigin = Math.min(defaultConcurrency, 8);
-const defaultUserAgent =
+export const defaultUserAgent =
 	"Mozilla/5.0 (compatible; docsnap; +https://npmjs.com/package/docsnap)";
 export const maxGeneratedCapturePages = 500;
 const maxPathSlugLength = 96;
@@ -26,6 +26,7 @@ export type ConfigInput = {
 	userAgent?: string;
 	timeoutMs?: number;
 	maxBytes?: number;
+	topic?: string;
 };
 
 export function buildPipelineConfig(input: ConfigInput): PipelineConfig {
@@ -61,12 +62,49 @@ export function buildPipelineConfig(input: ConfigInput): PipelineConfig {
 		userAgent: input.userAgent ?? defaultUserAgent,
 		timeoutMs,
 		maxBytes,
+		...(input.topic?.trim() ? { topic: input.topic.trim() } : {}),
 	};
 }
 
 export function nextCaptureMax(currentMax: number) {
 	if (currentMax >= maxGeneratedCapturePages) return undefined;
 	return Math.min(currentMax * 2, maxGeneratedCapturePages);
+}
+
+export function captureSelectionTerms(topic?: string) {
+	return [
+		...new Set(
+			(topic ?? "")
+				.replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+				.toLowerCase()
+				.split(/[^a-z0-9]+/)
+				.filter((term) => term.length > 2)
+				.map(normalizeSelectionTerm),
+		),
+	];
+}
+
+export function captureSelectionHash(topic?: string) {
+	const terms = captureSelectionTerms(topic);
+	return terms.length
+		? createHash("sha256")
+				.update(`topic-v2\0${terms.join("\0")}`)
+				.digest("hex")
+		: undefined;
+}
+
+function normalizeSelectionTerm(term: string) {
+	if (term.length > 4 && term.endsWith("ies")) return `${term.slice(0, -3)}y`;
+	if (term.length > 4 && term.endsWith("sses")) return term.slice(0, -2);
+	if (
+		term.length > 3 &&
+		term.endsWith("s") &&
+		!term.endsWith("ss") &&
+		!term.endsWith("is") &&
+		!term.endsWith("us")
+	)
+		return term.slice(0, -1);
+	return term;
 }
 
 function defaultOutDir(seedUrl: string) {

@@ -8,6 +8,10 @@ const MAX_ROBOTS_LINES = 100_000;
 const MAX_AGENTS_PER_GROUP = 1_000;
 const MAX_RULES = 50_000;
 const MAX_SITEMAPS = 10_000;
+const robotsByConfig = new WeakMap<
+	PipelineConfig,
+	Map<string, Promise<Robots>>
+>();
 
 export type Robots = {
 	sitemaps: string[];
@@ -26,7 +30,26 @@ type Rule = {
 	matches: (path: string) => boolean;
 };
 
-export async function loadRobots(
+export function loadRobots(
+	origin: string,
+	config: PipelineConfig,
+): Promise<Robots> {
+	let byOrigin = robotsByConfig.get(config);
+	if (!byOrigin) {
+		byOrigin = new Map();
+		robotsByConfig.set(config, byOrigin);
+	}
+	const existing = byOrigin.get(origin);
+	if (existing) return existing;
+	const pending = fetchRobots(origin, config).catch((error) => {
+		byOrigin.delete(origin);
+		throw error;
+	});
+	byOrigin.set(origin, pending);
+	return pending;
+}
+
+async function fetchRobots(
 	origin: string,
 	config: PipelineConfig,
 ): Promise<Robots> {

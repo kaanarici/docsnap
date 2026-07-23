@@ -1,7 +1,8 @@
 import { markdownLinkHrefs } from "../core/markdown.ts";
 import type { FetchResult, PipelineConfig } from "../core/types.ts";
 import { isLlmsResourcePath } from "../core/url.ts";
-import { fetchText } from "../fetch/fetcher.ts";
+import { fetchText, preferredMarkdownAccept } from "../fetch/fetcher.ts";
+import { orderByTopic } from "./topic.ts";
 import {
 	normalizeUrl,
 	pathInScope,
@@ -24,6 +25,18 @@ export async function discoverLlms(
 	const urls = new Set<string>();
 	const seen = new Set<string>();
 	const queue = llmsCandidateUrls(seed);
+	const fetchAllowed = async (url: string) => {
+		if (options.allowResource && !(await options.allowResource(url))) return;
+		return fetchLlmsText(url, config, options);
+	};
+	const initialUrls = queue.slice(
+		0,
+		Math.min(config.concurrency, config.perOrigin),
+	);
+	const initialResponses = await Promise.all(initialUrls.map(fetchAllowed));
+	const initial = new Map(
+		initialUrls.map((url, index) => [url, initialResponses[index]]),
+	);
 	while (
 		queue.length > 0 &&
 		seen.size < CORPUS_INDEX_LIMIT &&
@@ -32,9 +45,10 @@ export async function discoverLlms(
 		const llmsUrl = queue.shift()!;
 		if (seen.has(llmsUrl)) continue;
 		seen.add(llmsUrl);
-		if (options.allowResource && !(await options.allowResource(llmsUrl)))
-			continue;
-		const response = await fetchLlmsText(llmsUrl, config, options);
+		const response = initial.has(llmsUrl)
+			? initial.get(llmsUrl)
+			: await fetchAllowed(llmsUrl);
+		if (!response) continue;
 		if (!response.ok || !isLlmsCorpus(response.contentType, response.body))
 			continue;
 		// redirects can land on a robots-disallowed URL; never use that content
@@ -49,7 +63,7 @@ export async function discoverLlms(
 			response.body,
 			corpusBase,
 			requestedScope,
-			config.maxExplicit,
+			config,
 		)) {
 			if (new URL(link).pathname === "/") continue;
 			if (isLlmsResourcePath(new URL(link).pathname)) {
@@ -94,7 +108,7 @@ function fetchLlmsText(
 	const fetched = fetchText(
 		url,
 		config,
-		"text/markdown,text/plain,*/*;q=0.8",
+		preferredMarkdownAccept,
 		undefined,
 		options.allowResource,
 	).then((response) => {
@@ -165,17 +179,18 @@ function corpusLinks(
 	body: string,
 	base: string,
 	requestedScope: string,
-	maxExplicit: boolean,
+	config: PipelineConfig,
 ) {
 	const explicit = corpusEntryLinks(body, base);
 	const links = [
 		...new Set([...explicit, ...guessFullCorpusUrls(body, base, explicit)]),
 	];
-	if (!maxExplicit) return links;
-	return links.sort(
+	if (!config.maxExplicit) return links;
+	const scopeRanked = links.sort(
 		(a, b) =>
 			linkRank(a, base, requestedScope) - linkRank(b, base, requestedScope),
 	);
+	return orderByTopic(scopeRanked, base, requestedScope, config.topic);
 }
 
 function corpusEntryLinks(body: string, base: string) {

@@ -36,7 +36,12 @@ export function isElement(node: Node | undefined | null): node is Element {
 
 export function isPreferredRoot(element: Element) {
 	const tag = tagName(element);
-	return tag === "main" || tag === "article" || role(element) === "main";
+	return (
+		tag === "main" ||
+		tag === "article" ||
+		tag.endsWith("-main") ||
+		role(element) === "main"
+	);
 }
 
 export const isCandidateRoot = (element: Element) =>

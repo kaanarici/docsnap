@@ -1,19 +1,23 @@
 import { pruneCache } from "../cache/eviction.ts";
 import { cacheSummary } from "../cache/store.ts";
+import { assetSignature, discoverAssetPages } from "../discover/assets.ts";
 import { discoverRun } from "../discover/index.ts";
-import { loadRobots, type Robots } from "../discover/robots.ts";
+import { loadRobots } from "../discover/robots.ts";
 import { candidateKey } from "../discover/seed.ts";
-import { candidateWindowConfig } from "../discover/topic.ts";
-import { normalizeUrl } from "../discover/url.ts";
-import { extractMany } from "../extract/pool.ts";
-import { fetchMany, fetchText } from "../fetch/fetcher.ts";
+import { inScope, normalizeUrl, scopeFromSeed } from "../discover/url.ts";
+import { looksLikeAppShell } from "../extract/app-shell.ts";
+import {
+	fetchMany,
+	fetchText,
+	preferredMarkdownAccept,
+} from "../fetch/fetcher.ts";
 import { filteredNonPageResult } from "../fetch/result.ts";
 import { runFiles } from "../output/files.ts";
 import { rewriteLocalLinks } from "../output/links.ts";
 import { renderPage } from "../output/page.ts";
 import { assignOutputPaths, pathMap } from "../output/paths.ts";
 import {
-	conditionalForPrior,
+	conditionalRequestForPrior,
 	loadPrior,
 	type PriorState,
 	readPriorOutput,
@@ -33,6 +37,7 @@ import {
 import { buildSummary } from "../report/summary.ts";
 import { dedupeRecords } from "./dedupe.ts";
 import { applyInlineState } from "./inline-state.ts";
+import { awaitWithSignal } from "./parallel.ts";
 import {
 	type RefreshCounters,
 	refreshCounters,
@@ -51,9 +56,18 @@ import type {
 	PipelineResult,
 	RunRecord,
 } from "./types.ts";
+import { lowQualityConfidence } from "./types.ts";
 
 type Progress = (message: string) => void;
+type ExtractedBatch = {
+	records: PageRecord[];
+	discovered: DiscoveredUrl[];
+	truncated: boolean;
+};
+type RecoveryContext = { signal?: AbortSignal; deadline?: number };
 const backfillExtraLimit = 8;
+const assetRecoveryGraphLimit = 4;
+const extractModule = import("../extract/pool.ts");
 export async function runPipeline(
 	config: PipelineConfig,
 	progress?: Progress,
@@ -61,12 +75,12 @@ export async function runPipeline(
 	assertOutputRootSafe(config);
 	const lock = await acquireOutputLock(config);
 	try {
-		return await runLocked(config, progress);
+		return await runPipelineLocked(config, progress);
 	} finally {
 		await releaseOutputLock(lock);
 	}
 }
-async function runLocked(
+async function runPipelineLocked(
 	config: PipelineConfig,
 	progress?: Progress,
 ): Promise<PipelineResult> {
@@ -88,78 +102,109 @@ async function runLocked(
 		);
 	}
 	const refresh = refreshCounters();
+	const recoveryContext: RecoveryContext = {};
 	await prepareOutput(config);
 	progress?.("docsnap: discovering");
-	const discovery = await discoverRun(config);
+	const pageConditional = config.pageOnly
+		? conditionalRequestForPrior(prior, { url: config.seedUrl })
+		: undefined;
+	const discovery = await discoverRun(config, pageConditional);
 	const discovered = discovery.urls;
 	progress?.(`docsnap: fetching ${countLabel(discovered.length, "page")}`);
 	const attempted = [...discovered];
 	const seen = new Set(discovered.map((item) => candidateKey(item.url)));
-	const records = await fetchAndExtract(
+	const initial = await fetchAndExtract(
 		discovered,
 		config,
 		prior,
 		refresh,
+		seen,
+		config.max,
+		recoveryContext,
 		progress,
 	);
-	let dedupe = dedupeRecords(records);
-	let deduped = dedupe.deduped;
-	if (shouldBackfill(config, dedupe.records, discovered, deduped)) {
+	attempted.push(...initial.discovered);
+	let assetRecoveryTruncated = initial.truncated;
+	let dedupeResult = dedupeRecords(initial.records);
+	let deduped = dedupeResult.deduped;
+	if (shouldBackfill(config, dedupeResult.records, discovered, deduped)) {
 		progress?.("docsnap: backfilling page window");
-		const extra = await backfillCandidates(config, seen);
-		if (extra.length > 0) {
+		const candidates = await backfillCandidates(config, seen);
+		let offset = 0;
+		while (offset < candidates.length) {
+			const deficit = config.max - successCount(dedupeResult.records);
+			if (deficit <= 0) break;
+			const extra = candidates.slice(offset, offset + deficit);
+			offset += extra.length;
 			attempted.push(...extra);
-			const extraRecords = await fetchAndExtract(
+			const extraBatch = await fetchAndExtract(
 				extra,
 				config,
 				prior,
 				refresh,
+				seen,
+				deficit,
+				recoveryContext,
 				progress,
 			);
-			const backfilled = dedupeRecords([...dedupe.records, ...extraRecords]);
-			deduped += backfilled.deduped;
-			dedupe = backfilled;
+			attempted.push(...extraBatch.discovered);
+			assetRecoveryTruncated ||= extraBatch.truncated;
+			const next = dedupeRecords([
+				...dedupeResult.records,
+				...extraBatch.records,
+			]);
+			deduped += next.deduped;
+			dedupeResult = next;
 		}
 	}
-	const finalRecords = dedupe.records;
+	const pageRecords = dedupeResult.records;
 
-	const candidates = outputCandidates(finalRecords, config);
-	const pathed = preservePriorOutputPaths(
-		assignOutputPaths(candidates),
+	const successfulPages = outputCandidates(pageRecords, config);
+	const pathedPages = preservePriorOutputPaths(
+		assignOutputPaths(successfulPages),
 		prior,
 		config,
 	);
-	const links = pathMap(pathed);
-	const rewritten = pathed.map((record) => rewriteLocalLinks(record, links));
-	const outputs = await materializeOutputs(rewritten, prior, config);
+	const localPaths = pathMap(pathedPages);
+	const linkedPages = pathedPages.map((record) =>
+		rewriteLocalLinks(record, localPaths),
+	);
+	const renderedPages = await materializeOutputs(linkedPages, prior, config);
+	if (prior.enabled && prior.records.length > 0 && renderedPages.length === 0) {
+		throw new Error(
+			"Refresh captured no pages; existing corpus left unchanged.",
+		);
+	}
 	const snapshot = snapshotStats(
-		outputs.map((record) => ({
+		renderedPages.map((record) => ({
 			path: record.outputPath,
 			body: record.rendered,
 		})),
 	);
 	const refreshReport = await refreshSummary(
 		prior,
-		finalRecords,
-		outputs,
-		attempted,
+		renderedPages,
 		config,
 		refresh,
 	);
 
 	progress?.(config.dryRun ? "docsnap: finalizing" : "docsnap: writing output");
-	const written = await writePages(outputs, config, () => {
+	const written = await writePages(renderedPages, config, () => {
 		firstPageMs ??= performance.now() - started;
 	});
 	await removeStalePages(prior, written.outputs, config);
 	refreshReport.skippedWrites = written.stats.skippedWrites;
 	await pruneCache(config);
-	const runRecords = recordsForRun(finalRecords, candidates, written.outputs);
+	const runRecords = recordsForRun(
+		pageRecords,
+		successfulPages,
+		written.outputs,
+	);
 	const summary = buildSummary(
-		finalRecords,
+		pageRecords,
 		written.outputs,
 		config,
-		attempted.length,
+		attempted,
 		deduped,
 		snapshot,
 		performance.now() - started,
@@ -167,6 +212,7 @@ async function runLocked(
 		refreshReport,
 		cacheSummary(config),
 		discovery.seedResource,
+		assetRecoveryTruncated,
 	);
 	await writeRunFiles(runRecords, summary, config);
 	return { records: runRecords, summary };
@@ -182,12 +228,12 @@ function recordsForRun(
 		const output = outputs[index];
 		if (output) map.set(source, output);
 	});
-	const out: RunRecord[] = [];
+	const runRecords: RunRecord[] = [];
 	for (const record of records) {
 		const output = record.ok ? map.get(record) : record;
-		if (output) out.push(output);
+		if (output) runRecords.push(output);
 	}
-	return out;
+	return runRecords;
 }
 
 async function fetchAndExtract(
@@ -195,38 +241,283 @@ async function fetchAndExtract(
 	config: PipelineConfig,
 	prior: PriorState,
 	refresh: RefreshCounters,
+	seen: Set<string>,
+	remainingSlots: number,
+	recoveryContext: RecoveryContext,
 	progress?: Progress,
-): Promise<PageRecord[]> {
-	const robotsByOrigin = new Map<string, Robots>();
-	const allowUrl = (url: string) =>
-		allowedByRobots(url, config, robotsByOrigin);
+): Promise<ExtractedBatch> {
+	const allowUrl = (url: string) => allowedByRobots(url, config);
 	const fetched = await fetchMany(
 		discovered,
 		config,
-		(item) => conditionalForPrior(prior, item),
+		(item) => conditionalRequestForPrior(prior, item),
 		allowUrl,
 	);
-	const reused: PageRecord[] = [];
-	const extractable: FetchedUrl[] = [];
-	for (const item of fetched) {
+	const reusedPages: PageRecord[] = [];
+	const toExtract: FetchedUrl[] = [];
+	for (const page of fetched) {
 		const recovered = await recoverNotModified(
-			item,
+			page,
 			config,
 			prior,
 			refresh,
 			allowUrl,
 		);
-		if (recovered) reused.push(recovered);
-		else extractable.push(rejectNonPageFinal(item));
+		if (recovered) reusedPages.push(recovered);
+		else toExtract.push(rejectNonPageFinal(page));
 	}
-	if (extractable.length) {
-		progress?.(`docsnap: extracting ${countLabel(extractable.length, "page")}`);
+	if (toExtract.length) {
+		progress?.(`docsnap: extracting ${countLabel(toExtract.length, "page")}`);
 	}
-	const staticRecords = applyInlineState(
-		extractable,
-		await extractMany(extractable),
+	const extractedRecords = applyInlineState(
+		toExtract,
+		await (await extractModule).extractMany(toExtract),
 	);
-	return [...reused, ...staticRecords];
+	const recovery = await recoverAppShells(
+		toExtract,
+		extractedRecords,
+		config,
+		allowUrl,
+		seen,
+		Math.max(
+			0,
+			remainingSlots -
+				countTowardMax(reusedPages, config) -
+				countTowardMax(extractedRecords, config),
+		),
+		recoveryContext,
+		progress,
+	);
+	return {
+		records: [...reusedPages, ...extractedRecords, ...recovery.records],
+		discovered: recovery.discovered,
+		truncated: recovery.truncated,
+	};
+}
+
+async function recoverAppShells(
+	inputs: FetchedUrl[],
+	records: PageRecord[],
+	config: PipelineConfig,
+	allowUrl: (url: string) => Promise<boolean>,
+	seen: Set<string>,
+	availableSlots: number,
+	recoveryContext: RecoveryContext,
+	progress?: Progress,
+): Promise<ExtractedBatch> {
+	const groups = new Map<
+		string,
+		{ input: FetchedUrl; targetIndexByUrl: Map<string, number> }
+	>();
+	let truncated = false;
+	for (const [index, input] of inputs.entries()) {
+		const record = records[index];
+		const result = input.result;
+		if (
+			!record ||
+			record.ok ||
+			record.failureKind !== "empty" ||
+			!result.ok ||
+			result.notModified ||
+			!looksLikeAppShell(result.body)
+		) {
+			continue;
+		}
+		if (
+			!config.pageOnly &&
+			availableSlots === 0 &&
+			countsTowardMax(record, config)
+		) {
+			truncated = true;
+			continue;
+		}
+		const signature = assetSignature(result.finalUrl, result.body);
+		if (!signature) continue;
+		const group = groups.get(signature) ?? {
+			input,
+			targetIndexByUrl: new Map<string, number>(),
+		};
+		if (input.wasSeed) group.input = input;
+		for (const url of [record.url, record.finalUrl]) {
+			const key = candidateKey(url);
+			if (input.wasSeed || !group.targetIndexByUrl.has(key)) {
+				group.targetIndexByUrl.set(key, index);
+			}
+		}
+		groups.set(signature, group);
+	}
+	if (groups.size === 0) return { records: [], discovered: [], truncated };
+	const recoveryGroups = [...groups.values()].sort(
+		(left, right) => Number(!left.input.wasSeed) - Number(!right.input.wasSeed),
+	);
+
+	progress?.("docsnap: recovering app shells");
+	const recoveryScope = scopeFromSeed(config.seedUrl);
+	recoveryContext.signal ??= AbortSignal.timeout(config.timeoutMs);
+	recoveryContext.deadline ??= performance.now() + config.timeoutMs;
+	const { signal, deadline } = recoveryContext as Required<RecoveryContext>;
+	let remainingCandidates = config.pageOnly ? 0 : availableSlots;
+	const recoveredInputs: Array<{
+		index?: number;
+		input: FetchedUrl;
+		page?: DiscoveredUrl;
+	}> = [];
+	const deadlineFailure = () => ({
+		records: [],
+		discovered: [],
+		truncated: true,
+	});
+	truncated ||= recoveryGroups.length > assetRecoveryGraphLimit;
+	for (const group of recoveryGroups.slice(0, assetRecoveryGraphLimit)) {
+		const result = group.input.result;
+		if (!result.ok || result.notModified) continue;
+		const targetIndexes = new Set(group.targetIndexByUrl.values());
+		const targetUrls = [...group.targetIndexByUrl.keys()].map(
+			(url) => new URL(url),
+		);
+		const freeTargets = [...targetIndexes].filter((index) => {
+			const record = records[index];
+			return record && !countsTowardMax(record, config);
+		}).length;
+		const started = performance.now();
+		const assetDeadline = deadline - Math.min(250, config.timeoutMs / 10);
+		const assetSignal = AbortSignal.timeout(
+			Math.max(1, Math.floor(assetDeadline - performance.now())),
+		);
+		const assetPages = await discoverAssetPages(
+			result.finalUrl,
+			result.body,
+			config,
+			{
+				limit: config.pageOnly
+					? targetIndexes.size
+					: remainingCandidates + freeTargets,
+				signal: assetSignal,
+				deadline: assetDeadline,
+				required: (url) => group.targetIndexByUrl.get(candidateKey(url)),
+				requiredUnder: (url) => {
+					const prefix = new URL(url);
+					const path = prefix.pathname.replace(/\/+$/, "");
+					return targetUrls.some(
+						(target) =>
+							target.origin === prefix.origin &&
+							(target.pathname === path ||
+								target.pathname.startsWith(`${path}/`)),
+					);
+				},
+				requiredCount: targetIndexes.size,
+				accept: (url) => {
+					const key = candidateKey(url);
+					return (
+						group.targetIndexByUrl.has(key) ||
+						(remainingCandidates > 0 &&
+							!seen.has(key) &&
+							inScope(url, result.finalUrl, recoveryScope))
+					);
+				},
+				allowResource: allowUrl,
+			},
+		);
+		if (assetPages.truncated) {
+			truncated = true;
+		}
+		const recoveryMs = performance.now() - started;
+		for (const page of assetPages.pages) {
+			const synthetic = page.fetched;
+			if (!synthetic?.ok || synthetic.notModified) continue;
+			if (
+				!(await awaitWithSignal(allowUrl(page.url), signal).catch(() => false))
+			)
+				continue;
+			const key = candidateKey(page.url);
+			const index = group.targetIndexByUrl.get(key);
+			if (index !== undefined) {
+				const original = inputs[index];
+				if (original?.result.ok && !original.result.notModified) {
+					recoveredInputs.push({
+						index,
+						input: recoveredInput(original, synthetic.body, recoveryMs),
+					});
+				}
+			}
+			if (index !== undefined || remainingCandidates === 0 || seen.has(key)) {
+				continue;
+			}
+			seen.add(key);
+			remainingCandidates--;
+			recoveredInputs.push({
+				input: { source: page.source, result: synthetic },
+				page,
+			});
+		}
+	}
+	if (signal.aborted || performance.now() >= deadline) return deadlineFailure();
+	if (recoveredInputs.length === 0) {
+		return { records: [], discovered: [], truncated };
+	}
+
+	recoveredInputs.sort(
+		(left, right) =>
+			(left.index ?? inputs.length) - (right.index ?? inputs.length),
+	);
+	const recoveredRecords = await awaitWithSignal(
+		(await extractModule).extractMany(
+			recoveredInputs.map((item) => item.input),
+		),
+		signal,
+	).catch(() => undefined);
+	if (!recoveredRecords) return deadlineFailure();
+	let remainingSuccesses = availableSlots;
+	const extraRecords: PageRecord[] = [];
+	const discovered: DiscoveredUrl[] = [];
+	for (const [offset, recovered] of recoveredRecords.entries()) {
+		const recovery = recoveredInputs[offset]!;
+		if (recovery.index === undefined) {
+			const limited = recovered.ok && countsTowardMax(recovered, config);
+			if (!recovery.page || (limited && remainingSuccesses === 0)) continue;
+			extraRecords.push(recovered);
+			discovered.push(recovery.page);
+			if (limited) remainingSuccesses--;
+			continue;
+		}
+		if (
+			!recovered.ok ||
+			recovered.confidence < lowQualityConfidence ||
+			(countsTowardMax(recovered, config) && remainingSuccesses === 0)
+		) {
+			continue;
+		}
+		const original = records[recovery.index]!;
+		recovered.injectionSignals = [
+			...new Set([...original.injectionSignals, ...recovered.injectionSignals]),
+		];
+		records[recovery.index] = recovered;
+		if (countsTowardMax(recovered, config)) remainingSuccesses--;
+	}
+	return { records: extraRecords, discovered, truncated };
+}
+
+function recoveredInput(
+	original: FetchedUrl,
+	markdown: string,
+	recoveryMs: number,
+): FetchedUrl {
+	const result = original.result;
+	if (!result.ok || result.notModified) return original;
+	return {
+		...original,
+		result: {
+			url: result.url,
+			finalUrl: result.finalUrl,
+			status: result.status,
+			contentType: "text/markdown",
+			body: markdown,
+			ok: true,
+			fetchMs: result.fetchMs + recoveryMs,
+			redirects: result.redirects ?? [],
+			...(result.fetchedAt ? { fetchedAt: result.fetchedAt } : {}),
+		},
+	};
 }
 async function recoverNotModified(
 	item: FetchedUrl,
@@ -238,7 +529,10 @@ async function recoverNotModified(
 	const result = item.result;
 	if (!result.ok || !result.notModified) return undefined;
 	refresh.notModified++;
-	const previous = prior.find({ url: result.url, finalUrl: result.finalUrl });
+	const previous = prior.find({
+		url: result.url,
+		finalUrl: result.finalUrl,
+	});
 	const recovered = previous
 		? await recoverPriorPage(config, previous, {
 				fetchMs: result.fetchMs,
@@ -255,34 +549,27 @@ async function recoverNotModified(
 	item.result = await fetchText(
 		result.url,
 		config,
-		undefined,
+		config.pageOnly && item.wasSeed ? preferredMarkdownAccept : undefined,
 		undefined,
 		allowUrl,
 	);
 	return undefined;
 }
-async function allowedByRobots(
-	url: string,
-	config: PipelineConfig,
-	robotsByOrigin: Map<string, Robots>,
-) {
+async function allowedByRobots(url: string, config: PipelineConfig) {
 	const origin = new URL(url).origin;
-	const robots =
-		robotsByOrigin.get(origin) ?? (await loadRobots(origin, config));
-	robotsByOrigin.set(origin, robots);
-	return robots.allowed(url);
+	return (await loadRobots(origin, config)).allowed(url);
 }
 function mergeRecoveredDiscovery(
 	recovered: PageSuccess,
 	item: FetchedUrl,
 ): PageSuccess {
-	const current: PageSuccess = {
+	const updated: PageSuccess = {
 		...recovered,
 		...(item.metadata ?? {}),
 		source: item.source,
 		...(item.wasSeed ? { wasSeed: true as const } : {}),
 	};
-	return renderPage(current) === renderPage(recovered) ? recovered : current;
+	return renderPage(updated) === renderPage(recovered) ? recovered : updated;
 }
 function shouldBackfill(
 	config: PipelineConfig,
@@ -294,7 +581,7 @@ function shouldBackfill(
 		config.maxExplicit &&
 		!config.pageOnly &&
 		discovered.length >= config.max &&
-		records.filter((record) => record.ok).length < config.max &&
+		successCount(records) < config.max &&
 		(deduped > 0 || records.some(backfillableFailure))
 	);
 }
@@ -306,20 +593,38 @@ function backfillableFailure(record: PageRecord) {
 	);
 }
 async function backfillCandidates(config: PipelineConfig, seen: Set<string>) {
-	const discovered = (await discoverRun(candidateWindowConfig(config))).urls;
-	const out: DiscoveredUrl[] = [];
-	for (const item of discovered) {
-		const key = candidateKey(item.url);
+	const discovered = (
+		await discoverRun({ ...config, max: config.max + backfillExtraLimit })
+	).urls;
+	const candidates: DiscoveredUrl[] = [];
+	for (const candidate of discovered) {
+		const key = candidateKey(candidate.url);
 		if (seen.has(key)) continue;
 		seen.add(key);
-		out.push(item);
-		if (out.length >= backfillExtraLimit) break;
+		candidates.push(candidate);
+		if (candidates.length >= backfillExtraLimit) break;
 	}
-	return out;
+	return candidates;
+}
+function successCount(records: PageRecord[]) {
+	return records.filter((record) => record.ok).length;
+}
+function countTowardMax(records: PageRecord[], config: PipelineConfig) {
+	return records.filter(
+		(record) => record.ok && countsTowardMax(record, config),
+	).length;
+}
+function countsTowardMax(
+	record: Pick<PageRecord, "source">,
+	config: PipelineConfig,
+) {
+	return config.maxExplicit || record.source !== "llms";
 }
 function outputCandidates(records: PageRecord[], config: PipelineConfig) {
-	const ok = records.filter((record): record is PageSuccess => record.ok);
-	return config.maxExplicit ? ok.slice(0, config.max) : ok;
+	const successful = records.filter(
+		(record): record is PageSuccess => record.ok,
+	);
+	return config.maxExplicit ? successful.slice(0, config.max) : successful;
 }
 
 function preservePriorOutputPaths(
@@ -357,34 +662,34 @@ async function materializeOutputs(
 ): Promise<PageOutput[]> {
 	return Promise.all(
 		records.map(async (record) => {
-			const { fetchedAt, rendered } = await settleRender(record, prior, config);
+			const { fetchedAt, rendered } = await stableRender(record, prior, config);
 			return { ...record, fetchedAt, rendered };
 		}),
 	);
 }
 
-async function settleRender(
+async function stableRender(
 	record: PathedPage,
 	prior: PriorState,
 	config: PipelineConfig,
 ): Promise<{ fetchedAt: string; rendered: string }> {
 	const previous = prior.enabled ? prior.find(record) : undefined;
-	const current = { fetchedAt: record.fetchedAt, rendered: renderPage(record) };
+	const fresh = { fetchedAt: record.fetchedAt, rendered: renderPage(record) };
 	if (
 		!previous?.fetchedAt ||
 		previous.outputPath !== record.outputPath ||
 		previous.contentHash !== record.contentHash
 	) {
-		return current;
+		return fresh;
 	}
-	const preserved = {
+	const stable = {
 		fetchedAt: previous.fetchedAt,
 		rendered: renderPage(record, previous.fetchedAt),
 	};
 	return (await readPriorOutput(config, previous.outputPath)) ===
-		preserved.rendered
-		? preserved
-		: current;
+		stable.rendered
+		? stable
+		: fresh;
 }
 function rejectNonPageFinal(input: FetchedUrl): FetchedUrl {
 	const { result } = input;

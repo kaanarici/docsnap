@@ -6,6 +6,7 @@ const maxFreshMs = 24 * 60 * 60 * 1000;
 export function freshUntilFor(result: FetchResult): Date | undefined {
 	if (!cacheableResponse(result)) return undefined;
 	const now = Date.now();
+	const ageMs = (result.ageSeconds ?? 0) * 1000;
 	const cacheControl = result.cacheControl?.toLowerCase();
 	if (cacheControl) {
 		// docsnap's cache is shared across output dirs, so honor s-maxage over
@@ -13,15 +14,19 @@ export function freshUntilFor(result: FetchResult): Date | undefined {
 		const directives = parseCacheControl(cacheControl);
 		const maxAge = directives.get("s-maxage") ?? directives.get("max-age");
 		if (maxAge !== undefined && /^\d+$/.test(maxAge)) {
-			const ttl = Math.min(Number(maxAge) * 1000, maxFreshMs);
-			return new Date(now + ttl);
+			return freshUntil(now, Number(maxAge) * 1000, ageMs);
 		}
 		return undefined;
 	}
 	if (/text\/html|text\/plain|markdown|mdx/i.test(result.contentType)) {
-		return new Date(now + defaultFreshMs);
+		return freshUntil(now, defaultFreshMs, ageMs);
 	}
 	return undefined;
+}
+
+function freshUntil(now: number, ttlMs: number, ageMs: number) {
+	const remainingMs = Math.min(ttlMs, maxFreshMs) - ageMs;
+	return remainingMs > 0 ? new Date(now + remainingMs) : undefined;
 }
 
 function parseCacheControl(value: string): Map<string, string> {

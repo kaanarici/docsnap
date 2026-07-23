@@ -1,8 +1,10 @@
 import { cacheSummary } from "../cache/store.ts";
+import { captureSelectionHash } from "../core/config.ts";
 import { emptyRefreshSummary } from "../core/refresh.ts";
 import type { SnapshotStats } from "../core/snapshot.ts";
 import { snapshotSchemaVersion } from "../core/snapshot.ts";
 import {
+	type DiscoveredUrl,
 	type DiscoveryResourceSeed,
 	discoverySources,
 	type FailureKind,
@@ -27,7 +29,7 @@ export function buildSummary(
 	records: PageRecord[],
 	outputs: PageOutput[],
 	config: PipelineConfig,
-	discovered: number,
+	attempted: DiscoveredUrl[],
 	deduped: number,
 	snapshot: SnapshotStats,
 	elapsedMs: number,
@@ -35,6 +37,7 @@ export function buildSummary(
 	refresh: RefreshSummary = emptyRefreshSummary(),
 	cache = cacheSummary(config),
 	seedResource?: DiscoveryResourceSeed,
+	assetRecoveryTruncated = false,
 ): RunSummary {
 	let written = 0;
 	let failed = 0;
@@ -83,12 +86,24 @@ export function buildSummary(
 			}
 		}
 	}
-	const reached = maxReached(config, discovered);
+	const reached = maxReached(config, attempted);
+	const selectionHash = captureSelectionHash(config.topic);
 	const seed = seedSummary(records, outputs, config, seedResource);
 	const warnings = runWarnings(seed);
+	if (assetRecoveryTruncated) {
+		warnings.push({
+			kind: "asset_recovery_truncated",
+			message: "JS asset recovery stopped at its safety budget.",
+		});
+	}
 
 	return {
-		status: runStatus(written, failed, lowQuality, reached),
+		status: runStatus(
+			written,
+			failed,
+			lowQuality,
+			reached || assetRecoveryTruncated,
+		),
 		seedUrl: config.seedUrl,
 		seed,
 		warnings,
@@ -104,7 +119,8 @@ export function buildSummary(
 		max: config.max,
 		maxAppliesTo: config.maxExplicit ? "all" : "non-llms",
 		maxReached: reached,
-		discovered,
+		...(selectionHash ? { selectionHash } : {}),
+		discovered: attempted.length,
 		deduped,
 		written,
 		failed,
@@ -335,11 +351,11 @@ function orderedPartialCounts<T extends string>(
 	return out;
 }
 
-function maxReached(config: PipelineConfig, discovered: number) {
+function maxReached(config: PipelineConfig, attempted: DiscoveredUrl[]) {
 	if (config.pageOnly) return false;
 	return config.maxExplicit
-		? discovered >= config.max
-		: discovered === config.max;
+		? attempted.length >= config.max
+		: attempted.filter((item) => item.source !== "llms").length >= config.max;
 }
 
 function runStatus(

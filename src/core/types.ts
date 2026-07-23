@@ -141,6 +141,7 @@ export type PipelineConfig = {
 	userAgent: string;
 	timeoutMs: number;
 	maxBytes: number;
+	topic?: string;
 };
 
 export type CliOptions = {
@@ -162,6 +163,7 @@ type FetchBase = {
 	lastModified?: string;
 	fetchedAt?: string;
 	cacheControl?: string;
+	ageSeconds?: number;
 	vary?: string;
 	setCookie?: boolean;
 };
@@ -292,6 +294,7 @@ export type RunSummary = {
 	max: number;
 	maxAppliesTo: MaxAppliesTo;
 	maxReached: boolean;
+	selectionHash?: string;
 	discovered: number;
 	deduped: number;
 	written: number;
@@ -314,8 +317,13 @@ export type RunSummary = {
 	cache: CacheSummary;
 };
 
-export function runSucceeded(summary: Pick<RunSummary, "written" | "seed">) {
-	return summary.written > 0 && summary.seed.included;
+export function runSucceeded(
+	summary: Pick<RunSummary, "captureMode" | "written" | "seed">,
+) {
+	return (
+		summary.written > 0 &&
+		(summary.captureMode === "site" || summary.seed.included)
+	);
 }
 
 export type RunWarning =
@@ -337,6 +345,10 @@ export type RunWarning =
 			message: string;
 			url?: string;
 			finalUrl?: string;
+	  }
+	| {
+			kind: "asset_recovery_truncated";
+			message: string;
 	  };
 
 export type SeedSummary = {

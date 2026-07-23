@@ -55,6 +55,7 @@ export function validatePublicHttpUrl(raw: string): string | undefined {
 
 export async function resolvePublicHttpUrl(
 	raw: string,
+	signal?: AbortSignal,
 ): Promise<PublicHttpAddress> {
 	const syntaxError = validatePublicHttpUrl(raw);
 	if (syntaxError) throw new Error(syntaxError);
@@ -80,7 +81,7 @@ export async function resolvePublicHttpUrl(
 		};
 	}
 
-	const addresses = await lookup(hostname, { all: true, verbatim: true });
+	const addresses = await lookupWithSignal(hostname, signal);
 	if (addresses.length === 0) {
 		throw new Error("hostname did not resolve");
 	}
@@ -112,6 +113,23 @@ export async function resolvePublicHttpUrl(
 		family: address.family,
 		addresses: publicAddresses,
 	};
+}
+
+async function lookupWithSignal(hostname: string, signal?: AbortSignal) {
+	const pending = lookup(hostname, { all: true, verbatim: true });
+	if (!signal) return pending;
+	signal.throwIfAborted();
+	let rejectAbort: (reason?: unknown) => void = () => {};
+	const aborted = new Promise<never>((_, reject) => {
+		rejectAbort = reject;
+	});
+	const onAbort = () => rejectAbort(signal.reason);
+	signal.addEventListener("abort", onAbort, { once: true });
+	try {
+		return await Promise.race([pending, aborted]);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
 }
 
 function normalizedHostname(url: URL): string {

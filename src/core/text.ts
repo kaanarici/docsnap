@@ -16,6 +16,14 @@ export function wordCount(value: string): number {
 	return whitespaceKey(value).split(/\s+/).filter(Boolean).length;
 }
 
+export function hasMarkdownBody(markdown: string): boolean {
+	const trimmed = markdown.trim();
+	if (!trimmed) return false;
+	if (!trimmed.startsWith("---")) return true;
+	const end = trimmed.indexOf("\n---", 3);
+	return end < 0 || trimmed.slice(end + 4).trim().length > 0;
+}
+
 export function countLabel(count: number, singular: string, plural?: string) {
 	return `${count} ${count === 1 ? singular : (plural ?? `${singular}s`)}`;
 }
@@ -36,7 +44,6 @@ export function isInvisibleTextOnly(value: string) {
 	return invisibleTextOnlyPattern.test(value);
 }
 
-// Escape regex metacharacters so untrusted URL/DOM text stays literal.
 export function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

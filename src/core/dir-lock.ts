@@ -5,7 +5,6 @@ import { dirname, join } from "node:path";
 export const dirLockOwnerFile = "owner.json";
 
 const defaultStaleMs = 60_000;
-const defaultHardReapMs = 30 * 60_000;
 
 export type DirLock = {
 	path: string;
@@ -21,7 +20,6 @@ type DirLockOwner = {
 type DirLockBaseOptions = {
 	path: string;
 	staleMs?: number;
-	hardReapMs?: number;
 	ownerFile?: string;
 };
 
@@ -46,10 +44,9 @@ export async function acquireDirLock(
 	options: SoftDirLockOptions | HardDirLockOptions,
 ): Promise<DirLock | undefined> {
 	const staleMs = Math.max(0, options.staleMs ?? defaultStaleMs);
-	const hardReapMs = Math.max(staleMs, options.hardReapMs ?? defaultHardReapMs);
 	return options.mode === "soft"
-		? acquireSoft(options, staleMs, hardReapMs)
-		: acquireHard(options, staleMs, hardReapMs);
+		? acquireSoft(options, staleMs)
+		: acquireHard(options, staleMs);
 }
 
 export async function releaseDirLock(
@@ -65,7 +62,6 @@ export async function releaseDirLock(
 async function acquireSoft(
 	options: SoftDirLockOptions,
 	staleMs: number,
-	hardReapMs: number,
 ): Promise<DirLock | undefined> {
 	for (const delay of options.delaysMs) {
 		if (delay) await Bun.sleep(delay);
@@ -77,12 +73,7 @@ async function acquireSoft(
 				return undefined;
 			}
 			try {
-				await reapStaleLock(
-					options.path,
-					staleMs,
-					hardReapMs,
-					options.ownerFile,
-				);
+				await reapStaleLock(options.path, staleMs, options.ownerFile);
 			} catch (reapError) {
 				options.onAccessError(reapError);
 				return undefined;
@@ -95,7 +86,6 @@ async function acquireSoft(
 async function acquireHard(
 	options: HardDirLockOptions,
 	staleMs: number,
-	hardReapMs: number,
 ): Promise<DirLock> {
 	const started = Date.now();
 	const delays = options.delaysMs ?? [0, 25, 50, 100, 150, 250];
@@ -105,7 +95,7 @@ async function acquireHard(
 			return await createLock(options.path, options.ownerFile);
 		} catch (error) {
 			if (!isAlreadyExists(error)) throw error;
-			await reapStaleLock(options.path, staleMs, hardReapMs, options.ownerFile);
+			await reapStaleLock(options.path, staleMs, options.ownerFile);
 		}
 		if (Date.now() - started >= Math.max(0, options.waitTimeoutMs)) {
 			throw new Error(
@@ -144,7 +134,6 @@ async function createLock(
 async function reapStaleLock(
 	path: string,
 	staleMs: number,
-	hardReapMs: number,
 	ownerFile = dirLockOwnerFile,
 ): Promise<void> {
 	let info: Awaited<ReturnType<typeof stat>>;
@@ -159,7 +148,7 @@ async function reapStaleLock(
 	const started = Number.isFinite(createdAt) ? createdAt : info.mtimeMs;
 	const ageMs = Date.now() - started;
 	if (ageMs < staleMs) return;
-	if (owner && isProcessAlive(owner.pid) && ageMs < hardReapMs) return;
+	if (owner && isProcessAlive(owner.pid)) return;
 	const stalePath = `${path}.reap-${process.pid}-${randomUUID()}`;
 	try {
 		await rename(path, stalePath);
