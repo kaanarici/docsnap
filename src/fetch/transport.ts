@@ -69,24 +69,7 @@ function requestAddress(
 				? 443
 				: 80
 			: Number(resolved.url.port);
-	const lookup = ((_hostname: string, options: unknown, callback?: unknown) => {
-		const done = typeof options === "function" ? options : callback;
-		if (typeof done !== "function") throw new Error("missing DNS callback");
-		if (typeof options === "function") {
-			done(null, address.address, address.family);
-			return;
-		}
-		if (
-			options &&
-			typeof options === "object" &&
-			"all" in options &&
-			options.all === true
-		) {
-			done(null, [{ address: address.address, family: address.family }]);
-			return;
-		}
-		done(null, address.address, address.family);
-	}) as LookupFunction;
+	const lookup = pinnedLookup(address);
 	return new Promise((resolve, reject) => {
 		let settled = false;
 		let deadline: ReturnType<typeof setTimeout> | undefined;
@@ -174,6 +157,27 @@ function requestAddress(
 		});
 		req.end();
 	});
+}
+
+export function pinnedLookup(address: PublicAddress): LookupFunction {
+	return ((_hostname: string, options: unknown, callback?: unknown) => {
+		const done = typeof options === "function" ? options : callback;
+		if (typeof done !== "function") throw new Error("missing DNS callback");
+		if (typeof options === "function") {
+			done(null, address.address, address.family);
+			return;
+		}
+		if (
+			options &&
+			typeof options === "object" &&
+			"all" in options &&
+			options.all === true
+		) {
+			done(null, [{ address: address.address, family: address.family }]);
+			return;
+		}
+		done(null, address.address, address.family);
+	}) as LookupFunction;
 }
 
 function deadlineError() {

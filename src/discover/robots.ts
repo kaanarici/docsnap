@@ -58,14 +58,22 @@ async function fetchRobots(
 		config,
 		"text/plain,*/*;q=0.8",
 	);
+	return robotsFromFetch(response, origin, config.userAgent);
+}
+
+export function robotsFromFetch(
+	response: { ok: boolean; status: number; body: string },
+	origin: string,
+	userAgent = "docsnap",
+): Robots {
 	if (!response.ok) {
 		if (response.status >= 400 && response.status < 500) return openRobots();
 		return closedRobots(response.status === 0);
 	}
-	return parseRobots(response.body, origin, config.userAgent);
+	return parseRobots(response.body, origin, userAgent);
 }
 
-function parseRobots(
+export function parseRobots(
 	body: string,
 	origin: string,
 	userAgent = "docsnap",

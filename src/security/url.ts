@@ -81,10 +81,28 @@ export async function resolvePublicHttpUrl(
 		};
 	}
 
-	const addresses = await lookupWithSignal(hostname, signal);
-	if (addresses.length === 0) {
-		throw new Error("hostname did not resolve");
-	}
+	const publicAddresses = validateResolvedAddresses(
+		await lookupWithSignal(hostname, signal),
+	);
+	const [address] = publicAddresses;
+	if (!address) throw new Error("hostname did not resolve to a public address");
+	addressCache.set(hostname, {
+		addresses: publicAddresses,
+		expires: Date.now() + addressCacheTtlMs,
+	});
+	return {
+		url,
+		hostname,
+		address: address.address,
+		family: address.family,
+		addresses: publicAddresses,
+	};
+}
+
+export function validateResolvedAddresses(
+	addresses: Array<{ address: string; family: number }>,
+): PublicAddress[] {
+	if (addresses.length === 0) throw new Error("hostname did not resolve");
 	for (const address of addresses) {
 		if (
 			(address.family === 4 || address.family === 6) &&
@@ -100,19 +118,10 @@ export async function resolvePublicHttpUrl(
 				isPublicIp(item.address, item.family),
 		),
 	);
-	const [address] = publicAddresses;
-	if (!address) throw new Error("hostname did not resolve to a public address");
-	addressCache.set(hostname, {
-		addresses: publicAddresses,
-		expires: Date.now() + addressCacheTtlMs,
-	});
-	return {
-		url,
-		hostname,
-		address: address.address,
-		family: address.family,
-		addresses: publicAddresses,
-	};
+	if (publicAddresses.length === 0) {
+		throw new Error("hostname did not resolve to a public address");
+	}
+	return publicAddresses;
 }
 
 async function lookupWithSignal(hostname: string, signal?: AbortSignal) {
@@ -133,7 +142,10 @@ async function lookupWithSignal(hostname: string, signal?: AbortSignal) {
 }
 
 function normalizedHostname(url: URL): string {
-	return url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+	return url.hostname
+		.replace(/^\[|\]$/g, "")
+		.replace(/\.$/, "")
+		.toLowerCase();
 }
 
 function allowsExactTestOrigin(url: URL): boolean {
