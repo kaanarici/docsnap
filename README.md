@@ -1,6 +1,6 @@
 # docsnap
 
-Browser-free CLI that turns public docs and text-heavy pages into clean Markdown corpora for coding agents.
+CLI that compiles public sites into a hash-verified local Markdown corpus agents and humans can grep.
 
 docsnap uses static fetches, `llms.txt`, page links, sitemaps, RSS/Atom feeds, `rel=next`, scoped crawl, Markdown alternates, JS asset text mining, and inline-state extraction. It does not launch a browser and has no `--render` mode.
 
@@ -8,7 +8,7 @@ docsnap uses static fetches, `llms.txt`, page links, sitemaps, RSS/Atom feeds, `
 bunx docsnap https://react.dev/reference -m 8 --clean
 ```
 
-The CLI prints progress, artifact paths, and local follow-up commands. It writes:
+The CLI prints progress and artifact paths. It writes:
 
 ```text
 docsnap/react-dev-reference/
@@ -17,7 +17,7 @@ docsnap/react-dev-reference/
   ...
 ```
 
-docsnap works on public sites with readable HTML, `llms.txt`, sitemaps, regular links, or extractable inline state.
+docsnap works on public sites with readable HTML, `llms.txt`, sitemaps, regular links, extractable inline state, or recoverable referenced JS payloads.
 
 ## Install
 
@@ -34,7 +34,6 @@ docsnap refresh <corpus-dir> [flags]
 docsnap list [root=./docsnap] [flags]
 docsnap search <corpus-dir> <query> [flags]
 docsnap search [root=./docsnap] <query> --all [flags]
-docsnap mcp
 ```
 
 Run `docsnap --help` or `docsnap <command> --help` for flags.
@@ -54,11 +53,11 @@ docsnap https://docs.djangoproject.com/en/stable/
 
 ## Notes
 
-Specific page URLs auto-capture as one page unless `--site` or `-m`/`--max` asks for site discovery. Use an absolute `--out` path for output outside the current directory. With `--json`, captures return artifact paths plus command-oriented `commands` and `next_actions`.
+Specific page URLs auto-capture as one page unless `--site` or `-m`/`--max` asks for site discovery. Use an absolute `--out` path for output outside the current directory. Successful `--json` results stay data-only; failures report counts, `failureKind`, and `error` fields.
 
 `docsnap fetch <url> "question"` resolves a reusable local corpus, captures it if missing, and returns cited local Markdown context. Without `--out`, fetch checks `./docsnap` first. The default `--freshness auto` reuses recent corpora and refreshes stale ones; `reuse` never re-fetches an existing corpus, `refresh` re-checks the original seed, and `force` recaptures.
 
-Use `rg` for raw local search speed. Use `docsnap search` when you want ranked local hits with source URLs, page titles, confidence, line spans, and expand commands. With `--all`, plain words are query text; pass a path-like or existing root first to search outside `./docsnap`.
+Use `rg` for raw local search speed. Use `docsnap search` when you want ranked local hits with source URLs, page titles, confidence, and line spans. With `--all`, plain words are query text; pass a path-like or existing root first to search outside `./docsnap`.
 
 ```bash
 docsnap list
@@ -73,24 +72,7 @@ docsnap search docsnap/react-dev-reference -- "--yes"
 
 docsnap keeps a shared fetch cache in `~/.cache/docsnap`. Set `DOCSNAP_CACHE_DIR` to choose another cache directory, `DOCSNAP_CACHE_DIR=off` or `--no-cache` to bypass it, and `DOCSNAP_CACHE_MAX_MB` to change the cap.
 
-## MCP
-
-```bash
-claude mcp add docsnap -- docsnap mcp
-```
-
-Tools:
-
-- `docsnap_fetch`: capture, reuse, or refresh a URL and return ranked Markdown context with citations
-- `docsnap_capture`: capture a public docs site or text-heavy page into a local corpus
-- `docsnap_refresh`: rerun a corpus's seed URL and report new/changed/removed pages
-- `docsnap_context_pack`: ranked answer-with-sources bundle for one corpus
-- `docsnap_search_corpus`: ranked snippet search across a corpus
-- `docsnap_read_page`: read a bounded slice of one captured page
-- `docsnap_list_corpora` / `docsnap_list_pages`: discover captured corpora and pages
-- `docsnap_get_corpus_summary`: corpus health, failures, warnings, redirects
-
-MCP resources expose known corpora's `summary.json`, `manifest.jsonl`, and bounded page Markdown for clients that browse resources.
+Agent config: run `docsnap` first, then `rg` the output corpus.
 
 ## Output
 
@@ -98,9 +80,9 @@ MCP resources expose known corpora's `summary.json`, `manifest.jsonl`, and bound
 - `summary.json`: machine-readable run record for status, URLs, seed state, counts, failures, quality warnings, redirects, hashes, timing, refresh, and cache
 - Markdown files: readable page captures with source metadata
 
-Use `rg --files` or `find` when you need the file layout.
+Use `rg --files` when you need the file layout.
 
-Captured page bodies are untrusted web data; failures and redirects are recorded in `summary.json`, `manifest.jsonl`, and page frontmatter.
+Captured page bodies are source content only. Failures and redirects stay in run records; injection signals stay in those records and page frontmatter.
 
 ## Requirements
 
