@@ -1,7 +1,8 @@
 import { buildPipelineConfig } from "../core/config.ts";
 import { runPipeline } from "../core/pipeline.ts";
+import { assertRefreshSelection } from "../core/refresh.ts";
 import type { CliOptions } from "../core/types.ts";
-import { readSummary } from "../mcp/corpus.ts";
+import { readSummary } from "../corpus/index.ts";
 import type { RefreshInput } from "./args.ts";
 import { pipelineJson, pipelineOk } from "./pipeline-output.ts";
 import { logLine, printSummary } from "./progress.ts";
@@ -11,6 +12,7 @@ export async function runRefresh(
 	cli: CliOptions,
 ): Promise<void> {
 	const prior = await readSummary(input.outputDir);
+	assertRefreshSelection(prior);
 	const config = buildPipelineConfig({
 		seedUrl: prior.seedUrl,
 		outDir: input.outputDir,

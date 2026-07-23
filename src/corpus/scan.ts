@@ -6,7 +6,6 @@ import {
 	isWindowsAbsolute,
 } from "../core/fs-safety.ts";
 import { runFiles } from "../output/files.ts";
-import { logDiagnostic } from "./access.ts";
 
 export const maxAllSearchScannedDirs = 5000;
 
@@ -44,7 +43,6 @@ export async function scanCorpora(
 				skipped++;
 				return;
 			}
-			logDiagnostic(error);
 			throw new Error("Unable to scan corpus directories under root_dir");
 		}
 		const names = new Set(entries.map((entry) => entry.name));

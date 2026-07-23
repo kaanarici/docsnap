@@ -24,16 +24,16 @@ export function corpusFreshness(
 ) {
 	const basis = prior ?? summary;
 	return {
-		requested_freshness: mode,
+		requestedFreshness: mode,
 		decision,
-		generated_at: summary.generatedAt,
-		age_seconds: corpusAgeSeconds(summary),
+		generatedAt: summary.generatedAt,
+		ageSeconds: corpusAgeSeconds(summary),
 		stale: corpusIsStale(basis),
-		stale_after_days: autoFreshnessDays,
+		staleAfterDays: autoFreshnessDays,
 		...(prior && decision === "refreshed"
 			? {
-					prior_generated_at: prior.generatedAt,
-					prior_age_seconds: corpusAgeSeconds(prior),
+					priorGeneratedAt: prior.generatedAt,
+					priorAgeSeconds: corpusAgeSeconds(prior),
 				}
 			: {}),
 	};

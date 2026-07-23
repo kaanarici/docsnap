@@ -1,6 +1,13 @@
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
+import { defaultUserAgent } from "../core/config.ts";
 import { runBounded } from "../core/parallel.ts";
+import { emptyRefreshSummary } from "../core/refresh.ts";
+import {
+	hashContent,
+	snapshotSchemaVersion,
+	snapshotStats,
+} from "../core/snapshot.ts";
 import {
 	type DiscoverySource,
 	discoverySources,
@@ -13,15 +20,17 @@ import {
 	type RunSummary,
 } from "../core/types.ts";
 import { runFiles } from "../output/files.ts";
-import { resolvePriorOutputPath } from "../output/prior.ts";
 import {
-	assertCorpusFiles,
+	markdownFromRendered,
+	resolvePriorOutputPath,
+} from "../output/prior.ts";
+import {
 	corpusLimits,
 	readBoundedCorpusFile,
+	readBoundedCorpusFileFromRealRoot,
 	readOptionalCorpusFileFromRealRoot,
 } from "./access.ts";
-import { mcpCorpusInfo, mcpRunCounts, mcpWarnings } from "./results.ts";
-import { buildRankInput, rankPages } from "./retrieval.ts";
+import { buildRankInput, rankPages } from "../search/rank.ts";
 import {
 	maxAllSearchScannedDirs,
 	type ScanOptions,
@@ -42,14 +51,9 @@ export type CorpusPage = {
 	failureKind?: FailureKind;
 	error?: string;
 	contentHash?: string;
+	outputHash?: string;
 	extractor?: PageExtractor;
 	fetchedAt?: string;
-};
-
-type SummaryOptions = {
-	includeErrors: boolean;
-	includeRefreshChanges: boolean;
-	errorLimit: number;
 };
 
 type SearchOptions = {
@@ -80,7 +84,8 @@ export async function readSummary(outputDir: string): Promise<RunSummary> {
 		corpusLimits.summaryBytes,
 	);
 	try {
-		const raw = JSON.parse(text) as Partial<RunSummary>;
+		const parsed = JSON.parse(text) as unknown;
+		const raw = legacySummary(parsed) ?? (parsed as Partial<RunSummary>);
 		if (
 			!raw ||
 			typeof raw !== "object" ||
@@ -89,6 +94,10 @@ export async function readSummary(outputDir: string): Promise<RunSummary> {
 			typeof raw.seed !== "object" ||
 			typeof raw.seed.attempted !== "boolean" ||
 			typeof raw.seed.included !== "boolean" ||
+			raw.snapshotVersion !== snapshotSchemaVersion ||
+			!isSha256(raw.rootHash) ||
+			!isNonNegativeInteger(raw.corpusFiles) ||
+			!isNonNegativeInteger(raw.corpusBytes) ||
 			!Array.isArray(raw.warnings) ||
 			(raw.captureMode !== "page" && raw.captureMode !== "site") ||
 			!Array.isArray(raw.errors) ||
@@ -104,6 +113,68 @@ export async function readSummary(outputDir: string): Promise<RunSummary> {
 	} catch {
 		throw new Error(`Invalid ${runFiles.summary} in corpus`);
 	}
+}
+
+function legacySummary(value: unknown): Partial<RunSummary> | undefined {
+	if (!value || typeof value !== "object" || "seed" in value) return undefined;
+	const raw = value as Partial<RunSummary> & {
+		renderedFiles?: unknown;
+		renderedBytes?: unknown;
+	};
+	if (
+		raw.snapshotVersion !== snapshotSchemaVersion ||
+		!isSha256(raw.rootHash) ||
+		!isNonNegativeInteger(raw.renderedFiles) ||
+		!isNonNegativeInteger(raw.renderedBytes) ||
+		typeof raw.seedUrl !== "string" ||
+		typeof raw.written !== "number"
+	) {
+		return undefined;
+	}
+	const seedFailure = Array.isArray(raw.errors)
+		? raw.errors.find((error) => error?.url === raw.seedUrl)
+		: undefined;
+	return {
+		...raw,
+		seed: {
+			attempted: true,
+			included: raw.written > 0 && !seedFailure,
+			url: raw.seedUrl,
+			...(seedFailure
+				? {
+						omissionReason: "failed" as const,
+						failureKind: seedFailure.kind,
+						error: seedFailure.error,
+					}
+				: {}),
+		},
+		warnings: [],
+		captureMode: "site",
+		userAgent: defaultUserAgent,
+		corpusFiles: raw.renderedFiles,
+		corpusBytes: raw.renderedBytes,
+		injectionSignalPages: 0,
+		byInjectionSignal: {},
+		byExtractor: Object.fromEntries(
+			pageExtractors.map((extractor) => [extractor, 0]),
+		) as RunSummary["byExtractor"],
+		byInlineStateSource: {},
+		firstPageMs: null,
+		refresh: emptyRefreshSummary(),
+		cache: {
+			enabled: false,
+			dir: null,
+			hits: 0,
+			misses: 0,
+			stale: 0,
+			revalidated: 0,
+			written: 0,
+			notStored: 0,
+			bytesRead: 0,
+			bytesWritten: 0,
+			evictedBytes: 0,
+		},
+	};
 }
 
 export async function readManifest(
@@ -140,36 +211,83 @@ export async function readVerifiedManifest(
 	if (!manifestMatchesSummary(current, records)) {
 		throw new Error(`Invalid ${runFiles.manifest} in corpus`);
 	}
-	await assertCorpusFiles(
-		outputDir,
-		records.flatMap((record) =>
-			record.ok && record.outputPath ? [record.outputPath] : [],
-		),
-		corpusLimits.pageBytes,
+	const retained = records.filter(
+		(record): record is CorpusPage & { outputPath: string } =>
+			record.ok && Boolean(record.outputPath),
 	);
+	const realOutputDir = await realpath(outputDir);
+	const files = await runBounded(
+		retained,
+		{ concurrency: 8, perOrigin: 8, key: () => "" },
+		async (record) => ({
+			path: record.outputPath,
+			body: verifyPageBody(
+				record,
+				await readBoundedCorpusFileFromRealRoot(
+					outputDir,
+					realOutputDir,
+					record.outputPath,
+					corpusLimits.pageBytes,
+				),
+			),
+		}),
+	);
+	const snapshot = snapshotStats(files);
+	if (
+		snapshot.rootHash !== current.rootHash ||
+		snapshot.files !== current.corpusFiles ||
+		snapshot.bytes !== current.corpusBytes
+	) {
+		throw new Error(`Invalid ${runFiles.summary} in corpus`);
+	}
 	return { summary: current, records };
 }
 
-async function manifestStamp(outputDir: string): Promise<string> {
-	const [summaryInfo, manifestInfo] = await Promise.all([
-		stat(join(outputDir, runFiles.summary)),
-		stat(join(outputDir, runFiles.manifest)),
-	]);
-	return `${summaryInfo.mtimeMs}:${summaryInfo.size}:${manifestInfo.mtimeMs}:${manifestInfo.size}`;
+async function manifestStamp(
+	outputDir: string,
+	records: CorpusPage[] = [],
+): Promise<string> {
+	const paths = [
+		runFiles.summary,
+		runFiles.manifest,
+		...records.flatMap((record) =>
+			record.ok && record.outputPath ? [record.outputPath] : [],
+		),
+	];
+	const infos = await Promise.all(
+		paths.map(async (path) => ({
+			path,
+			info: await stat(join(outputDir, path)),
+		})),
+	);
+	return infos
+		.map(
+			({ path, info }) =>
+				`${path}:${info.dev}:${info.ino}:${info.ctimeMs}:${info.mtimeMs}:${info.size}`,
+		)
+		.join("|");
 }
 
 export async function cachedVerifiedManifest(
 	outputDir: string,
 ): Promise<VerifiedManifest> {
-	const stamp = await manifestStamp(outputDir);
 	const hit = manifestCache.get(outputDir);
+	let stamp: string | undefined;
+	try {
+		stamp = await manifestStamp(outputDir, hit?.value.records);
+	} catch {
+		// A refresh can replace the manifest and remove pages from the cached one.
+	}
 	if (hit && hit.stamp === stamp) return hit.value;
 	const value = await readVerifiedManifest(outputDir);
 	if (manifestCache.size >= manifestCacheMax) {
 		const oldest = manifestCache.keys().next().value;
 		if (oldest !== undefined) manifestCache.delete(oldest);
 	}
-	manifestCache.set(outputDir, { stamp, value });
+	manifestCache.set(outputDir, {
+		stamp: await manifestStamp(outputDir, value.records),
+		value,
+	});
 	return value;
 }
 
@@ -177,14 +295,11 @@ export async function listCorpora(
 	rootDir: string,
 	pageSize: number,
 	cursor: string | undefined,
-	extraCorpora: Iterable<string>,
 	options: ScanOptions = {},
 ) {
 	const offset = decodeCursor(cursor);
-	const dirs = new Set<string>(extraCorpora);
 	const scanned = await scanCorpora(rootDir, maxAllSearchScannedDirs, options);
-	for (const dir of scanned.dirs) dirs.add(dir);
-	const dirList = [...dirs];
+	const dirList = scanned.dirs;
 	const entries = await runBounded(
 		dirList,
 		{ concurrency: 8, perOrigin: 1, key: (dir) => dir },
@@ -230,68 +345,6 @@ export async function listAllCorpora(rootDir: string) {
 	};
 }
 
-export async function getCorpusSummary(
-	outputDir: string,
-	options: SummaryOptions,
-) {
-	const { summary } = await cachedVerifiedManifest(outputDir);
-	const { paths, ...corpus } = mcpCorpusInfo(summary, { outputDir });
-	return {
-		corpus: {
-			...corpus,
-			generated_at: summary.generatedAt,
-			paths,
-		},
-		status: summary.status,
-		warnings: mcpWarnings(summary),
-		counts: mcpRunCounts(summary, { includeMaxReached: true }),
-		limits: { max_pages: summary.max, max_reached: summary.maxReached },
-		failure_kinds: summary.byFailureKind,
-		...(options.includeErrors
-			? { errors: summary.errors.slice(0, options.errorLimit) }
-			: {}),
-		...(options.includeRefreshChanges
-			? { refresh: cappedRefresh(summary.refresh) }
-			: {}),
-	};
-}
-
-export async function listPages(
-	outputDir: string,
-	pageSize: number,
-	cursor: string | undefined,
-	includeFailures: boolean,
-) {
-	const offset = decodeCursor(cursor);
-	const records = (await cachedVerifiedManifest(outputDir)).records.filter(
-		(record) => includeFailures || (record.ok && record.outputPath),
-	);
-	const pages = records.slice(offset, offset + pageSize).map((record) => ({
-		...(record.outputPath ? { output_path: record.outputPath } : {}),
-		url: record.url,
-		final_url: record.finalUrl,
-		...(record.title ? { untrusted_web_title: record.title } : {}),
-		...(record.source ? { source: record.source } : {}),
-		...(record.confidence !== undefined
-			? { confidence: record.confidence }
-			: {}),
-		...(record.qualityReasons?.length
-			? { quality_reasons: record.qualityReasons }
-			: {}),
-		...(record.failureKind ? { failure_kind: record.failureKind } : {}),
-		...(record.error ? { error: record.error } : {}),
-		...(record.injectionSignals.length
-			? { injection_signals: record.injectionSignals }
-			: {}),
-	}));
-	return {
-		pages,
-		...(offset + pageSize < records.length
-			? { next_cursor: String(offset + pageSize) }
-			: {}),
-	};
-}
-
 export async function searchCorpus(outputDir: string, options: SearchOptions) {
 	if (options.query.length > corpusLimits.searchQueryChars) {
 		throw new Error(
@@ -311,13 +364,15 @@ export async function searchCorpus(outputDir: string, options: SearchOptions) {
 	const realOutputDir = await realpath(outputDir);
 	const { input, truncated, skipped } = await buildRankInput(
 		records,
-		(record) =>
-			readOptionalCorpusFileFromRealRoot(
+		async (record) => {
+			const body = await readOptionalCorpusFileFromRealRoot(
 				outputDir,
 				realOutputDir,
 				record.outputPath,
 				corpusLimits.pageBytes,
-			),
+			);
+			return body === null ? null : verifyPageBody(record, body);
+		},
 		{ maxPages: corpusLimits.searchPages, maxBytes: corpusLimits.searchBytes },
 		{
 			query: options.query,
@@ -370,62 +425,6 @@ export function globMatches(pattern: string, path: string): boolean {
 	return globCache.get(pattern)!.match(path);
 }
 
-type ReadSliceOptions = {
-	startLine: number;
-	endLine?: number;
-	maxChars: number;
-	includeFrontmatter: boolean;
-};
-
-export async function readPageSlice(
-	outputDir: string,
-	outputPath: string,
-	options: ReadSliceOptions,
-) {
-	const record = (await cachedVerifiedManifest(outputDir)).records.find(
-		(item): item is CorpusPage & { outputPath: string } =>
-			item.ok && item.outputPath === outputPath,
-	);
-	if (!record) throw new Error(`Output path is not in manifest: ${outputPath}`);
-	if (!resolvePriorOutputPath({ outDir: outputDir }, outputPath))
-		throw new Error(`Unsafe output path: ${outputPath}`);
-	const body = await readBoundedCorpusFile(
-		outputDir,
-		outputPath,
-		corpusLimits.pageBytes,
-	);
-	const lines = body.split(/\n/);
-	let from = Math.min(options.startLine - 1, lines.length);
-	let upto =
-		options.endLine !== undefined
-			? Math.min(Math.max(options.endLine, options.startLine), lines.length)
-			: lines.length;
-	if (!options.includeFrontmatter) {
-		const bodyStart = lines[0] === "---" ? lines.indexOf("---", 1) + 1 : 0;
-		if (bodyStart > 0) {
-			from = Math.max(from, bodyStart);
-			upto =
-				options.endLine !== undefined && options.endLine <= bodyStart
-					? Math.min(
-							lines.length,
-							from + options.endLine - options.startLine + 1,
-						)
-					: Math.max(upto, from);
-		}
-	}
-	const selected = lines.slice(from, upto).join("\n");
-	const truncated = selected.length > options.maxChars;
-	const text = truncated ? selected.slice(0, options.maxChars) : selected;
-	const lineCount = text ? text.split(/\n/).length : 1;
-	return {
-		record,
-		startLine: from + 1,
-		endLine: from + lineCount,
-		truncated,
-		text,
-	};
-}
-
 export function decodeCursor(cursor: string | undefined): number {
 	if (cursor === undefined) return 0;
 	if (!/^\d{1,8}$/.test(cursor)) throw new Error("Invalid cursor");
@@ -467,6 +466,7 @@ function parseManifestLine(line: string): CorpusPage {
 	if (failureKind) page.failureKind = failureKind;
 	if (typeof raw.error === "string") page.error = raw.error;
 	if (typeof raw.contentHash === "string") page.contentHash = raw.contentHash;
+	if (typeof raw.outputHash === "string") page.outputHash = raw.outputHash;
 	const extractor = enumValue(raw.extractor, pageExtractors);
 	if (extractor) page.extractor = extractor;
 	if (typeof raw.fetchedAt === "string") page.fetchedAt = raw.fetchedAt;
@@ -478,13 +478,42 @@ function validateManifestPage(page: CorpusPage): void {
 	const valid = page.ok
 		? page.outputPath &&
 			page.source &&
-			page.contentHash &&
+			isSha256(page.contentHash) &&
+			isSha256(page.outputHash) &&
 			page.extractor &&
 			page.confidence !== undefined
 		: page.failureKind && page.error;
 	if (!valid) {
 		throw new Error(`Invalid ${runFiles.manifest} in corpus`);
 	}
+}
+
+function verifyPageBody(
+	record: CorpusPage & { outputPath: string },
+	body: string,
+): string {
+	if (!record.outputHash || hashContent(body) !== record.outputHash) {
+		throw new Error(
+			`Corpus page bytes do not match ${runFiles.manifest}: ${record.outputPath}`,
+		);
+	}
+	if (
+		!record.contentHash ||
+		hashContent(markdownFromRendered(body)) !== record.contentHash
+	) {
+		throw new Error(
+			`Corpus page content does not match ${runFiles.manifest}: ${record.outputPath}`,
+		);
+	}
+	return body;
+}
+
+function isSha256(value: string | undefined): value is string {
+	return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function corpusListEntry(summary: RunSummary, outputDir: string) {
@@ -520,16 +549,4 @@ function enumValue<T extends string>(
 	return typeof value === "string" && allowed.includes(value as T)
 		? (value as T)
 		: undefined;
-}
-
-function cappedRefresh(summary: RunSummary["refresh"]) {
-	return {
-		...summary,
-		changedPages: summary.changedPages.slice(
-			0,
-			corpusLimits.refreshChangedPages,
-		),
-		changedPagesTruncated:
-			summary.changedPages.length > corpusLimits.refreshChangedPages,
-	};
 }

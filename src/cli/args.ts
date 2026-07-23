@@ -24,7 +24,6 @@ const usage = `Usage:
   docsnap list [root=./docsnap] [flags]
   docsnap search <corpus-dir> <query> [flags]
   docsnap search [root=./docsnap] <query> --all [flags]
-  docsnap mcp                  run local stdio MCP server
 
 Flags:
   -o, --out <dir>           output dir; relative paths must stay under the current directory
@@ -55,7 +54,7 @@ Flags:
   --scope <mode>            page, site, or auto; default auto
   --freshness <mode>        auto, reuse, refresh, or force; default auto
   --context-chars <count>   chars per cited snippet; default 500, max 1200
-  --exclude-injection       omit injection-signal pages
+  --include-injection       include injection-signal pages in ranked results
   --no-cache                disable the shared fetch cache when capturing or refreshing
   --json                    print one machine-readable result
   --quiet                   suppress progress logs
@@ -89,7 +88,7 @@ Flags:
   --limit <count>           max matches; default 8, max 50
   --glob <pattern>          restrict matches to output paths
   --all                     search every corpus under the given root
-  --exclude-injection       omit injection-signal pages
+  --include-injection       include injection-signal pages in ranked results
   --json                    print one machine-readable result
 
 Put docsnap flags before --. Tokens after -- are literal query text.
@@ -111,7 +110,7 @@ export type FetchInput = {
 	scope: (typeof fetchScopes)[number];
 	freshness: (typeof freshnessModes)[number];
 	contextChars: number;
-	excludeInjection: boolean;
+	includeInjection: boolean;
 	cache: boolean;
 	json: boolean;
 	quiet: boolean;
@@ -122,7 +121,7 @@ export type SearchInput = {
 	limit: number;
 	json: boolean;
 	all: boolean;
-	excludeInjection: boolean;
+	includeInjection: boolean;
 	pathGlob?: string;
 };
 export type ListInput = {
@@ -207,7 +206,7 @@ function parseFetchArgs(argv: string[]): ParsedArgs {
 		scope: "auto",
 		freshness: "auto",
 		contextChars: 500,
-		excludeInjection: false,
+		includeInjection: false,
 		cache: true,
 		json: false,
 		quiet: false,
@@ -239,7 +238,7 @@ function parseFetchArgs(argv: string[]): ParsedArgs {
 					`--context-chars must be from ${minContextChars} to ${maxContextChars}`,
 				);
 			}
-		} else if (arg === "--exclude-injection") fetch.excludeInjection = true;
+		} else if (arg === "--include-injection") fetch.includeInjection = true;
 		else if (arg === "--no-cache") fetch.cache = false;
 		else if (arg === "--json") fetch.json = true;
 		else if (arg === "--quiet") fetch.quiet = true;
@@ -331,7 +330,7 @@ function parseSearchArgs(argv: string[]): ParsedArgs {
 		limit: 8,
 		json: false,
 		all: false,
-		excludeInjection: false,
+		includeInjection: false,
 	};
 	const positional: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
@@ -348,7 +347,7 @@ function parseSearchArgs(argv: string[]): ParsedArgs {
 		} else if (arg === "--glob") search.pathGlob = readGlob(argv, ++i, arg);
 		else if (arg === "--json") search.json = true;
 		else if (arg === "--all") search.all = true;
-		else if (arg === "--exclude-injection") search.excludeInjection = true;
+		else if (arg === "--include-injection") search.includeInjection = true;
 		else if (arg.startsWith("-"))
 			throw new Error(`Unknown search argument: ${arg}\n\n${searchUsage}`);
 		else positional.push(arg);

@@ -1,6 +1,6 @@
 import { hashContent } from "../core/snapshot.ts";
-import { CorpusReadLimitError } from "./access.ts";
-import type { CorpusPage } from "./corpus.ts";
+import { CorpusReadLimitError } from "../corpus/access.ts";
+import type { CorpusPage } from "../corpus/index.ts";
 import { docSnippet, lineNumberAt } from "./snippets.ts";
 
 type PageRecord = CorpusPage & { outputPath: string };
@@ -159,7 +159,14 @@ export function rankPages(
 	const snippetTerms = new Set(snippetSource);
 	const distinctiveTerms = requiredTerms.filter((term) => term.length >= 8);
 	const literalTerms = queryLiteralTerms(query);
-	const requiredHits = minRequiredHits(requiredTerms.length);
+	const strictHits = minRequiredHits(requiredTerms.length);
+	const hasStrictMatch = input.pages.some(
+		(doc) =>
+			(!options.excludeInjection || doc.record.injectionSignals.length === 0) &&
+			countTermHits(doc, requiredTerms) >= strictHits,
+	);
+	const requiredHits =
+		requiredTerms.length === 2 && !hasStrictMatch ? 1 : strictHits;
 	const scored: RankedSnippet[] = [];
 	for (const doc of input.pages) {
 		if (options.excludeInjection && doc.record.injectionSignals.length)

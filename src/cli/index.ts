@@ -1,35 +1,7 @@
 import { flagTakesValue, parseArgs } from "./args.ts";
-import { runCapture } from "./capture.ts";
-import { runFetch } from "./fetch.ts";
-import { runList } from "./list.ts";
-import { runRefresh } from "./refresh.ts";
-import { runSearch } from "./search.ts";
 
 export async function runCli(argv: string[]): Promise<void> {
 	try {
-		if (argv[0] === "mcp") {
-			if (argv.includes("-h") || argv.includes("--help")) {
-				process.stdout.write(
-					"Usage:\n  docsnap mcp    run local stdio MCP server\n",
-				);
-				return;
-			}
-			if (argv.includes("-v") || argv.includes("--version")) {
-				process.stdout.write(`${await version()}\n`);
-				return;
-			}
-			if (argv.length > 1) {
-				process.stderr.write("docsnap mcp does not accept flags\n");
-				process.exitCode = 1;
-				return;
-			}
-			const { runJsonRpcServer } = await import("../mcp/jsonrpc.ts");
-			await runJsonRpcServer({
-				version: await version(),
-				state: { corpora: new Set(), resourceCorpora: new Map() },
-			});
-			return;
-		}
 		const parsed = parseArgs(await normalizeArgv(argv));
 		if (parsed.kind === "help") {
 			process.stdout.write(`${parsed.help}\n`);
@@ -40,21 +12,26 @@ export async function runCli(argv: string[]): Promise<void> {
 			return;
 		}
 		if (parsed.kind === "list") {
+			const { runList } = await import("./list.ts");
 			await runList(parsed.list);
 			return;
 		}
 		if (parsed.kind === "search") {
+			const { runSearch } = await import("./search.ts");
 			await runSearch(parsed.search);
 			return;
 		}
 		if (parsed.kind === "fetch") {
+			const { runFetch } = await import("./fetch.ts");
 			await runFetch(parsed.fetch);
 			return;
 		}
 		if (parsed.kind === "refresh") {
+			const { runRefresh } = await import("./refresh.ts");
 			await runRefresh(parsed.refresh, parsed.cli);
 			return;
 		}
+		const { runCapture } = await import("./capture.ts");
 		await runCapture(parsed.run, parsed.cli);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);

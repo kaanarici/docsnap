@@ -1,33 +1,19 @@
 import { realpath } from "node:fs/promises";
-import { nextCaptureMax } from "../core/config.ts";
 import { runBounded } from "../core/parallel.ts";
-import {
-	canBroadenAfterFailure,
-	canRetryAfterFailure,
-	type RunSummary,
-} from "../core/types.ts";
 import {
 	corpusLimits,
 	readOptionalCorpusFileFromRealRoot,
-} from "../mcp/access.ts";
+} from "../corpus/access.ts";
 import {
 	type CorpusPage,
 	globMatches,
 	listAllCorpora,
 	readVerifiedManifest,
 	searchCorpus,
-} from "../mcp/corpus.ts";
-import { buildRankInput, rankPages } from "../mcp/retrieval.ts";
-import {
-	captureMoreCommand,
-	captureSiteCommand,
-	inspectSummaryCommand,
-	retryCaptureCommand,
-} from "../output/commands.ts";
+} from "../corpus/index.ts";
+import { buildRankInput, rankPages } from "../search/rank.ts";
 import type { SearchInput } from "./args.ts";
 import {
-	type CappedCorpus,
-	type EmptyCorpus,
 	jsonSearchResult,
 	type SearchResult,
 	textSearchResult,
@@ -48,19 +34,15 @@ export async function runSearch(input: SearchInput): Promise<void> {
 }
 
 async function searchOne(input: SearchInput): Promise<SearchResult> {
-	const { summary, records } = await readVerifiedManifest(input.outputDir);
+	const { records } = await readVerifiedManifest(input.outputDir);
 	const result = await searchCorpus(input.outputDir, {
 		query: input.query,
 		...(input.pathGlob ? { pathGlob: input.pathGlob } : {}),
 		records,
 		maxResults: input.limit,
 		snippetChars,
-		excludeInjection: input.excludeInjection,
+		excludeInjection: !input.includeInjection,
 	});
-	const hints = corpusHintsForSummaries(
-		[{ outputDir: input.outputDir, summary }],
-		{ includeEmpty: result.matches.length === 0 },
-	);
 	return {
 		matches: result.matches.map((match) => ({
 			corpusDir: input.outputDir,
@@ -74,9 +56,6 @@ async function searchOne(input: SearchInput): Promise<SearchResult> {
 		pagesSkipped: result.skipped,
 		injectionFiltered: injectionFiltered(records, input),
 		corporaSkipped: 0,
-		rawSearchDirs: [input.outputDir],
-		cappedCorpora: hints.cappedCorpora,
-		emptyCorpora: hints.emptyCorpora,
 	};
 }
 
@@ -85,15 +64,11 @@ async function searchAll(input: SearchInput): Promise<SearchResult> {
 	const records = await dedupedCorpusRecords(
 		listed.corpora.map((corpus) => corpus.output_dir),
 		{
-			excludeInjection: input.excludeInjection,
+			excludeInjection: !input.includeInjection,
 			...(input.pathGlob ? { pathGlob: input.pathGlob } : {}),
 		},
 	);
 	const searched = await searchAllRecords(records.corpora, input);
-	const hints = corpusHintsForSummaries(records.summaries, {
-		includeEmpty: searched.matches.length === 0,
-		cappedDirs: new Set(records.corpora.map((corpus) => corpus.corpusDir)),
-	});
 	return {
 		matches: searched.matches,
 		corporaScanned: records.scanned,
@@ -104,9 +79,6 @@ async function searchAll(input: SearchInput): Promise<SearchResult> {
 		limited: searched.limited,
 		pagesSkipped: searched.pagesSkipped,
 		injectionFiltered: records.injectionFiltered,
-		rawSearchDirs: records.corpora.map((corpus) => corpus.corpusDir),
-		cappedCorpora: hints.cappedCorpora,
-		emptyCorpora: hints.emptyCorpora,
 	};
 }
 
@@ -147,7 +119,7 @@ async function searchAllRecords(
 	const ranked = rankPages(rankInput, input.query, {
 		maxResults: input.limit + 1,
 		snippetChars,
-		excludeInjection: input.excludeInjection,
+		excludeInjection: !input.includeInjection,
 	});
 	return {
 		matches: ranked.slice(0, input.limit).map((match) => ({
@@ -168,7 +140,6 @@ async function dedupedCorpusRecords(
 	scanned: number;
 	injectionFiltered: number;
 	skipped: number;
-	summaries: CorpusSummary[];
 }> {
 	const loaded = await runBounded(
 		corpusDirs,
@@ -179,15 +150,13 @@ async function dedupedCorpusRecords(
 	let scanned = 0;
 	let injectionFiltered = 0;
 	let skipped = 0;
-	const summaries: CorpusSummary[] = [];
 	for (const item of loaded) {
-		if (!item.records || !item.summary) {
+		if (!item.records) {
 			skipped++;
 			continue;
 		}
 		scanned++;
-		const { corpusDir, records, summary } = item;
-		summaries.push({ outputDir: corpusDir, summary });
+		const { corpusDir, records } = item;
 		for (const record of records) {
 			if (!record.ok || !record.outputPath) continue;
 			if (options.pathGlob && !globMatches(options.pathGlob, record.outputPath))
@@ -215,97 +184,23 @@ async function dedupedCorpusRecords(
 		scanned,
 		injectionFiltered,
 		skipped,
-		summaries,
 	};
 }
 
 type CorpusRecords = {
 	corpusDir: string;
-	summary?: RunSummary;
 	records?: CorpusPage[];
 };
 
 async function readCorpusRecords(corpusDir: string): Promise<CorpusRecords> {
 	try {
-		return { corpusDir, ...(await readVerifiedManifest(corpusDir)) };
+		return {
+			corpusDir,
+			records: (await readVerifiedManifest(corpusDir)).records,
+		};
 	} catch {
 		return { corpusDir };
 	}
-}
-
-type CorpusSummary = { outputDir: string; summary: RunSummary };
-
-type CorpusHints = {
-	cappedCorpora: CappedCorpus[];
-	emptyCorpora: EmptyCorpus[];
-};
-
-const maxCappedHints = 3;
-const maxEmptyHints = 3;
-function corpusHintsForSummaries(
-	summaries: CorpusSummary[],
-	options: { includeEmpty: boolean; cappedDirs?: Set<string> },
-): CorpusHints {
-	const hints: CorpusHints = { cappedCorpora: [], emptyCorpora: [] };
-	for (const { outputDir, summary } of summaries) {
-		const nextMax = summary.maxReached
-			? nextCaptureMax(summary.max)
-			: undefined;
-		if (
-			nextMax !== undefined &&
-			(options.cappedDirs === undefined || options.cappedDirs.has(outputDir)) &&
-			hints.cappedCorpora.length < maxCappedHints
-		) {
-			hints.cappedCorpora.push({
-				outputDir,
-				seedUrl: summary.seedUrl,
-				command: captureMoreCommand(
-					summary.seedUrl,
-					outputDir,
-					summary.captureMode,
-					nextMax,
-				),
-			});
-		}
-		if (
-			options.includeEmpty &&
-			summary.written === 0 &&
-			hints.emptyCorpora.length < maxEmptyHints
-		) {
-			hints.emptyCorpora.push({
-				outputDir,
-				seedUrl: summary.seedUrl,
-				commands: {
-					inspect_summary: inspectSummaryCommand(outputDir),
-					...(canRetryAfterFailure(summary.seed.failureKind)
-						? {
-								retry_capture: retryCaptureCommand(
-									summary.seedUrl,
-									outputDir,
-									summary.captureMode,
-									summary.max,
-								),
-							}
-						: {}),
-					...(summary.captureMode === "page" &&
-					canBroadenAfterFailure(summary.seed.failureKind)
-						? {
-								capture_site: captureSiteCommand(
-									summary.seedUrl,
-									outputDir,
-									summary.max,
-								),
-							}
-						: {}),
-				},
-			});
-		}
-		const enoughCapped = hints.cappedCorpora.length >= maxCappedHints;
-		const enoughEmpty =
-			!options.includeEmpty || hints.emptyCorpora.length >= maxEmptyHints;
-		if (enoughCapped && enoughEmpty) break;
-	}
-	return hints;
 }
 
 type CorpusRecord = {
@@ -321,7 +216,7 @@ function preferRecord(next: CorpusRecord, current: CorpusRecord) {
 }
 
 function injectionFiltered(records: CorpusPage[], input: SearchInput) {
-	if (!input.excludeInjection) return 0;
+	if (input.includeInjection) return 0;
 	return records.filter(
 		(record) =>
 			record.ok &&
@@ -337,6 +232,6 @@ function hasSearchableRecords(records: CorpusPage[], input: SearchInput) {
 			record.ok &&
 			record.outputPath &&
 			(!input.pathGlob || globMatches(input.pathGlob, record.outputPath)) &&
-			(!input.excludeInjection || record.injectionSignals.length === 0),
+			(input.includeInjection || record.injectionSignals.length === 0),
 	);
 }
