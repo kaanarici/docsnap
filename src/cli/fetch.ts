@@ -510,7 +510,6 @@ function resolveScope(input: FetchInput): FetchScope {
 	if (input.scope === "page") return "page";
 	if (input.scope === "site") return "site";
 	if (classifyDiscoveryResource(input.url)?.source === "llms") return "site";
-	if (input.question && /\/(?:[?#].*)?$/.test(input.url)) return "site";
 	return looksLikeSpecificContentUrl(input.url) ? "page" : "site";
 }
 
