@@ -1,20 +1,13 @@
 import { join } from "node:path";
 import { citationId } from "../core/citation.ts";
-import {
-	buildPipelineConfig,
-	captureSelectionHash,
-} from "../core/config.ts";
+import { buildPipelineConfig, captureSelectionHash } from "../core/config.ts";
 import {
 	corpusFreshness,
 	corpusIsStale,
 	type FreshnessDecision,
 } from "../core/freshness.ts";
 import { assertRefreshSelection } from "../core/refresh.ts";
-import type {
-	FailureKind,
-	PipelineConfig,
-	RunSummary,
-} from "../core/types.ts";
+import type { FailureKind, PipelineConfig, RunSummary } from "../core/types.ts";
 import { runSucceeded } from "../core/types.ts";
 import {
 	canonicalUrlSearch,
@@ -305,9 +298,7 @@ function textFetchResult(result: FetchResult): string {
 				`url: ${citation.url}`,
 			);
 			if (citation.injectionSignals?.length) {
-				lines.push(
-					`injectionSignals: ${citation.injectionSignals.join(", ")}`,
-				);
+				lines.push(`injectionSignals: ${citation.injectionSignals.join(", ")}`);
 			}
 			lines.push("", citation.snippet.trimEnd());
 		}
@@ -526,10 +517,7 @@ function selectedOutputDir(config: PipelineConfig) {
 		: config.outDir;
 }
 
-function buildBaseConfig(
-	input: FetchInput,
-	scope: FetchScope,
-): PipelineConfig {
+function buildBaseConfig(input: FetchInput, scope: FetchScope): PipelineConfig {
 	const max = captureMax(input, scope);
 	return buildPipelineConfig({
 		seedUrl: input.url,
@@ -542,10 +530,7 @@ function buildBaseConfig(
 	});
 }
 
-function captureMax(
-	input: FetchInput,
-	scope: FetchScope,
-): number | undefined {
+function captureMax(input: FetchInput, scope: FetchScope): number | undefined {
 	if (scope === "page") return 1;
 	if (input.maxPages !== undefined) return input.maxPages;
 	if (input.scope === "auto") return autoSiteCap;
@@ -581,7 +566,9 @@ async function topPages(
 			record.ok && Boolean(record.outputPath),
 	);
 	const candidates = normalizedUrlVariants(requestedUrl);
-	const requested = records.find((record) => pageMatchesUrl(record, candidates));
+	const requested = records.find((record) =>
+		pageMatchesUrl(record, candidates),
+	);
 	return [
 		...(requested ? [requested] : []),
 		...records.filter((record) => record !== requested),

@@ -24,13 +24,13 @@ import {
 	markdownFromRendered,
 	resolvePriorOutputPath,
 } from "../output/prior.ts";
+import { buildRankInput, rankPages } from "../search/rank.ts";
 import {
 	corpusLimits,
 	readBoundedCorpusFile,
 	readBoundedCorpusFileFromRealRoot,
 	readOptionalCorpusFileFromRealRoot,
 } from "./access.ts";
-import { buildRankInput, rankPages } from "../search/rank.ts";
 import {
 	maxAllSearchScannedDirs,
 	type ScanOptions,

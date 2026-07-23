@@ -4,15 +4,10 @@ import { listCorpora } from "../corpus/index.ts";
 import type { ListInput } from "./args.ts";
 
 export async function runList(input: ListInput): Promise<void> {
-	const result = await listCorpora(
-		input.rootDir,
-		input.limit,
-		input.cursor,
-		{
-			allowAbsoluteRoot: true,
-			preserveAbsolutePaths: isAbsolute(input.rootDir),
-		},
-	);
+	const result = await listCorpora(input.rootDir, input.limit, input.cursor, {
+		allowAbsoluteRoot: true,
+		preserveAbsolutePaths: isAbsolute(input.rootDir),
+	});
 	const output = {
 		ok: true,
 		rootDir: input.rootDir,
@@ -65,9 +60,7 @@ function issueLines(corpus: ListEntry) {
 		countIssue("low_quality", corpus.low_quality),
 		countIssue("quality_warnings", corpus.quality_warnings),
 		countIssue("injection", corpus.injection_signal_pages),
-		corpus.seed_failure_kind
-			? `failureKind=${corpus.seed_failure_kind}`
-			: "",
+		corpus.seed_failure_kind ? `failureKind=${corpus.seed_failure_kind}` : "",
 		corpus.max_reached ? "max_reached" : "",
 	].filter(Boolean);
 	return issues.length ? [`  issues: ${issues.join(", ")}`] : [];
