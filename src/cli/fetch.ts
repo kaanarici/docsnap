@@ -1,12 +1,11 @@
 import { join } from "node:path";
 import { citationId } from "../core/citation.ts";
-import { buildPipelineConfig, captureSelectionHash } from "../core/config.ts";
+import { buildPipelineConfig } from "../core/config.ts";
 import {
 	corpusFreshness,
 	corpusIsStale,
 	type FreshnessDecision,
 } from "../core/freshness.ts";
-import { assertRefreshSelection } from "../core/refresh.ts";
 import type { FailureKind, PipelineConfig, RunSummary } from "../core/types.ts";
 import { runSucceeded } from "../core/types.ts";
 import {
@@ -125,24 +124,14 @@ async function fetchResult(input: FetchInput): Promise<FetchResult> {
 	const base = buildBaseConfig(input, scope);
 	const requested =
 		input.freshness === "reuse" ? { ...base, maxExplicit: false } : base;
-	const requestedOutputDir = input.outputDir ?? selectedOutputDir(base);
+	const requestedOutputDir = input.outputDir ?? base.outDir;
 	const outputDir = await cliOutputDir(input, requestedOutputDir, base);
 	const existing = await existingCorpus(
 		outputDir,
 		requested,
 		input.freshness === "force",
 	);
-	if (
-		input.freshness === "auto" &&
-		existing &&
-		!selectionMatches(existing, base)
-	) {
-		throw mismatchError(outputDir, existing, base.seedUrl);
-	}
 	const action = decideAction(input.freshness, existing);
-	if (action === "refreshed" && existing) {
-		assertRefreshSelection(existing, input.question);
-	}
 	const progress = input.quiet || input.json ? undefined : logLine;
 	const summary =
 		action === "reused" && existing
@@ -231,7 +220,6 @@ function refreshConfig(
 			input.maxPages !== undefined ? true : prior.maxAppliesTo === "all",
 		pageOnly: prior.captureMode === "page",
 		userAgent: prior.userAgent,
-		...(input.question ? { topic: input.question } : {}),
 		cache: input.cache,
 	});
 }
@@ -460,8 +448,7 @@ export function canReplaceCorpus(
 	return (
 		allowReplace ||
 		!runSucceeded(summary) ||
-		(selectionMatches(summary, requested) &&
-			summary.seedUrl === requested.seedUrl &&
+		(summary.seedUrl === requested.seedUrl &&
 			summary.captureMode === (requested.pageOnly ? "page" : "site"))
 	);
 }
@@ -500,23 +487,6 @@ function decideAction(
 	return "captured";
 }
 
-function selectionMatches(summary: RunSummary, requested: PipelineConfig) {
-	return (
-		!requested.topic ||
-		requested.pageOnly ||
-		!summary.maxReached ||
-		!summary.selectionHash ||
-		summary.selectionHash === captureSelectionHash(requested.topic)
-	);
-}
-
-function selectedOutputDir(config: PipelineConfig) {
-	const hash = captureSelectionHash(config.topic);
-	return hash && config.maxExplicit && !config.pageOnly
-		? `${config.outDir}-${hash.slice(0, 8)}`
-		: config.outDir;
-}
-
 function buildBaseConfig(input: FetchInput, scope: FetchScope): PipelineConfig {
 	const max = captureMax(input, scope);
 	return buildPipelineConfig({
@@ -525,7 +495,6 @@ function buildBaseConfig(input: FetchInput, scope: FetchScope): PipelineConfig {
 		site: scope === "site",
 		...(max !== undefined ? { max } : {}),
 		maxExplicit: max !== undefined,
-		...(input.question ? { topic: input.question } : {}),
 		cache: input.cache,
 	});
 }
