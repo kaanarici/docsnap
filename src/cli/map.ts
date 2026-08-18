@@ -1,7 +1,7 @@
 import { pruneCache } from "../cache/eviction.ts";
 import { buildPipelineConfig } from "../core/config.ts";
 import { terminalText } from "../core/text.ts";
-import { discoverMap } from "../discover/index.ts";
+import { discoverMap } from "../discover/map-run.ts";
 import type { MapInput } from "./args.ts";
 
 export async function runMap(input: MapInput) {

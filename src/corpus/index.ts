@@ -30,6 +30,7 @@ import {
 	inlineStateSources,
 	type PageExtractor,
 	pageExtractors,
+	pageKinds,
 	type RunSummary,
 } from "../core/types.ts";
 import { runFiles } from "../output/files.ts";
@@ -271,6 +272,8 @@ function isRunSummary(value: JsonValue): value is JsonObject & RunSummary {
 		isNonNegativeFinite(value.pagesPerSecond) &&
 		isCountRecord(value.bySource, discoverySources, true) &&
 		isCountRecord(value.byExtractor, pageExtractors, true) &&
+		(value.byKind === undefined ||
+			isCountRecord(value.byKind, pageKinds, false)) &&
 		isCountRecord(value.byInlineStateSource, inlineStateSources) &&
 		isCountRecord(value.byFailureKind, failureKinds) &&
 		isObjectArray(

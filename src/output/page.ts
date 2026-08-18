@@ -15,6 +15,8 @@ function frontmatter(record: PageSuccess, fetchedAt: string) {
 		source: record.source,
 		fetchedAt,
 		extractor: record.extractor,
+		kind: record.kind,
+		byteSource: record.byteSource,
 		confidence: record.confidence,
 		contentHash: record.contentHash,
 		requestedSeed: record.wasSeed ? true : undefined,

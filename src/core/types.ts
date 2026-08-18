@@ -36,6 +36,23 @@ export const pageExtractors = [
 
 export type PageExtractor = (typeof pageExtractors)[number];
 
+export const pageKinds = [
+	"markdown",
+	"docs-html",
+	"article-html",
+	"app-shell",
+	"binary",
+	"feed",
+	"empty",
+	"blocked",
+] as const;
+
+export type PageKind = (typeof pageKinds)[number];
+
+export const byteSources = ["http", "chrome"] as const;
+
+export type ByteSource = (typeof byteSources)[number];
+
 export const inlineStateSources = [
 	"next-data",
 	"rsc",
@@ -237,6 +254,8 @@ export type PageSuccess = PageBase & {
 	media?: string[];
 	contentHash: string;
 	extractor: PageExtractor;
+	kind?: PageKind;
+	byteSource?: ByteSource;
 	inlineStateSource?: InlineStateSource;
 	confidence: number;
 	qualityReasons: string[];
@@ -297,6 +316,7 @@ export type RunSummary = {
 	pagesPerSecond: number;
 	bySource: Record<DiscoverySource, number>;
 	byExtractor: Record<PageExtractor, number>;
+	byKind?: Partial<Record<PageKind, number>>;
 	byInlineStateSource: Partial<Record<InlineStateSource, number>>;
 	byFailureKind: Partial<Record<FailureKind, number>>;
 	errors: Array<{ url: string; error: string; kind: FailureKind }>;

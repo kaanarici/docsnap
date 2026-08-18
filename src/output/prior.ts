@@ -20,10 +20,12 @@ import type {
 	RedirectHop,
 } from "../core/types.ts";
 import {
+	byteSources,
 	discoverySources,
 	filterInjectionSignals,
 	inlineStateSources,
 	pageExtractors,
+	pageKinds,
 } from "../core/types.ts";
 import { corpusLimits, readBoundedCorpusFile } from "../corpus/access.ts";
 import { scanMarkdownForInjectionSignals } from "../security/injection.ts";
@@ -287,6 +289,10 @@ export function parseReusablePrior(
 		const items = stringArray(value[key]);
 		if (items) record[key] = items;
 	}
+	const kind = jsonEnum(value["kind"], pageKinds);
+	if (kind) record.kind = kind;
+	const byteSource = jsonEnum(value["byteSource"], byteSources);
+	if (byteSource) record.byteSource = byteSource;
 	const inlineStateSource = jsonEnum(
 		value["inlineStateSource"],
 		inlineStateSources,

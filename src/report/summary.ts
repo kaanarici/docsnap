@@ -12,10 +12,12 @@ import {
 	injectionSignals,
 	inlineStateSources,
 	lowQualityConfidence,
+	type PageKind,
 	type PageOutput,
 	type PageRecord,
 	type PipelineConfig,
 	pageExtractors,
+	pageKinds,
 	type RefreshSummary,
 	type RunSummary,
 	type RunWarning,
@@ -51,6 +53,7 @@ export function buildSummary(
 	>();
 	const bySource = emptyCounts(discoverySources);
 	const byExtractor = emptyCounts(pageExtractors);
+	const byKind: Partial<Record<PageKind, number>> = {};
 	const byInlineStateSource: Partial<Record<InlineStateSource, number>> = {};
 	const byFailureKind: Partial<Record<FailureKind, number>> = {};
 	const byInjectionSignal: Partial<Record<InjectionSignal, number>> = {};
@@ -74,6 +77,9 @@ export function buildSummary(
 
 	for (const record of outputs) {
 		byExtractor[record.extractor]++;
+		if (record.kind) {
+			byKind[record.kind] = (byKind[record.kind] ?? 0) + 1;
+		}
 		if (record.inlineStateSource) {
 			byInlineStateSource[record.inlineStateSource] =
 				(byInlineStateSource[record.inlineStateSource] ?? 0) + 1;
@@ -150,6 +156,8 @@ export function buildSummary(
 	};
 	if (selectionHash) summary.selectionHash = selectionHash;
 	if (render) summary.render = render;
+	const countedByKind = orderedPartialCounts(byKind, pageKinds);
+	if (Object.keys(countedByKind).length) summary.byKind = countedByKind;
 	return summary;
 }
 

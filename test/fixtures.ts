@@ -6,6 +6,7 @@ import { hashContent, snapshotStats } from "../src/core/snapshot.ts";
 import type {
 	FetchResult,
 	PageOutput,
+	PathedPage,
 	PipelineConfig,
 	RunRecord,
 	RunSummary,
@@ -79,7 +80,7 @@ export function okFetch(
 export function testPage(
 	markdown = "# Guide\n\nHash-verified documentation content.",
 ): PageOutput {
-	const base = {
+	const base: PathedPage = {
 		ok: true as const,
 		url: "https://docs.example.com/guide",
 		finalUrl: "https://docs.example.com/guide",
