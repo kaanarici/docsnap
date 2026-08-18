@@ -1,10 +1,10 @@
 import { join } from "node:path";
-import { countLabel } from "../core/text.ts";
+import { countLabel, terminalText } from "../core/text.ts";
 import type { RunSummary } from "../core/types.ts";
 import { runFiles } from "../output/files.ts";
 
 export function logLine(message: string): void {
-	process.stderr.write(`${message}\n`);
+	process.stderr.write(`${terminalText(message)}\n`);
 }
 
 export function printSummary(summary: RunSummary): void {
@@ -21,10 +21,15 @@ export function printSummary(summary: RunSummary): void {
 	if (summary.maxReached) {
 		logLine(`docsnap: page limit ${summary.max} reached`);
 	}
-	const assetWarning = summary.warnings.find(
-		(warning) => warning.kind === "asset_recovery_truncated",
-	);
-	if (assetWarning) logLine(`docsnap: warning ${assetWarning.message}`);
+	if (summary.discoveryTruncated)
+		logLine("docsnap: warning discovery stopped at its safety budget");
+	if (summary.render?.unavailable) {
+		logLine(
+			`docsnap: warning renderer unavailable: ${summary.render.unavailable}`,
+		);
+	} else if (summary.render?.truncated) {
+		logLine("docsnap: warning rendering stopped at its safety budget");
+	}
 	if (summary.failed || summary.lowQuality) {
 		const notFound = summary.byFailureKind.not_found ?? 0;
 		const failed = summary.failed - notFound;
@@ -46,18 +51,14 @@ export function printSummary(summary: RunSummary): void {
 		);
 	}
 	if (!summary.dryRun) {
-		logLine(`docsnap: summary ${artifactPath(summary, runFiles.summary)}`);
-		logLine(`docsnap: manifest ${artifactPath(summary, runFiles.manifest)}`);
+		logLine(`docsnap: summary ${join(outputDir(summary), runFiles.summary)}`);
+		logLine(`docsnap: manifest ${join(outputDir(summary), runFiles.manifest)}`);
 	}
 	if (summary.seed.failureKind || summary.seed.error) {
 		logLine(
 			`docsnap: seed failure ${summary.seed.failureKind ?? "unknown"}${summary.seed.error ? `: ${summary.seed.error}` : ""}`,
 		);
 	}
-}
-
-function artifactPath(summary: RunSummary, file: string) {
-	return join(outputDir(summary), file);
 }
 
 function outputDir(summary: RunSummary) {
@@ -80,7 +81,7 @@ function summaryAction(summary: RunSummary) {
 
 function refreshLine(summary: RunSummary) {
 	const refresh = summary.refresh;
-	return `docsnap: refresh new=${refresh.new} changed=${refresh.changed} unchanged=${refresh.unchanged} removed=${refresh.removed} skipped_writes=${refresh.skippedWrites}`;
+	return `docsnap: refresh new=${refresh.new} changed=${refresh.changed} unchanged=${refresh.unchanged} removed=${refresh.removed} page_writes=${refresh.pageWrites} skipped_writes=${refresh.skippedWrites}`;
 }
 
 function failureSummary(summary: RunSummary) {

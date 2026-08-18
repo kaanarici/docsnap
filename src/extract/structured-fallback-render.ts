@@ -6,7 +6,6 @@ import {
 	imageMarkdown,
 	isElement,
 	isLinkDominatedContainer,
-	isThemeImageTwin,
 	linkText,
 	maxBacktickRun,
 	maxCodeChars,
@@ -15,7 +14,6 @@ import {
 	maxTableCells,
 	maxTableFrames,
 	maxTableRows,
-	needsImplicitInlineSpace,
 	pushInline,
 	pushNodeChildren,
 	removePipes,
@@ -32,13 +30,11 @@ import {
 } from "./structured-fallback-shared.ts";
 
 type InlineCheckpoint = { chunks: number; chars: number };
-type InlineFrame = {
-	node: Node;
+type Frame = {
+	node?: Node;
 	close?: string;
 	checkpoint?: InlineCheckpoint;
 };
-
-type TextFrame = { node?: Node; close?: " " | "\n" };
 
 type TableRow = { cells: Element[]; header: boolean };
 
@@ -50,7 +46,7 @@ export function inlineMarkdown(
 ) {
 	const chunks: string[] = [];
 	let chars = 0;
-	const stack: InlineFrame[] = [{ node: root }];
+	const stack: Frame[] = [{ node: root }];
 	const atomicCheckpoints: InlineCheckpoint[] = [];
 
 	while (
@@ -67,13 +63,14 @@ export function inlineMarkdown(
 					chars = frame.checkpoint.chars;
 					continue;
 				}
-				chars = pushWholeInline(chunks, frame.close, chars);
+				chars = pushInline(chunks, frame.close, chars, true);
 				continue;
 			}
 			chars = pushInline(chunks, frame.close, chars);
 			continue;
 		}
 		const node = frame.node;
+		if (!node) continue;
 		if (node.nodeType === textNode) {
 			chars = pushInline(
 				chunks,
@@ -98,10 +95,11 @@ export function inlineMarkdown(
 		}
 		const parent = node.parentNode;
 		if (tag === "code" && (!isElement(parent) || tagName(parent) !== "pre")) {
-			chars = pushWholeInline(
+			chars = pushInline(
 				chunks,
 				inlineCode(collectText(node, maxInlineChars)),
 				chars,
+				true,
 			);
 			continue;
 		}
@@ -129,7 +127,7 @@ export function inlineMarkdown(
 			atomicCheckpoints.push(checkpoint);
 			stack.push({ node, close: emphasis, checkpoint });
 			pushFrameChildren(stack, node, budget.maxVisits - budget.visits);
-			chars = pushWholeInline(chunks, emphasis, chars);
+			chars = pushInline(chunks, emphasis, chars, true);
 			continue;
 		}
 		if (tag === "hr") {
@@ -137,11 +135,11 @@ export function inlineMarkdown(
 			continue;
 		}
 		if (tag === "pre") {
-			chars = pushWholeInline(chunks, `\n${codeBlock(node)}\n`, chars);
+			chars = pushInline(chunks, `\n${codeBlock(node)}\n`, chars, true);
 			continue;
 		}
 		if (tag === "img") {
-			chars = pushWholeInline(chunks, imageMarkdown(node, baseUrl), chars);
+			chars = pushInline(chunks, imageMarkdown(node, baseUrl), chars, true);
 			continue;
 		}
 		if (voidTags.has(tag)) continue;
@@ -151,7 +149,6 @@ export function inlineMarkdown(
 		chunks.length = atomicCheckpoints[0]!.chunks;
 	return tidyInline(chunks.join(""));
 }
-
 export function codeBlock(element: Element) {
 	const source =
 		Array.from(element.children).find((child) => tagName(child) === "code") ??
@@ -266,7 +263,7 @@ function collectText(
 	const chunks: string[] = [];
 	let chars = 0;
 	let visits = 0;
-	const stack: TextFrame[] = [{ node: root }];
+	const stack: Frame[] = [{ node: root }];
 	while (stack.length > 0 && chars < maxChars && visits++ < 4_000) {
 		const frame = stack.pop()!;
 		if (frame.close) {
@@ -360,25 +357,12 @@ function adjacentCodeLanguage(element: Element) {
 	return match[1]!.toLowerCase();
 }
 
-function pushFrameChildren(
-	stack: { node?: Node }[],
-	element: Element,
-	limit: number,
-) {
+function pushFrameChildren(stack: Frame[], element: Element, limit: number) {
 	for (const child of Array.from(element.childNodes)
 		.reverse()
 		.slice(0, limit)) {
 		stack.push({ node: child });
 	}
-}
-
-function pushWholeInline(chunks: string[], value: string, chars: number) {
-	const prefix = needsImplicitInlineSpace(chunks.at(-1), value) ? " " : "";
-	if (!value || chars + prefix.length + value.length > maxInlineChars)
-		return chars;
-	if (isThemeImageTwin(chunks.at(-1), value)) return chars;
-	chunks.push(prefix ? `${prefix}${value}` : value);
-	return chars + prefix.length + value.length;
 }
 
 function collectTableRows(table: Element, budget: VisitBudget) {

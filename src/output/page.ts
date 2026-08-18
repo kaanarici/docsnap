@@ -13,23 +13,24 @@ function frontmatter(record: PageSuccess, fetchedAt: string) {
 		finalUrl: record.finalUrl,
 		status: record.status,
 		source: record.source,
-		...(record.wasSeed ? { requestedSeed: true } : {}),
 		fetchedAt,
 		extractor: record.extractor,
 		confidence: record.confidence,
-		...(record.qualityReasons.length
-			? { qualityReasons: record.qualityReasons }
-			: {}),
 		contentHash: record.contentHash,
-		...(record.injectionSignals.length
-			? { injectionSignals: record.injectionSignals }
-			: {}),
-		...(record.publishedAt ? { publishedAt: record.publishedAt } : {}),
-		...(record.updatedAt ? { updatedAt: record.updatedAt } : {}),
-		...(record.aliases?.length ? { aliases: record.aliases } : {}),
-		...(record.redirects.length ? { redirects: record.redirects } : {}),
+		requestedSeed: record.wasSeed ? true : undefined,
+		qualityReasons: record.qualityReasons.length
+			? record.qualityReasons
+			: undefined,
+		injectionSignals: record.injectionSignals.length
+			? record.injectionSignals
+			: undefined,
+		publishedAt: record.publishedAt || undefined,
+		updatedAt: record.updatedAt || undefined,
+		aliases: record.aliases?.length ? record.aliases : undefined,
+		redirects: record.redirects.length ? record.redirects : undefined,
 	};
 	return `---\n${Object.entries(fields)
+		.filter(([, value]) => value !== undefined)
 		.map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
 		.join("\n")}\n---`;
 }

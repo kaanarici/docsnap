@@ -2,7 +2,7 @@ import { statSync } from "node:fs";
 import { type ConfigInput, maxGeneratedCapturePages } from "../core/config.ts";
 import type { CliOptions } from "../core/types.ts";
 
-export const maxSearchResults = 50;
+const maxSearchResults = 50;
 const maxListResults = 100;
 const minContextChars = 120;
 const maxContextChars = 1200;
@@ -19,6 +19,7 @@ const valueFlags = new Set([
 
 const usage = `Usage:
   docsnap <url> [flags]
+  docsnap map <url> [flags]
   docsnap fetch <url> [question] [flags]
   docsnap refresh <corpus-dir> [flags]
   docsnap list [root=./docsnap] [flags]
@@ -28,10 +29,10 @@ const usage = `Usage:
 Flags:
   -o, --out <dir>           output dir; relative paths must stay under the current directory
   -m, --max <count>         max pages; default all llms.txt pages, otherwise 50
-  --concurrency <n>         fetch concurrency, CPU-scaled default up to 64
+  --concurrency <n>         fetch concurrency; default 8
   --clean                   remove output dir before writing
   --dry-run                 run without writing files
-  --page                    capture only the given page after robots.txt check
+  --page                    capture only the supplied page
   --site                    force site discovery for a specific page URL
   --no-cache                disable the shared fetch cache for this run
   --json                    print one machine-readable result
@@ -43,7 +44,19 @@ Flags:
   -v, --version             show version
   -h, --help                show help
 
-Run "docsnap fetch --help", "docsnap refresh --help", "docsnap list --help", or "docsnap search --help" for subcommand flags.`;
+Run "docsnap map --help", "docsnap fetch --help", "docsnap refresh --help", "docsnap list --help", or "docsnap search --help" for subcommand flags.`;
+
+const mapUsage = `Usage:
+  docsnap map <url> [flags]
+
+Returns bounded site-capture candidates without extracting or writing a corpus.
+
+Flags:
+  -m, --max <count>         max URLs; default 50, max 500
+  --concurrency <n>         fetch concurrency
+  --no-cache                disable the shared fetch cache
+  --json                    include sources, errors, timing, and coverage limits
+  --user-agent <value>      custom User-Agent`;
 
 const fetchUsage = `Usage:
   docsnap fetch <url> [question] [flags]
@@ -95,7 +108,6 @@ Put docsnap flags before --. Tokens after -- are literal query text.
 Use -- before query text that starts with a docsnap flag.
 With --all, pass a path-like or existing root before the query to search outside ./docsnap.`;
 
-type ParsedRun = { kind: "run"; run: ConfigInput; cli: CliOptions };
 export type RefreshInput = {
 	outputDir: string;
 	max?: number;
@@ -130,8 +142,10 @@ export type ListInput = {
 	cursor?: string;
 	json: boolean;
 };
+export type MapInput = { config: ConfigInput; json: boolean };
 type ParsedArgs =
-	| ParsedRun
+	| { kind: "run"; run: ConfigInput; cli: CliOptions }
+	| { kind: "map"; map: MapInput }
 	| { kind: "fetch"; fetch: FetchInput }
 	| { kind: "refresh"; refresh: RefreshInput; cli: CliOptions }
 	| { kind: "list"; list: ListInput }
@@ -144,6 +158,7 @@ export function flagTakesValue(flag: string): boolean {
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
+	if (argv[0] === "map") return parseMapArgs(argv.slice(1));
 	if (argv[0] === "fetch") return parseFetchArgs(argv.slice(1));
 	if (argv[0] === "refresh") return parseRefreshArgs(argv.slice(1));
 	if (argv[0] === "list") return parseListArgs(argv.slice(1));
@@ -154,12 +169,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
 		return { kind: "version", version: true };
 
 	const run: ConfigInput = { seedUrl: "" };
-	const cli: CliOptions = {
-		json: false,
-		quiet: false,
-		failOnLowQuality: false,
-		failOnInjectionSignal: false,
-	};
+	const cli = defaultCliOptions();
 
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i]!;
@@ -195,6 +205,39 @@ export function parseArgs(argv: string[]): ParsedArgs {
 	return { kind: "run", run, cli };
 }
 
+function parseMapArgs(argv: string[]): ParsedArgs {
+	if (argv.includes("-h") || argv.includes("--help")) {
+		return { kind: "help", help: mapUsage };
+	}
+	const config: ConfigInput = {
+		seedUrl: "",
+		maxExplicit: true,
+		site: true,
+	};
+	let json = false;
+	const positional: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i]!;
+		if (arg === "-m" || arg === "--max") {
+			config.max = readInt(argv, ++i, arg, maxGeneratedCapturePages);
+		} else if (arg === "--concurrency")
+			config.concurrency = readInt(argv, ++i, arg);
+		else if (arg === "--no-cache") config.cache = false;
+		else if (arg === "--json") json = true;
+		else if (arg === "--user-agent")
+			config.userAgent = readValue(argv, ++i, arg);
+		else if (arg.startsWith("-"))
+			throw new Error(`Unknown map argument: ${arg}\n\n${mapUsage}`);
+		else positional.push(arg);
+	}
+	config.seedUrl = positional[0] ?? "";
+	if (!config.seedUrl)
+		throw new Error("Missing URL\n\nTry: docsnap map https://react.dev --json");
+	if (positional.length > 1)
+		throw new Error(`Unexpected map argument: ${positional[1]}`);
+	return { kind: "map", map: { config, json } };
+}
+
 function parseFetchArgs(argv: string[]): ParsedArgs {
 	const queryStart = argv.indexOf("--");
 	const flagArgs = queryStart < 0 ? argv : argv.slice(0, queryStart);
@@ -221,9 +264,7 @@ function parseFetchArgs(argv: string[]): ParsedArgs {
 		if (arg === "-o" || arg === "--out")
 			fetch.outputDir = readValue(argv, ++i, arg);
 		else if (arg === "-m" || arg === "--max") {
-			fetch.maxPages = readInt(argv, ++i, arg);
-			if (fetch.maxPages > maxGeneratedCapturePages)
-				throw new Error(`--max must be ${maxGeneratedCapturePages} or fewer`);
+			fetch.maxPages = readInt(argv, ++i, arg, maxGeneratedCapturePages);
 		} else if (arg === "--scope") {
 			fetch.scope = readChoice(argv, ++i, arg, fetchScopes);
 		} else if (arg === "--freshness") {
@@ -262,12 +303,7 @@ function parseRefreshArgs(argv: string[]): ParsedArgs {
 		return { kind: "help", help: refreshUsage };
 	}
 	const refresh: RefreshInput = { outputDir: "", cache: true };
-	const cli: CliOptions = {
-		json: false,
-		quiet: false,
-		failOnLowQuality: false,
-		failOnInjectionSignal: false,
-	};
+	const cli = defaultCliOptions();
 	const positional: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i]!;
@@ -302,9 +338,7 @@ function parseListArgs(argv: string[]): ParsedArgs {
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i]!;
 		if (arg === "--limit") {
-			list.limit = readInt(argv, ++i, arg);
-			if (list.limit > maxListResults)
-				throw new Error(`--limit must be ${maxListResults} or fewer`);
+			list.limit = readInt(argv, ++i, arg, maxListResults);
 		} else if (arg === "--cursor") list.cursor = readValue(argv, ++i, arg);
 		else if (arg === "--json") list.json = true;
 		else if (arg.startsWith("-"))
@@ -340,10 +374,7 @@ function parseSearchArgs(argv: string[]): ParsedArgs {
 			break;
 		}
 		if (arg === "--limit") {
-			search.limit = readInt(argv, ++i, arg);
-			if (search.limit > maxSearchResults) {
-				throw new Error(`--limit must be ${maxSearchResults} or fewer`);
-			}
+			search.limit = readInt(argv, ++i, arg, maxSearchResults);
 		} else if (arg === "--glob") search.pathGlob = readGlob(argv, ++i, arg);
 		else if (arg === "--json") search.json = true;
 		else if (arg === "--all") search.all = true;
@@ -374,28 +405,29 @@ function parseSearchArgs(argv: string[]): ParsedArgs {
 function hasAllSearchRoot(positional: string[]) {
 	if (positional.length < 2) return false;
 	const first = positional[0]!;
-	return looksLikePath(first) || directoryExists(first);
-}
-
-function looksLikePath(value: string) {
-	return (
-		value === "." ||
-		value.startsWith("./") ||
-		value.startsWith("../") ||
-		value.startsWith("/") ||
-		/^[a-zA-Z]:[\\/]/.test(value) ||
-		value.includes("/") ||
-		value.includes("\\")
-	);
-}
-
-function directoryExists(path: string) {
+	if (
+		first === "." ||
+		first.startsWith("./") ||
+		first.startsWith("../") ||
+		first.startsWith("/") ||
+		/^[a-zA-Z]:[\\/]/.test(first) ||
+		first.includes("/") ||
+		first.includes("\\")
+	)
+		return true;
 	try {
-		return statSync(path).isDirectory();
+		return statSync(first).isDirectory();
 	} catch {
 		return false;
 	}
 }
+
+const defaultCliOptions = (): CliOptions => ({
+	json: false,
+	quiet: false,
+	failOnLowQuality: false,
+	failOnInjectionSignal: false,
+});
 
 function readValue(argv: string[], index: number, flag: string) {
 	const value = argv[index];
@@ -417,10 +449,12 @@ function readGlob(argv: string[], index: number, flag: string) {
 	return value;
 }
 
-function readInt(argv: string[], index: number, flag: string) {
+function readInt(argv: string[], index: number, flag: string, max?: number) {
 	const value = Number(readValue(argv, index, flag));
 	if (!Number.isInteger(value) || value < 1)
 		throw new Error(`${flag} requires a positive integer`);
+	if (max !== undefined && value > max)
+		throw new Error(`${flag} must be ${max} or fewer`);
 	return value;
 }
 
@@ -431,6 +465,7 @@ function readChoice<T extends string>(
 	choices: readonly T[],
 ): T {
 	const value = readValue(argv, index, flag);
-	if (choices.includes(value as T)) return value as T;
+	const choice = choices.find((candidate) => candidate === value);
+	if (choice) return choice;
 	throw new Error(`${flag} must be one of: ${choices.join(", ")}`);
 }

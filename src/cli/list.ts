@@ -1,5 +1,5 @@
 import { isAbsolute } from "node:path";
-import { countLabel } from "../core/text.ts";
+import { countLabel, terminalText } from "../core/text.ts";
 import { listCorpora } from "../corpus/index.ts";
 import type { ListInput } from "./args.ts";
 
@@ -38,20 +38,16 @@ function textResult(input: ListInput, result: ListResult) {
 		lines.push(`docsnap: next cursor ${result.next_cursor}`);
 	}
 	for (const corpus of result.corpora) {
+		const mode = corpus.capture_mode ?? "unknown";
 		lines.push(
 			"",
-			corpusLine(corpus),
+			`${corpus.output_dir}  ${corpus.status}  ${mode}  ${countLabel(corpus.written, "page")}`,
 			`  captured: ${corpus.generated_at}`,
 			...issueLines(corpus),
 			`  seed: ${corpus.seed_url}`,
 		);
 	}
-	return `${lines.join("\n")}\n`;
-}
-
-function corpusLine(corpus: ListEntry) {
-	const mode = corpus.capture_mode ?? "unknown";
-	return `${corpus.output_dir}  ${corpus.status}  ${mode}  ${countLabel(corpus.written, "page")}`;
+	return terminalText(`${lines.join("\n")}\n`);
 }
 
 function issueLines(corpus: ListEntry) {

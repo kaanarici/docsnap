@@ -1,13 +1,15 @@
+import { awaitWithSignal } from "../core/parallel.ts";
 import type { PipelineConfig } from "../core/types.ts";
 import { fetchTextUncached } from "../fetch/fetcher.ts";
 
-// a public origin can serve a multi-MB robots.txt under the 12MB fetch cap;
-// bound every unbounded accumulator so a hostile file cannot exhaust memory or
-// the call stack before discovery starts. Excess input is ignored, not fatal.
+// Bound hostile robots files independently from normal page bodies. The
+// renderer also charges this cap against its aggregate relay budget.
+export const maxRobotsBytes = 512 * 1024;
 const MAX_ROBOTS_LINES = 100_000;
 const MAX_AGENTS_PER_GROUP = 1_000;
-const MAX_RULES = 50_000;
+const MAX_RULES = 5_000;
 const MAX_SITEMAPS = 10_000;
+const textEncoder = new TextEncoder();
 const robotsByConfig = new WeakMap<
 	PipelineConfig,
 	Map<string, Promise<Robots>>
@@ -18,14 +20,9 @@ export type Robots = {
 	allows: Rule[];
 	disallows: Rule[];
 	allowed: (url: string) => boolean;
-	// robots.txt could not be fetched at the network level (vs parsed rules or
-	// a 5xx); bare apex domains often refuse connections while the canonical
-	// www origin serves both content and robots
-	unreachable?: boolean;
 };
 
 type Rule = {
-	value: string;
 	specificity: number;
 	matches: (path: string) => boolean;
 };
@@ -33,6 +30,7 @@ type Rule = {
 export function loadRobots(
 	origin: string,
 	config: PipelineConfig,
+	signal?: AbortSignal,
 ): Promise<Robots> {
 	let byOrigin = robotsByConfig.get(config);
 	if (!byOrigin) {
@@ -40,8 +38,8 @@ export function loadRobots(
 		robotsByConfig.set(config, byOrigin);
 	}
 	const existing = byOrigin.get(origin);
-	if (existing) return existing;
-	const pending = fetchRobots(origin, config).catch((error) => {
+	if (existing) return awaitWithSignal(existing, signal);
+	const pending = fetchRobots(origin, config, signal).catch((error) => {
 		byOrigin.delete(origin);
 		throw error;
 	});
@@ -52,12 +50,20 @@ export function loadRobots(
 async function fetchRobots(
 	origin: string,
 	config: PipelineConfig,
+	signal?: AbortSignal,
 ): Promise<Robots> {
+	const options = signal
+		? { signal, maxBytes: maxRobotsBytes }
+		: { maxBytes: maxRobotsBytes };
 	const response = await fetchTextUncached(
 		`${origin}/robots.txt`,
 		config,
 		"text/plain,*/*;q=0.8",
+		undefined,
+		undefined,
+		options,
 	);
+	signal?.throwIfAborted();
 	return robotsFromFetch(response, origin, config.userAgent);
 }
 
@@ -68,7 +74,7 @@ export function robotsFromFetch(
 ): Robots {
 	if (!response.ok) {
 		if (response.status >= 400 && response.status < 500) return openRobots();
-		return closedRobots(response.status === 0);
+		return closedRobots();
 	}
 	return parseRobots(response.body, origin, userAgent);
 }
@@ -79,12 +85,16 @@ export function parseRobots(
 	userAgent = "docsnap",
 ): Robots {
 	const sitemaps: string[] = [];
-	const groups: Array<{ agents: string[]; allows: Rule[]; disallows: Rule[] }> =
-		[];
+	const groups: RobotsGroup[] = [];
 	let group = newGroup();
 	let rules = 0;
+	let truncated = false;
 
 	for (const raw of robotsLines(body)) {
+		if (raw === undefined) {
+			truncated = true;
+			break;
+		}
 		const line = raw.replace(/#.*/, "").trim();
 		if (!line) continue;
 		const [fieldRaw, ...rest] = line.split(":");
@@ -98,22 +108,22 @@ export function parseRobots(
 		}
 		if (field === "user-agent") {
 			if (group.allows.length || group.disallows.length) flush();
-			if (group.agents.length < MAX_AGENTS_PER_GROUP)
-				group.agents.push(value.toLowerCase());
+			if (group.agents.length >= MAX_AGENTS_PER_GROUP) truncated = true;
+			else group.agents.push(value.toLowerCase());
 			continue;
 		}
 		if (field !== "allow" && field !== "disallow") continue;
-		if (rules >= MAX_RULES) continue;
-		if (field === "allow" && value) {
-			group.allows.push(toRule(value));
-			rules++;
+		if (rules >= MAX_RULES) {
+			truncated = true;
+			continue;
 		}
-		if (field === "disallow" && value) {
-			group.disallows.push(toRule(value));
-			rules++;
-		}
+		if (!value) continue;
+		if (field === "allow") group.allows.push(toRule(value));
+		else group.disallows.push(toRule(value));
+		rules++;
 	}
 	flush();
+	if (truncated) return closedRobots();
 
 	const { allows, disallows } = rulesForAgent(groups, userAgent);
 
@@ -123,7 +133,7 @@ export function parseRobots(
 		disallows,
 		allowed(url) {
 			const parsed = new URL(url);
-			const path = `${parsed.pathname}${parsed.search}`;
+			const path = canonicalRobotsPath(`${parsed.pathname}${parsed.search}`);
 			const allow = strongestMatch(path, allows);
 			const disallow = strongestMatch(path, disallows);
 			return allow >= disallow;
@@ -147,47 +157,49 @@ function* robotsLines(body: string) {
 		const end = body.indexOf("\n", start);
 		if (end < 0) {
 			yield body.slice(start);
-			break;
+			return;
 		}
 		const line = body.slice(start, end);
 		yield line.endsWith("\r") ? line.slice(0, -1) : line;
 		start = end + 1;
 	}
+	if (start < body.length) yield undefined;
 }
 
 function openRobots(): Robots {
 	return { sitemaps: [], allows: [], disallows: [], allowed: () => true };
 }
 
-function closedRobots(unreachable = false): Robots {
+function closedRobots(): Robots {
 	return {
 		sitemaps: [],
 		allows: [],
-		disallows: [{ value: "/", specificity: 1, matches: () => true }],
+		disallows: [{ specificity: 1, matches: () => true }],
 		allowed: () => false,
-		unreachable,
 	};
 }
 
-function newGroup() {
+type RobotsGroup = { agents: string[]; allows: Rule[]; disallows: Rule[] };
+
+function newGroup(): RobotsGroup {
 	return {
-		agents: [] as string[],
-		allows: [] as Rule[],
-		disallows: [] as Rule[],
+		agents: [],
+		allows: [],
+		disallows: [],
 	};
 }
 
-function rulesForAgent(
-	groups: Array<{ agents: string[]; allows: Rule[]; disallows: Rule[] }>,
-	userAgent: string,
-) {
+function rulesForAgent(groups: RobotsGroup[], userAgent: string) {
+	const products = new Set(
+		userAgent.toLowerCase().match(/[a-z][a-z0-9_-]*(?=\/|\b)/g) ?? [],
+	);
 	let best = -1;
 	let allows: Rule[] = [];
 	let disallows: Rule[] = [];
 	for (const group of groups) {
 		let match = -1;
 		for (const agent of group.agents) {
-			const score = agentSpecificity(agent, userAgent);
+			const score = agent === "*" ? 0 : products.has(agent) ? agent.length : -1;
 			if (score > match) match = score;
 		}
 		if (match < 0 || match < best) continue;
@@ -202,13 +214,6 @@ function rulesForAgent(
 	return { allows, disallows };
 }
 
-function agentSpecificity(agent: string, userAgent: string) {
-	if (agent === "*") return 0;
-	const products: string[] =
-		userAgent.toLowerCase().match(/[a-z][a-z0-9_-]*(?=\/|\b)/g) ?? [];
-	return products.includes(agent) ? agent.length : -1;
-}
-
 function strongestMatch(path: string, rules: Rule[]) {
 	let best = 0;
 	for (const rule of rules) {
@@ -219,13 +224,58 @@ function strongestMatch(path: string, rules: Rule[]) {
 
 function toRule(value: string): Rule {
 	const anchored = value.endsWith("$");
-	const body = anchored ? value.slice(0, -1) : value;
+	const body = canonicalRobotsPath(anchored ? value.slice(0, -1) : value);
 	const segments = body.split("*");
 	return {
-		value,
-		specificity: value.replace(/[*$]/g, "").length,
+		specificity: robotsOctetLength(body.replaceAll("*", "")),
 		matches: (path) => wildcardMatch(path, segments, anchored),
 	};
+}
+
+function robotsOctetLength(value: string) {
+	let length = 0;
+	for (let index = 0; index < value.length; length++) {
+		index += /^%[0-9A-F]{2}/.test(value.slice(index, index + 3)) ? 3 : 1;
+	}
+	return length;
+}
+
+function canonicalRobotsPath(value: string) {
+	let output = "";
+	for (let index = 0; index < value.length; ) {
+		const char = value[index]!;
+		const encoded = value.slice(index, index + 3);
+		if (char === "%" && /^%[0-9a-f]{2}$/i.test(encoded)) {
+			const byte = Number.parseInt(encoded.slice(1), 16);
+			output += isUnreserved(byte)
+				? String.fromCharCode(byte)
+				: `%${encoded.slice(1).toUpperCase()}`;
+			index += 3;
+			continue;
+		}
+		const codePoint = value.codePointAt(index)!;
+		const literal = String.fromCodePoint(codePoint);
+		if (codePoint <= 0x7f) output += literal;
+		else {
+			for (const byte of textEncoder.encode(literal)) {
+				output += `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+			}
+		}
+		index += literal.length;
+	}
+	return output;
+}
+
+function isUnreserved(byte: number) {
+	return (
+		(byte >= 0x41 && byte <= 0x5a) ||
+		(byte >= 0x61 && byte <= 0x7a) ||
+		(byte >= 0x30 && byte <= 0x39) ||
+		byte === 0x2d ||
+		byte === 0x2e ||
+		byte === 0x5f ||
+		byte === 0x7e
+	);
 }
 
 function wildcardMatch(

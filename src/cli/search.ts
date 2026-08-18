@@ -10,8 +10,13 @@ import {
 	listAllCorpora,
 	readVerifiedManifest,
 	searchCorpus,
+	verifyPageBody,
 } from "../corpus/index.ts";
-import { buildRankInput, rankPages } from "../search/rank.ts";
+import {
+	assertSearchQuery,
+	buildRankInput,
+	rankPages,
+} from "../search/rank.ts";
 import type { SearchInput } from "./args.ts";
 import {
 	jsonSearchResult,
@@ -23,6 +28,7 @@ const snippetChars = 700;
 const allSearchConcurrency = 32;
 
 export async function runSearch(input: SearchInput): Promise<void> {
+	assertSearchQuery(input.query);
 	const result = input.all ? await searchAll(input) : await searchOne(input);
 	if (input.json) {
 		process.stdout.write(
@@ -35,38 +41,57 @@ export async function runSearch(input: SearchInput): Promise<void> {
 
 async function searchOne(input: SearchInput): Promise<SearchResult> {
 	const { records } = await readVerifiedManifest(input.outputDir);
-	const result = await searchCorpus(input.outputDir, {
+	const searchOptions = {
 		query: input.query,
-		...(input.pathGlob ? { pathGlob: input.pathGlob } : {}),
 		records,
 		maxResults: input.limit,
 		snippetChars,
 		excludeInjection: !input.includeInjection,
-	});
+	};
+	const result = await searchCorpus(
+		input.outputDir,
+		input.pathGlob
+			? { ...searchOptions, pathGlob: input.pathGlob }
+			: searchOptions,
+	);
 	return {
 		matches: result.matches.map((match) => ({
 			corpusDir: input.outputDir,
 			match,
 		})),
 		corporaScanned: 1,
-		corporaSearched: hasSearchableRecords(records, input) ? 1 : 0,
+		corporaSearched: records.some(
+			(record) =>
+				searchableRecord(record, input) &&
+				(input.includeInjection || record.injectionSignals.length === 0),
+		)
+			? 1
+			: 0,
 		corporaTruncated: false,
 		truncated: result.truncated,
 		limited: result.limited,
 		pagesSkipped: result.skipped,
-		injectionFiltered: injectionFiltered(records, input),
+		injectionFiltered: input.includeInjection
+			? 0
+			: records.filter(
+					(record) =>
+						searchableRecord(record, input) && record.injectionSignals.length,
+				).length,
 		corporaSkipped: 0,
 	};
 }
 
 async function searchAll(input: SearchInput): Promise<SearchResult> {
 	const listed = await listAllCorpora(input.outputDir);
+	const recordOptions = input.pathGlob
+		? {
+				excludeInjection: !input.includeInjection,
+				pathGlob: input.pathGlob,
+			}
+		: { excludeInjection: !input.includeInjection };
 	const records = await dedupedCorpusRecords(
 		listed.corpora.map((corpus) => corpus.output_dir),
-		{
-			excludeInjection: !input.includeInjection,
-			...(input.pathGlob ? { pathGlob: input.pathGlob } : {}),
-		},
+		recordOptions,
 	);
 	const searched = await searchAllRecords(records.corpora, input);
 	return {
@@ -82,8 +107,6 @@ async function searchAll(input: SearchInput): Promise<SearchResult> {
 	};
 }
 
-type AllSearchPage = CorpusPage & { corpusDir: string; outputPath: string };
-
 async function searchAllRecords(
 	corpora: CorpusRecords[],
 	input: SearchInput,
@@ -93,25 +116,31 @@ async function searchAllRecords(
 	const roots = new Map<string, string>();
 	for (const corpus of corpora)
 		roots.set(corpus.corpusDir, await realpath(corpus.corpusDir));
-	const pages = corpora.flatMap((corpus) =>
-		(corpus.records ?? []).map(
-			(record) => ({ ...record, corpusDir: corpus.corpusDir }) as AllSearchPage,
-		),
-	);
+	const corpusByRecord = new Map<CorpusPage, string>();
+	const pages = corpora.flatMap((corpus) => {
+		for (const record of corpus.records ?? []) {
+			corpusByRecord.set(record, corpus.corpusDir);
+		}
+		return corpus.records ?? [];
+	});
 	const {
 		input: rankInput,
 		truncated,
 		skipped,
 	} = await buildRankInput(
 		pages,
-		(record) => {
-			const page = record as AllSearchPage;
-			return readOptionalCorpusFileFromRealRoot(
-				page.corpusDir,
-				roots.get(page.corpusDir)!,
-				page.outputPath,
+		async (record) => {
+			const corpusDir = corpusByRecord.get(record);
+			if (!corpusDir) throw new Error("Search record lost its corpus owner");
+			const realRoot = roots.get(corpusDir);
+			if (!realRoot) throw new Error("Search corpus root is unavailable");
+			const body = await readOptionalCorpusFileFromRealRoot(
+				corpusDir,
+				realRoot,
+				record.outputPath,
 				corpusLimits.pageBytes,
 			);
+			return body === null ? null : verifyPageBody(record, body);
 		},
 		{ maxPages: corpusLimits.searchPages, maxBytes: corpusLimits.searchBytes },
 		{ query: input.query },
@@ -119,11 +148,10 @@ async function searchAllRecords(
 	const ranked = rankPages(rankInput, input.query, {
 		maxResults: input.limit + 1,
 		snippetChars,
-		excludeInjection: !input.includeInjection,
 	});
 	return {
 		matches: ranked.slice(0, input.limit).map((match) => ({
-			corpusDir: (match.record as AllSearchPage).corpusDir,
+			corpusDir: corpusByRecord.get(match.record) ?? "",
 			match,
 		})),
 		truncated,
@@ -144,7 +172,16 @@ async function dedupedCorpusRecords(
 	const loaded = await runBounded(
 		corpusDirs,
 		{ concurrency: allSearchConcurrency, perOrigin: 1, key: (dir) => dir },
-		readCorpusRecords,
+		async (corpusDir): Promise<CorpusRecords> => {
+			try {
+				return {
+					corpusDir,
+					records: (await readVerifiedManifest(corpusDir)).records,
+				};
+			} catch {
+				return { corpusDir };
+			}
+		},
 	);
 	const byUrl = new Map<string, CorpusRecord>();
 	let scanned = 0;
@@ -187,26 +224,9 @@ async function dedupedCorpusRecords(
 	};
 }
 
-type CorpusRecords = {
-	corpusDir: string;
-	records?: CorpusPage[];
-};
+type CorpusRecords = { corpusDir: string; records?: CorpusPage[] };
 
-async function readCorpusRecords(corpusDir: string): Promise<CorpusRecords> {
-	try {
-		return {
-			corpusDir,
-			records: (await readVerifiedManifest(corpusDir)).records,
-		};
-	} catch {
-		return { corpusDir };
-	}
-}
-
-type CorpusRecord = {
-	corpusDir: string;
-	record: CorpusPage;
-};
+type CorpusRecord = { corpusDir: string; record: CorpusPage };
 
 function preferRecord(next: CorpusRecord, current: CorpusRecord) {
 	const left = next.record.fetchedAt ?? "";
@@ -215,23 +235,10 @@ function preferRecord(next: CorpusRecord, current: CorpusRecord) {
 	return next.corpusDir < current.corpusDir;
 }
 
-function injectionFiltered(records: CorpusPage[], input: SearchInput) {
-	if (input.includeInjection) return 0;
-	return records.filter(
-		(record) =>
-			record.ok &&
-			record.outputPath &&
-			(!input.pathGlob || globMatches(input.pathGlob, record.outputPath)) &&
-			record.injectionSignals.length > 0,
-	).length;
-}
-
-function hasSearchableRecords(records: CorpusPage[], input: SearchInput) {
-	return records.some(
-		(record) =>
-			record.ok &&
-			record.outputPath &&
-			(!input.pathGlob || globMatches(input.pathGlob, record.outputPath)) &&
-			(input.includeInjection || record.injectionSignals.length === 0),
+function searchableRecord(record: CorpusPage, input: SearchInput) {
+	return (
+		record.ok &&
+		record.outputPath &&
+		(!input.pathGlob || globMatches(input.pathGlob, record.outputPath))
 	);
 }

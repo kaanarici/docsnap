@@ -1,6 +1,11 @@
+import { maxGeneratedCapturePages, maxGeneratedMediaUrls } from "./config.ts";
 import { identityKeys, identityUrls } from "./identity.ts";
 import { wordCount } from "./text.ts";
-import type { PageRecord, PageSuccess } from "./types.ts";
+import {
+	discoverySourceScore,
+	type PageRecord,
+	type PageSuccess,
+} from "./types.ts";
 
 type DedupeResult = {
 	records: PageRecord[];
@@ -19,9 +24,11 @@ export function dedupeRecords(records: PageRecord[]): DedupeResult {
 		}
 
 		const keys = identityKeys(record);
-		const target = keys
-			.map((key) => byKey.get(key))
-			.find((item): item is PageSuccess => Boolean(item));
+		let target: PageSuccess | undefined;
+		for (const key of keys) {
+			target = byKey.get(key);
+			if (target) break;
+		}
 
 		if (target) {
 			const survivor = betterRecord(target, record);
@@ -52,7 +59,13 @@ function mergeRecord(target: PageSuccess, duplicate: PageSuccess) {
 	}
 	if (aliases.size) target.aliases = [...aliases].sort();
 	else delete target.aliases;
-	target.links = [...new Set([...target.links, ...duplicate.links])].sort();
+	target.links = [...new Set([...target.links, ...duplicate.links])]
+		.slice(0, maxGeneratedCapturePages)
+		.sort();
+	const media = [
+		...new Set([...(target.media ?? []), ...(duplicate.media ?? [])]),
+	].slice(0, maxGeneratedMediaUrls);
+	if (media.length) target.media = media.sort();
 	target.injectionSignals = [
 		...new Set([...target.injectionSignals, ...duplicate.injectionSignals]),
 	];
@@ -60,43 +73,34 @@ function mergeRecord(target: PageSuccess, duplicate: PageSuccess) {
 		target.publishedAt = duplicate.publishedAt;
 	if (!target.updatedAt && duplicate.updatedAt)
 		target.updatedAt = duplicate.updatedAt;
-	if (duplicate.wasSeed) {
-		target.wasSeed = true;
-		target.source = duplicate.source;
-		if (target.redirects.length === 0 && duplicate.redirects.length > 0)
-			target.redirects = duplicate.redirects;
-	}
 }
 
 function betterRecord(a: PageSuccess, b: PageSuccess) {
+	if (a.wasSeed !== b.wasSeed) return a.wasSeed ? a : b;
 	return recordScore(b) > recordScore(a) ? b : a;
 }
 
 function recordScore(record: PageSuccess) {
 	return (
-		extractorScore[record.extractor] * 10_000 +
-		sourceScore[record.source] * 1_000 +
+		extractorScore(record.extractor) * 10_000 +
+		discoverySourceScore(record.source) * 1_000 +
 		(record.wasSeed ? 500 : 0) +
 		record.confidence * 100 +
 		Math.min(wordCount(record.markdown), 2_000) / 100
 	);
 }
 
-const sourceScore: Record<PageSuccess["source"], number> = {
-	llms: 7,
-	asset: 6,
-	sitemap: 5,
-	feed: 4,
-	nav: 3,
-	crawl: 2,
-	seed: 1,
-};
-
-const extractorScore: Record<PageSuccess["extractor"], number> = {
-	markdown: 4,
-	text: 3,
-	html: 2,
-	structured: 2,
-	"inline-state": 2,
-	fallback: 1,
-};
+function extractorScore(extractor: PageSuccess["extractor"]): number {
+	switch (extractor) {
+		case "markdown":
+			return 4;
+		case "text":
+			return 3;
+		case "html":
+		case "structured":
+		case "inline-state":
+			return 2;
+		case "fallback":
+			return 1;
+	}
+}

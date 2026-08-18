@@ -1,5 +1,4 @@
 import { hashContent } from "../core/snapshot.ts";
-import { CorpusReadLimitError } from "../corpus/access.ts";
 import type { CorpusPage } from "../corpus/index.ts";
 import { docSnippet, lineNumberAt } from "./snippets.ts";
 
@@ -45,6 +44,7 @@ const fieldBoost = {
 	frontmatter: 0.9,
 };
 const maxTermsPerField = 32_000;
+const maxQueryChars = 500;
 const maxQueryTerms = 32;
 const minTermLength = 2;
 const maxTermLength = 48;
@@ -56,13 +56,21 @@ const stopTerms = new Set(
 
 type PageLoader = (record: PageRecord) => Promise<string | null>;
 
+type CandidateFilter = { terms: string[] };
+
+type SplitFrontmatter = {
+	frontmatter: { text: string; lineOffset: number };
+	body: string;
+};
+
 export async function buildRankInput(
 	records: CorpusPage[],
 	load: PageLoader,
 	limits: { maxPages: number; maxBytes: number },
-	options: { query?: string; genericWhenNoContentTerms?: boolean } = {},
+	options: { query?: string } = {},
 ): Promise<{ input: RankInput; truncated: boolean; skipped: number }> {
-	const filter = candidateFilter(options.query, options);
+	if (options.query) assertSearchQuery(options.query);
+	const filter = candidateFilter(options.query);
 	const pages: PageDoc[] = [];
 	const docFreq = new Map<string, number>();
 	let scannedBytes = 0;
@@ -70,33 +78,21 @@ export async function buildRankInput(
 	let truncated = false;
 	let skipped = 0;
 	for (const record of records) {
-		if (!record.ok || !record.outputPath) continue;
+		if (!isPageRecord(record)) continue;
 		if (pages.length >= limits.maxPages || scannedBytes >= limits.maxBytes) {
 			truncated = true;
 			break;
 		}
-		let source: string | null;
-		try {
-			source = await load(record as PageRecord);
-		} catch (error) {
-			if (error instanceof CorpusReadLimitError) {
-				truncated = true;
-				continue;
-			}
-			throw error;
-		}
+		const source = await load(record);
 		if (source === null) {
 			skipped++;
 			continue;
 		}
 		scannedBytes += Buffer.byteLength(source);
-		if (
-			filter.terms.length &&
-			!candidateTextMatches(record as PageRecord, source, filter)
-		) {
+		if (filter.terms.length && !candidateTextMatches(record, source, filter)) {
 			continue;
 		}
-		const doc = toPageDoc(record as PageRecord, source);
+		const doc = toPageDoc(record, source);
 		for (const term of doc.bodyTermFreq.keys()) {
 			docFreq.set(term, (docFreq.get(term) ?? 0) + 1);
 		}
@@ -115,27 +111,32 @@ export async function buildRankInput(
 	};
 }
 
-function candidateFilter(
-	query: string | undefined,
-	options: { genericWhenNoContentTerms?: boolean } = {},
-): { terms: string[] } {
+export function assertSearchQuery(query: string) {
+	if (query.length > maxQueryChars)
+		throw new Error(`query must be ${maxQueryChars} characters or fewer`);
+}
+
+function isPageRecord(record: CorpusPage): record is PageRecord {
+	return record.ok && Boolean(record.outputPath);
+}
+
+function candidateFilter(query: string | undefined): CandidateFilter {
 	if (!query) return { terms: [] };
 	const queryTerms = tokenize(query).slice(0, maxQueryTerms);
 	const meaningful = meaningfulQueryTerms(queryTerms);
-	if (meaningful.length === 0 && options.genericWhenNoContentTerms) {
-		return { terms: [] };
-	}
 	return { terms: meaningful.length ? meaningful : queryTerms };
 }
 
 function candidateTextMatches(
 	record: PageRecord,
 	source: string,
-	filter: { terms: string[] },
+	filter: CandidateFilter,
 ): boolean {
-	const haystack =
-		`${record.title ?? ""}\n${record.url}\n${record.finalUrl}\n${record.outputPath}\n${source}`.toLowerCase();
-	return filter.terms.some((term) => haystack.includes(term));
+	const metadata =
+		`${record.title ?? ""}\n${record.url}\n${record.finalUrl}\n${record.outputPath}`.toLowerCase();
+	if (filter.terms.some((term) => metadata.includes(term))) return true;
+	const body = source.toLowerCase();
+	return filter.terms.some((term) => body.includes(term));
 }
 
 export function rankPages(
@@ -144,40 +145,31 @@ export function rankPages(
 	options: {
 		maxResults: number;
 		snippetChars: number;
-		excludeInjection: boolean;
-		genericWhenNoContentTerms?: boolean;
 		preferredOutputPaths?: ReadonlySet<string>;
 	},
 ): RankedSnippet[] {
 	const queryTerms = tokenize(query).slice(0, maxQueryTerms);
 	if (queryTerms.length === 0) return [];
 	const requiredTerms = meaningfulQueryTerms(queryTerms);
-	if (requiredTerms.length === 0 && options.genericWhenNoContentTerms) {
-		return genericSnippets(input.pages, options);
-	}
 	const snippetSource = requiredTerms.length ? requiredTerms : queryTerms;
 	const snippetTerms = new Set(snippetSource);
 	const distinctiveTerms = requiredTerms.filter((term) => term.length >= 8);
 	const literalTerms = queryLiteralTerms(query);
 	const strictHits = minRequiredHits(requiredTerms.length);
-	const hasStrictMatch = input.pages.some(
-		(doc) =>
-			(!options.excludeInjection || doc.record.injectionSignals.length === 0) &&
-			countTermHits(doc, requiredTerms) >= strictHits,
-	);
 	const requiredHits =
-		requiredTerms.length === 2 && !hasStrictMatch ? 1 : strictHits;
+		requiredTerms.length === 2 &&
+		!input.pages.some((doc) => countTermHits(doc, requiredTerms) >= strictHits)
+			? 1
+			: strictHits;
 	const scored: RankedSnippet[] = [];
 	for (const doc of input.pages) {
-		if (options.excludeInjection && doc.record.injectionSignals.length)
-			continue;
 		const hitCount = countTermHits(doc, requiredTerms);
 		if (requiredHits > 0 && hitCount < requiredHits) continue;
 		if (distinctiveTerms.length && !countTermHits(doc, distinctiveTerms))
 			continue;
 		const score =
 			scoreDoc(input, doc, queryTerms) *
-			literalTermBoost(docSearchText(doc), literalTerms) *
+			literalTermBoost(doc, literalTerms) *
 			preferredPageBoost(doc, options.preferredOutputPaths);
 		if (score <= 0) continue;
 		const snippet = docSnippet(
@@ -205,59 +197,11 @@ export function rankPages(
 	return scored.slice(0, options.maxResults);
 }
 
-function genericSnippets(
-	pages: PageDoc[],
-	options: {
-		maxResults: number;
-		snippetChars: number;
-		excludeInjection: boolean;
-		preferredOutputPaths?: ReadonlySet<string>;
-	},
-): RankedSnippet[] {
-	return pages
-		.filter(
-			(doc) =>
-				!options.excludeInjection || doc.record.injectionSignals.length === 0,
-		)
-		.map((doc) => {
-			const snippet = docSnippet(doc, new Set(), options.snippetChars);
-			return {
-				record: doc.record,
-				contentHash: doc.record.contentHash ?? hashContent(doc.body),
-				extractor: doc.record.extractor ?? "unknown",
-				score:
-					genericScore(doc) *
-					preferredPageBoost(doc, options.preferredOutputPaths),
-				confidence: doc.record.confidence ?? 0,
-				lineStart: snippet.lineStart,
-				lineEnd: snippet.lineEnd,
-				text: snippet.text,
-			};
-		})
-		.sort(
-			(a, b) =>
-				b.score - a.score ||
-				a.record.outputPath.localeCompare(b.record.outputPath),
-		)
-		.slice(0, options.maxResults);
-}
-
-function genericScore(doc: PageDoc): number {
-	return (
-		(doc.record.source === "seed" ? 2 : 1) +
-		clamp01(doc.record.confidence ?? 0.5)
-	);
-}
-
 function preferredPageBoost(
 	doc: PageDoc,
 	preferredOutputPaths: ReadonlySet<string> | undefined,
 ) {
 	return preferredOutputPaths?.has(doc.record.outputPath) ? 1.15 : 1;
-}
-
-function docSearchText(doc: PageDoc): string {
-	return `${doc.record.title ?? ""}\n${doc.record.outputPath}\n${doc.frontmatter}\n${doc.body}`;
 }
 
 function queryLiteralTerms(query: string): string[] {
@@ -268,9 +212,10 @@ function queryLiteralTerms(query: string): string[] {
 		.slice(0, 8);
 }
 
-function literalTermBoost(text: string, terms: string[]): number {
+function literalTermBoost(doc: PageDoc, terms: string[]): number {
 	if (!terms.length) return 1;
-	const haystack = text.toLowerCase();
+	const haystack =
+		`${doc.record.title ?? ""}\n${doc.record.outputPath}\n${doc.frontmatter}\n${doc.body}`.toLowerCase();
 	let hits = 0;
 	for (const term of terms) {
 		if (haystack.includes(term)) hits++;
@@ -413,10 +358,7 @@ function pushToken(tokens: string[], token: string): void {
 	tokens.push(token);
 }
 
-function splitFrontmatter(source: string): {
-	frontmatter: { text: string; lineOffset: number };
-	body: string;
-} {
+function splitFrontmatter(source: string): SplitFrontmatter {
 	if (!source.startsWith("---\n"))
 		return { frontmatter: { text: "", lineOffset: 0 }, body: source };
 	const end = source.indexOf("\n---\n", 4);

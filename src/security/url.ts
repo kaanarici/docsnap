@@ -1,9 +1,11 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { awaitWithSignal } from "../core/parallel.ts";
 
 const blockedHostname = /(^|\.)localhost$/i;
 const addressCacheTtlMs = 60_000;
 const allowTestHostEnv = "DOCSNAP_ALLOW_TEST_HOST";
+export const maxPublicUrlChars = 16_384;
 const addressCache = new Map<
 	string,
 	{ addresses: PublicAddress[]; expires: number }
@@ -23,12 +25,14 @@ export type PublicAddress = {
 };
 
 export function validatePublicHttpUrl(raw: string): string | undefined {
+	if (raw.length > maxPublicUrlChars) return "URL is too long";
 	let url: URL;
 	try {
 		url = new URL(raw);
 	} catch {
 		return "invalid URL";
 	}
+	if (url.href.length > maxPublicUrlChars) return "URL is too long";
 	if (url.protocol !== "http:" && url.protocol !== "https:") {
 		return "URL must use http or https";
 	}
@@ -125,20 +129,10 @@ export function validateResolvedAddresses(
 }
 
 async function lookupWithSignal(hostname: string, signal?: AbortSignal) {
-	const pending = lookup(hostname, { all: true, verbatim: true });
-	if (!signal) return pending;
-	signal.throwIfAborted();
-	let rejectAbort: (reason?: unknown) => void = () => {};
-	const aborted = new Promise<never>((_, reject) => {
-		rejectAbort = reject;
-	});
-	const onAbort = () => rejectAbort(signal.reason);
-	signal.addEventListener("abort", onAbort, { once: true });
-	try {
-		return await Promise.race([pending, aborted]);
-	} finally {
-		signal.removeEventListener("abort", onAbort);
-	}
+	return awaitWithSignal(
+		lookup(hostname, { all: true, verbatim: true }),
+		signal,
+	);
 }
 
 function normalizedHostname(url: URL): string {
@@ -188,7 +182,8 @@ function isPublicIpv4(address: string): boolean {
 	if (parts.length !== 4 || parts.some((part) => part < 0 || part > 255)) {
 		return false;
 	}
-	const [a, b] = parts as [number, number, number, number];
+	const a = parts[0] ?? -1;
+	const b = parts[1] ?? -1;
 	return !(
 		a === 0 ||
 		a === 10 ||
@@ -212,16 +207,9 @@ function isPublicIpv6(address: string): boolean {
 	if (!segments) return false;
 	const mappedIpv4 = ipv4FromMappedIpv6(segments);
 	if (mappedIpv4) return isPublicIpv4(mappedIpv4);
-	const [first, second, third] = segments as [
-		number,
-		number,
-		number,
-		number,
-		number,
-		number,
-		number,
-		number,
-	];
+	const first = segments[0] ?? 0;
+	const second = segments[1] ?? 0;
+	const third = segments[2] ?? 0;
 	return !(
 		first < 0x2000 ||
 		first > 0x3fff ||
@@ -241,12 +229,11 @@ function ipv6Segments(address: string): number[] | undefined {
 		const colon = value.lastIndexOf(":");
 		const tail = value.slice(colon + 1);
 		if (isIP(tail) !== 4) return undefined;
-		const [a, b, c, d] = tail.split(".").map(Number) as [
-			number,
-			number,
-			number,
-			number,
-		];
+		const octets = tail.split(".").map(Number);
+		const a = octets[0] ?? 0;
+		const b = octets[1] ?? 0;
+		const c = octets[2] ?? 0;
+		const d = octets[3] ?? 0;
 		value = `${value.slice(0, colon)}:${((a << 8) | b).toString(16)}:${(
 			(c << 8) | d
 		).toString(16)}`;

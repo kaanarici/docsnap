@@ -1,48 +1,56 @@
 import { markdownLinkHrefs } from "../core/markdown.ts";
-import type { DiscoveredUrl, DiscoverySource } from "../core/types.ts";
-import { classifyDiscoveryResource } from "../core/url.ts";
+import {
+	type DiscoveredUrl,
+	type DiscoverySource,
+	discoverySourceScore,
+} from "../core/types.ts";
+import { canonicalUrlSearch, classifyDiscoveryResource } from "../core/url.ts";
+import { maxPublicUrlChars } from "../security/url.ts";
 
 export const ignoredExtension =
 	/\.(png|jpe?g|gif|svg|webp|ico|pdf|epub|zip|tar|gz|mp4|mp3|wav|woff2?|ttf|eot|css|js|mjs|map|rss|atom)$/i;
+const trackingParam =
+	/^(?:_ga|dclid|fbclid|gclid|mc_(?:cid|eid)|msclkid|utm(?:_.+)?)$/i;
 
 export function normalizeUrl(
 	raw: string,
 	base?: string | URL,
 ): string | undefined {
-	try {
-		const url = new URL(raw, base);
-		if (!["http:", "https:"].includes(url.protocol)) return;
-		if (url.username || url.password) return;
-		url.hash = "";
-		url.search = "";
-		url.pathname = url.pathname.replace(/\/{2,}/g, "/");
-		collapseRepeatedBasePath(url, base);
-		if (!url.pathname) url.pathname = "/";
-		if (isNonPageUrl(url)) return;
-		return url.href;
-	} catch {
-		return;
+	const url = normalizedHttpUrl(raw, base);
+	if (!url) return;
+	const searchParamNames = Array.from(url.searchParams.keys());
+	for (const name of searchParamNames) {
+		if (trackingParam.test(name)) url.searchParams.delete(name);
 	}
+	url.search = canonicalUrlSearch(url);
+	collapseRepeatedBasePath(url, base);
+	if (isNonPageUrl(url)) return;
+	return url.href.length <= maxPublicUrlChars ? url.href : undefined;
 }
 
 export function normalizeDiscoveryResourceUrl(
 	raw: string,
 	base?: string | URL,
 ): string | undefined {
+	const url = normalizedHttpUrl(raw, base);
+	if (!url) return;
+	if (
+		ignoredExtension.test(url.pathname) &&
+		classifyDiscoveryResource(url)?.source !== "feed"
+	) {
+		return;
+	}
+	return url.href.length <= maxPublicUrlChars ? url.href : undefined;
+}
+
+function normalizedHttpUrl(raw: string, base?: string | URL) {
 	try {
 		const url = new URL(raw, base);
-		if (!["http:", "https:"].includes(url.protocol)) return;
+		if (url.protocol !== "http:" && url.protocol !== "https:") return;
 		if (url.username || url.password) return;
 		url.hash = "";
-		url.pathname = url.pathname.replace(/\/{2,}/g, "/");
-		if (!url.pathname) url.pathname = "/";
-		if (
-			ignoredExtension.test(url.pathname) &&
-			classifyDiscoveryResource(url)?.source !== "feed"
-		) {
-			return;
-		}
-		return url.href;
+		url.pathname = url.pathname.replace(/\/{2,}/g, "/") || "/";
+		return url;
 	} catch {
 		return;
 	}
@@ -141,32 +149,41 @@ export function addDiscovered(
 	if (!raw || !inScope(raw, seed, scope)) return;
 	if (seen.has(raw)) {
 		const existing = out.find((item) => item.url === raw);
-		if (existing) mergeDiscovered(existing, source, metadata);
+		if (existing) mergeDiscovered(existing, source, fetched, metadata);
 		return;
 	}
 	seen.add(raw);
-	out.push({
+	const discovered: DiscoveredUrl = {
 		url: raw,
 		source,
-		...(source === "seed" ? { wasSeed: true as const } : {}),
-		...(fetched ? { fetched } : {}),
-		...(metadata ? { metadata } : {}),
-	});
+	};
+	if (source === "seed") discovered.wasSeed = true;
+	if (fetched) discovered.fetched = fetched;
+	if (metadata) discovered.metadata = metadata;
+	out.push(discovered);
 }
 
-export function sameScopeLinks(markdown: string, base: string): string[] {
+export function sameScopeLinks(
+	markdown: string,
+	base: string,
+	limit?: number,
+): string[] {
 	const links = new Set<string>();
-	for (const href of markdownLinkHrefs(markdown)) {
+	if (limit !== undefined && limit <= 0) return [];
+	for (const href of markdownLinkHrefs(markdown, limit)) {
 		const url = normalizeUrl(href, base);
 		if (url) links.add(url);
+		if (limit !== undefined && links.size >= limit) return [...links];
 	}
 	for (const match of markdown.matchAll(/https?:\/\/[^\s<>"'`)]+/g)) {
 		const url = normalizeUrl(cleanTextLink(match[0]), base);
 		if (url) links.add(url);
+		if (limit !== undefined && links.size >= limit) return [...links];
 	}
 	for (const match of markdown.matchAll(/(^|\s)(\/[a-z0-9][^\s<>"'`)]+)/gi)) {
 		const url = normalizeUrl(cleanTextLink(match[2]!), base);
 		if (url) links.add(url);
+		if (limit !== undefined && links.size >= limit) return [...links];
 	}
 	return [...links];
 }
@@ -193,6 +210,9 @@ function collapseRepeatedBasePath(url: URL, base?: string | URL) {
 function isNonPageUrl(url: URL) {
 	return (
 		/(?:%e2%80%a6|…)/i.test(url.href) ||
+		[...url.searchParams.keys()].some((name) =>
+			/^(?:post_)?login_(?:redirect|return)(?:_url)?$/i.test(name),
+		) ||
 		/%3c|%3e|[<>]/i.test(url.pathname) ||
 		/%7b|%7d|[{}]/i.test(url.pathname) ||
 		/(?:^|\/)(?:%3a|:)[^/]+/i.test(url.pathname) ||
@@ -224,12 +244,14 @@ function isNonPageUrl(url: URL) {
 function mergeDiscovered(
 	target: DiscoveredUrl,
 	source: DiscoverySource,
+	fetched: DiscoveredUrl["fetched"],
 	metadata: DiscoveredUrl["metadata"],
 ) {
 	if (source === "seed") target.wasSeed = true;
+	if (fetched && !target.fetched) target.fetched = fetched;
 	if (
 		target.source !== "seed" &&
-		sourceRank[source] > sourceRank[target.source]
+		discoverySourceScore(source) > discoverySourceScore(target.source)
 	)
 		target.source = source;
 	if (!metadata) return;
@@ -238,13 +260,3 @@ function mergeDiscovered(
 		...target.metadata,
 	};
 }
-
-const sourceRank: Record<DiscoverySource, number> = {
-	llms: 7,
-	asset: 6,
-	sitemap: 5,
-	feed: 4,
-	nav: 3,
-	crawl: 2,
-	seed: 1,
-};

@@ -5,15 +5,15 @@ import { safeDecode } from "../core/text.ts";
 import type { PageSuccess, PathedPage } from "../core/types.ts";
 import { urlWithoutFragment } from "../core/url.ts";
 
-// Pure stage transition: each input success becomes a new PathedPage carrying its
-// assigned outputPath. The source records are never mutated, so a reference held
-// before this call still sees a PageSuccess without an outputPath.
 export function assignOutputPaths(records: PageSuccess[]): PathedPage[] {
 	if (records.length === 1) return [{ ...records[0]!, outputPath: "index.md" }];
-	const prefix = pathPrefix(records);
+	const prefix = commonPrefix(
+		records.map((record) => outputSegments(record.finalUrl)),
+	);
 	const byBase = new Map<string, PageSuccess[]>();
 	for (const record of records) {
-		const base = basePath(record.finalUrl, prefix);
+		const parts = stripPrefix(outputSegments(record.finalUrl), prefix);
+		const base = `${parts.join("/") || "index"}.md`;
 		const group = byBase.get(base) ?? [];
 		group.push(record);
 		byBase.set(base, group);
@@ -27,7 +27,9 @@ export function assignOutputPaths(records: PageSuccess[]): PathedPage[] {
 		for (const record of sorted) {
 			paths.set(
 				record,
-				group.length === 1 ? base : withSuffix(base, shortHash(record.url)),
+				group.length === 1
+					? base
+					: base.replace(/\.md$/, `-${shortHash(record.url)}.md`),
 			);
 		}
 	}
@@ -73,15 +75,6 @@ export function relativeMarkdownLink(fromPath: string, toPath: string): string {
 	return link;
 }
 
-function basePath(raw: string, prefix: string[]) {
-	const parts = stripPrefix(outputSegments(raw), prefix);
-	return `${parts.join("/") || "index"}.md`;
-}
-
-function pathPrefix(records: PageSuccess[]) {
-	return commonPrefix(records.map((record) => outputSegments(record.finalUrl)));
-}
-
 function outputSegments(raw: string) {
 	const url = new URL(raw);
 	const parts = url.pathname.split("/").filter(Boolean).map(slug);
@@ -106,13 +99,7 @@ function startsWith(path: string[], prefix: string[]) {
 	return prefix.every((part, index) => path[index] === part);
 }
 
-function withSuffix(path: string, suffix: string) {
-	return path.replace(/\.md$/, `-${suffix}.md`);
-}
-
-// keep each path segment well under the common 255-byte filesystem component
-// limit; long segments are truncated with a stable hash suffix so distinct
-// long URLs still map to distinct, writable filenames
+// Leave room under the common 255-byte filesystem component limit.
 const maxSlugChars = 120;
 
 function slug(value: string) {

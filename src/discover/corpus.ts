@@ -1,49 +1,36 @@
-import type {
-	DiscoveredUrl,
-	FetchResult,
-	PipelineConfig,
-} from "../core/types.ts";
+import type { DiscoveredUrl, PipelineConfig } from "../core/types.ts";
 import {
 	isLlmsResourcePath,
 	relatedHost,
 	sameSharedHostPlatform,
-	sameSiteLabel,
 } from "../core/url.ts";
-import { robotsBlockedResult } from "../fetch/result.ts";
-import {
-	discoverLlms,
-	type LlmsDiscoveryOptions,
-	llmsCandidateUrls,
-} from "./llms.ts";
-import { loadRobots, type Robots } from "./robots.ts";
-import { candidateWindowConfig, orderByTopic } from "./topic.ts";
+import { discoverLlms, type LlmsDiscoveryOptions } from "./llms.ts";
+import { loadRobots } from "./robots.ts";
+import { candidateWindow, orderByTopic } from "./topic.ts";
 import { addDiscovered, normalizeUrl, pathInScope } from "./url.ts";
 
-export type LlmsCorpusOptions = LlmsDiscoveryOptions & {
-	robotsByOrigin: Map<string, Robots>;
-};
+export type LlmsCorpusOptions = LlmsDiscoveryOptions;
 
 export async function discoverLlmsUrls(
 	seed: string,
 	config: PipelineConfig,
 	options: LlmsCorpusOptions,
+	limit?: number,
 ) {
-	await cacheRobotsBlockedLlmsCandidates(seed, config, options);
-	const allowResource = (url: string) =>
-		resourceAllowed(url, config, options.robotsByOrigin);
-	return discoverLlms(seed, config, { ...options, allowResource });
+	const allowResource = (url: string) => resourceAllowed(url, config);
+	const discoveryOptions = {
+		...options,
+		allowResource,
+	};
+	return discoverLlms(
+		seed,
+		config,
+		limit === undefined ? discoveryOptions : { ...discoveryOptions, limit },
+	);
 }
 
-export async function resourceAllowed(
-	url: string,
-	config: PipelineConfig,
-	robotsByOrigin: Map<string, Robots>,
-) {
-	const robots = await robotsForOrigin(
-		new URL(url).origin,
-		config,
-		robotsByOrigin,
-	);
+export async function resourceAllowed(url: string, config: PipelineConfig) {
+	const robots = await loadRobots(new URL(url).origin, config);
 	return robots.allowed(url);
 }
 
@@ -53,11 +40,13 @@ export async function discoverLlmsCorpus(
 	scope: string,
 	config: PipelineConfig,
 	options: LlmsCorpusOptions,
+	limit = config.max,
 ) {
 	const llmsUrls = await discoverLlmsUrls(
 		seed,
-		candidateWindowConfig(config),
+		config,
 		options,
+		candidateWindow(config, limit),
 	);
 	const corpus = corpusTarget(seed, llmsUrls);
 	const out: DiscoveredUrl[] = [];
@@ -67,63 +56,21 @@ export async function discoverLlmsCorpus(
 		const url = normalizeUrl(raw);
 		if (
 			!url ||
-			isLlmsResource(url) ||
+			isLlmsResourcePath(new URL(url).pathname) ||
 			!inCorpus(url, sourceSeed, scope, corpus)
 		)
 			continue;
-		const parsed = new URL(url);
-		const origin = parsed.origin;
-		const robots = await robotsForOrigin(
-			origin,
-			config,
-			options.robotsByOrigin,
-		);
-		if (!robots.allowed(url)) continue;
+		const origin = new URL(url).origin;
+		if (!(await resourceAllowed(url, config))) continue;
 		const corpusMatch = corpus && origin === corpus.origin;
 		const targetSeed = corpusMatch
 			? `${corpus.origin}${corpus.scope}`
 			: sourceSeed;
 		const targetScope = corpusMatch ? corpus.scope : scope;
 		addDiscovered(out, seen, url, "llms", targetSeed, targetScope);
-		if (config.maxExplicit && out.length >= config.max) break;
+		if (config.maxExplicit && out.length >= limit) break;
 	}
 	return out;
-}
-
-function isLlmsResource(url: string) {
-	return isLlmsResourcePath(new URL(url).pathname);
-}
-
-export async function robotsForOrigin(
-	origin: string,
-	config: PipelineConfig,
-	robotsByOrigin: Map<string, Robots>,
-) {
-	let robots = robotsByOrigin.get(origin);
-	if (!robots) {
-		robots = await loadRobots(origin, config);
-		robotsByOrigin.set(origin, robots);
-	}
-	return robots;
-}
-
-async function cacheRobotsBlockedLlmsCandidates(
-	seed: string,
-	config: PipelineConfig,
-	options: LlmsCorpusOptions,
-) {
-	const cache = options.cache ?? new Map<string, Promise<FetchResult>>();
-	options.cache = cache;
-	for (const url of llmsCandidateUrls(seed)) {
-		const robots = await robotsForOrigin(
-			new URL(url).origin,
-			config,
-			options.robotsByOrigin,
-		);
-		if (!robots.allowed(url)) {
-			cache.set(url, Promise.resolve(robotsBlockedResult(url)));
-		}
-	}
 }
 
 function inCorpus(
@@ -168,9 +115,7 @@ function corpusTarget(seed: string, urls: string[]) {
 		scope !== "/" &&
 		sameSharedHostPlatform(seedUrl.hostname, targetHost);
 	const trustedHost =
-		relatedHost(seedUrl.hostname, targetHost) ||
-		sameSiteLabel(seedUrl.hostname, targetHost) ||
-		strongSharedHostCorpus;
+		relatedHost(seedUrl.hostname, targetHost) || strongSharedHostCorpus;
 	if (!trustedHost) return undefined;
 	if (!fileHeavy && scope === "/" && !redirectedRootLlms) return undefined;
 	return { origin: best[0], scope };

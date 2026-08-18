@@ -5,10 +5,25 @@ export const discoverySources = [
 	"feed",
 	"nav",
 	"crawl",
-	"asset",
 ] as const;
 
 export type DiscoverySource = (typeof discoverySources)[number];
+export function discoverySourceScore(source: DiscoverySource): number {
+	switch (source) {
+		case "llms":
+			return 7;
+		case "sitemap":
+			return 5;
+		case "feed":
+			return 4;
+		case "nav":
+			return 3;
+		case "crawl":
+			return 2;
+		case "seed":
+			return 1;
+	}
+}
 
 export const pageExtractors = [
 	"markdown",
@@ -64,25 +79,25 @@ export const injectionSignals = [
 ] as const;
 
 export type InjectionSignal = (typeof injectionSignals)[number];
-const allowedInjectionSignals = new Set<InjectionSignal>(injectionSignals);
 
-export function filterInjectionSignals(value: unknown): InjectionSignal[] {
+export function filterInjectionSignals(
+	value: import("./json.ts").JsonValue | undefined,
+): InjectionSignal[] {
 	return Array.isArray(value)
-		? value.filter((item): item is InjectionSignal =>
-				allowedInjectionSignals.has(item),
+		? value.filter(
+				(item): item is InjectionSignal =>
+					typeof item === "string" &&
+					injectionSignals.some((signal) => signal === item),
 			)
 		: [];
 }
 
 export const lowQualityConfidence = 0.6;
 
-export type RunStatus = "ok" | "partial" | "failed";
-export type CaptureMode = "page" | "site";
-export type MaxAppliesTo = "all" | "non-llms";
-
 export type HeaderMap = {
 	get(name: string): string | null;
 	getSetCookie?(): string[];
+	entries(): IterableIterator<[string, string]>;
 };
 
 export type HttpResponse = {
@@ -122,6 +137,7 @@ type FetchBase = {
 	status: number;
 	contentType: string;
 	body: string;
+	document?: Uint8Array;
 	fetchMs: number;
 	redirects?: RedirectHop[];
 	etag?: string;
@@ -136,7 +152,7 @@ type FetchBase = {
 export type RedirectHop = {
 	from: string;
 	to: string;
-	type: "http" | "refresh";
+	type: "http" | "refresh" | "client";
 	status?: number;
 };
 
@@ -186,10 +202,12 @@ export type FetchedUrl = {
 	metadata?: DiscoveryMetadata;
 };
 
-type PageTimings = {
-	fetchMs: number;
-	extractMs: number;
-	writeMs: number;
+type RenderMetrics = {
+	renderer: "chrome-cdp";
+	renderMs: number;
+	blockedRequests: number;
+	fulfilledRequests: number;
+	relayedBytes: number;
 };
 
 type PageBase = {
@@ -198,12 +216,13 @@ type PageBase = {
 	status: number;
 	source: DiscoverySource;
 	wasSeed?: true;
-	timings: PageTimings;
+	timings: { fetchMs: number; extractMs: number; writeMs: number };
 	redirects: RedirectHop[];
 	etag?: string;
 	lastModified?: string;
 	fetchedAt: string;
 	injectionSignals: InjectionSignal[];
+	render?: RenderMetrics & { truncated?: true };
 	publishedAt?: string;
 	updatedAt?: string;
 };
@@ -215,6 +234,7 @@ export type PageSuccess = PageBase & {
 	title?: string;
 	markdown: string;
 	links: string[];
+	media?: string[];
 	contentHash: string;
 	extractor: PageExtractor;
 	inlineStateSource?: InlineStateSource;
@@ -224,12 +244,13 @@ export type PageSuccess = PageBase & {
 
 export type PathedPage = PageSuccess & { outputPath: string };
 
-export type PageOutput = PathedPage & { rendered: string };
+export type PageOutput = PathedPage & { rendered: string; outputHash: string };
 
 export type PageFailure = PageBase & {
 	ok: false;
 	markdown: "";
 	links: [];
+	media?: string[];
 	contentHash: "";
 	extractor: "none";
 	confidence: 0;
@@ -243,13 +264,13 @@ export type PageRecord = PageSuccess | PageFailure;
 export type RunRecord = PageOutput | PageFailure;
 
 export type RunSummary = {
-	status: RunStatus;
+	status: "ok" | "partial" | "failed";
 	seedUrl: string;
 	seed: SeedSummary;
 	warnings: RunWarning[];
 	outDir: string;
 	dryRun: boolean;
-	captureMode: CaptureMode;
+	captureMode: "page" | "site";
 	userAgent: string;
 	generatedAt: string;
 	snapshotVersion: number;
@@ -257,8 +278,9 @@ export type RunSummary = {
 	corpusFiles: number;
 	corpusBytes: number;
 	max: number;
-	maxAppliesTo: MaxAppliesTo;
+	maxAppliesTo: "all" | "non-llms";
 	maxReached: boolean;
+	discoveryTruncated?: boolean;
 	selectionHash?: string;
 	discovered: number;
 	deduped: number;
@@ -278,6 +300,17 @@ export type RunSummary = {
 	byInlineStateSource: Partial<Record<InlineStateSource, number>>;
 	byFailureKind: Partial<Record<FailureKind, number>>;
 	errors: Array<{ url: string; error: string; kind: FailureKind }>;
+	render?: RenderMetrics & {
+		attempted: number;
+		rendered: number;
+		recovered: number;
+		failed: number;
+		launchMs: number;
+		skipped: number;
+		truncated: boolean;
+		stopReason?: "budget" | "no_recovery";
+		unavailable?: string;
+	};
 	refresh: RefreshSummary;
 	cache: CacheSummary;
 };
@@ -310,10 +343,6 @@ export type RunWarning =
 			message: string;
 			url?: string;
 			finalUrl?: string;
-	  }
-	| {
-			kind: "asset_recovery_truncated";
-			message: string;
 	  };
 
 export type SeedSummary = {
@@ -349,10 +378,8 @@ export type CacheSummary = {
 	evictedBytes: number;
 };
 
-export type RefreshChange = "new" | "changed" | "unchanged" | "removed";
-
 export type RefreshChangedPage = {
-	change: Exclude<RefreshChange, "unchanged">;
+	change: "new" | "changed" | "removed";
 	url: string;
 	finalUrl?: string;
 	outputPath?: string;
@@ -367,6 +394,7 @@ export type RefreshSummary = {
 	notModified: number;
 	reused: number;
 	fallbackRefetches: number;
+	pageWrites: number;
 	skippedWrites: number;
 	new: number;
 	changed: number;

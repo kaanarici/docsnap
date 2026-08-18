@@ -57,10 +57,11 @@ function genericTitle(value: string) {
 function slugTitle(value: string) {
 	const path = urlPath(value) ?? value.split(/[?#]/)[0] ?? value;
 	const parts = path.split("/").filter(Boolean);
+	const last = parts.at(-1);
 	const name = (
-		parts.at(-1)?.replace(/\.(?:mdx?|html?|txt)$/i, "") === "index"
+		last?.replace(/\.(?:mdx?|html?|txt)$/i, "") === "index"
 			? parts.at(-2)
-			: parts.at(-1)
+			: last
 	)?.replace(/\.(?:mdx?|html?|txt)$/i, "");
 	return name
 		? safeDecode(name)

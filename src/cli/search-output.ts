@@ -1,5 +1,4 @@
-import { citationId } from "../core/citation.ts";
-import { countLabel } from "../core/text.ts";
+import { citationId, countLabel, terminalText } from "../core/text.ts";
 import type { searchCorpus } from "../corpus/index.ts";
 import type { SearchInput } from "./args.ts";
 
@@ -35,24 +34,28 @@ export function jsonSearchResult(input: SearchInput, result: SearchResult) {
 		injectionFiltered: result.injectionFiltered,
 		limited: result.limited,
 		truncated: result.truncated,
-		matches: result.matches.map(({ corpusDir, match }) => ({
-			citationId: displayCitation(input, corpusDir, match),
-			corpusDir,
-			path: match.record.outputPath,
-			...(match.record.title ? { title: match.record.title } : {}),
-			url: match.record.url,
-			finalUrl: match.record.finalUrl,
-			lineStart: match.lineStart,
-			lineEnd: match.lineEnd,
-			score: roundScore(match.score),
-			confidence: match.confidence,
-			extractor: match.extractor,
-			contentHash: match.contentHash,
-			...(match.record.injectionSignals.length
-				? { injectionSignals: match.record.injectionSignals }
-				: {}),
-			snippet: match.text,
-		})),
+		matches: result.matches.map(({ corpusDir, match }) => {
+			const item = {
+				citationId: displayCitation(input, corpusDir, match),
+				corpusDir,
+				path: match.record.outputPath,
+				url: match.record.url,
+				finalUrl: match.record.finalUrl,
+				lineStart: match.lineStart,
+				lineEnd: match.lineEnd,
+				score: roundScore(match.score),
+				confidence: match.confidence,
+				extractor: match.extractor,
+				contentHash: match.contentHash,
+				snippet: match.text,
+			};
+			const titled = match.record.title
+				? { ...item, title: match.record.title }
+				: item;
+			return match.record.injectionSignals.length
+				? { ...titled, injectionSignals: match.record.injectionSignals }
+				: titled;
+		}),
 	};
 }
 
@@ -106,7 +109,7 @@ export function textSearchResult(input: SearchInput, result: SearchResult) {
 			match.text.trimEnd(),
 		);
 	}
-	return `${lines.join("\n")}\n`;
+	return terminalText(`${lines.join("\n")}\n`);
 }
 
 function displayCitation(
@@ -120,11 +123,7 @@ function displayCitation(
 		match.lineEnd,
 		match.contentHash,
 	);
-	return input.all ? `${trimTrailingSlash(corpusDir)}/${id}` : id;
-}
-
-function trimTrailingSlash(path: string) {
-	return path.replace(/\/+$/g, "");
+	return input.all ? `${corpusDir.replace(/\/+$/g, "")}/${id}` : id;
 }
 
 function roundScore(score: number) {

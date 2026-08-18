@@ -66,12 +66,14 @@ function bestSnippet(
 	};
 }
 
+type ReadableClip = { start: number; end: number; text: string };
+
 function readableClip(
 	body: string,
 	start: number,
 	end: number,
 	snippetChars: number,
-): { start: number; end: number; text: string } {
+): ReadableClip {
 	const clippedStart = start > 0 && start !== expandToLineStart(body, start);
 	const clippedEnd = end < body.length && end !== expandToLineEnd(body, end);
 	let from = clippedStart ? nextBoundary(body, start, end) : start;

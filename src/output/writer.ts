@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import {
+	lstat,
 	mkdir,
 	readdir,
-	readFile,
 	realpath,
 	rename,
 	rm,
@@ -19,41 +19,45 @@ import {
 	assertInsideRoot,
 	assertRealPathInside,
 	assertSafeRoot,
+	assertTrustedMutationPath,
 	isInsideOrSame,
 	realPathIsInside,
+	resolveSafeRelativePath,
 } from "../core/fs-safety.ts";
+import { isJsonString, type JsonObject } from "../core/json.ts";
 import { runBounded } from "../core/parallel.ts";
-import { hashContent } from "../core/snapshot.ts";
 import type {
 	PageOutput,
 	PipelineConfig,
 	RunRecord,
 	RunSummary,
 } from "../core/types.ts";
+import { corpusLimits } from "../corpus/access.ts";
+import { validatePublicHttpUrl } from "../security/url.ts";
 import { retiredRunFiles, runFiles } from "./files.ts";
-import { type PriorState, resolvePriorOutputPath } from "./prior.ts";
+import { type PriorState, readPriorOutput } from "./prior.ts";
 
-export type WriteStats = {
-	pageWrites: number;
-	skippedWrites: number;
-};
-
-type WriteResult = {
+export type StagedPages = {
 	outputs: PageOutput[];
-	stats: WriteStats;
+	skippedWrites: number;
+	writes: StagedWrite[];
+	cleanStage?: string;
+	outDir: string;
 };
+
+type StagedWrite = { target: string; temp?: string };
 
 export async function prepareOutput(config: PipelineConfig): Promise<void> {
 	assertOutputRootSafe(config);
 	if (config.dryRun) return;
 	const outDir = resolve(config.outDir);
 	await assertSafeOutputRoot(outDir, config.outDir);
-	if (config.clean) {
-		assertSafeCleanDir(outDir, config.outDir);
-		await rm(outDir, { recursive: true, force: true });
-	}
-	await mkdir(outDir, { recursive: true });
+	if (config.clean) assertSafeCleanDir(outDir, config.outDir);
+	const mutationError = `Refusing externally writable output path: ${config.outDir}`;
+	await assertTrustedMutationPath(outDir, mutationError);
+	await mkdir(outDir, { recursive: true, mode: 0o700 });
 	await assertSafeOutputRoot(outDir, config.outDir);
+	await assertTrustedMutationPath(outDir, mutationError);
 }
 
 export async function outputDirHasContent(outputDir: string): Promise<boolean> {
@@ -69,8 +73,10 @@ export async function outputDirHasContent(outputDir: string): Promise<boolean> {
 }
 
 export function assertOutputRootSafe(config: PipelineConfig): void {
-	const outDir = resolve(config.outDir);
-	assertSafeOutputDir(outDir, config.outDir);
+	assertSafeRoot(
+		resolve(config.outDir),
+		`Refusing to use unsafe output directory: ${config.outDir}`,
+	);
 }
 
 export async function acquireOutputLock(
@@ -79,7 +85,7 @@ export async function acquireOutputLock(
 	if (config.dryRun) return undefined;
 	const outDir = resolve(config.outDir);
 	return acquireDirLock({
-		path: `${join(dirname(outDir), `.${basename(outDir)}`)}.docsnap-lock`,
+		path: join(dirname(outDir), `.${basename(outDir)}.docsnap-lock`),
 		mode: "hard",
 		waitTimeoutMs: 30_000,
 		timeoutMessage: () =>
@@ -87,169 +93,226 @@ export async function acquireOutputLock(
 	});
 }
 
-export function releaseOutputLock(lock: DirLock | undefined): Promise<void> {
-	return releaseDirLock(lock);
-}
+export const releaseOutputLock = releaseDirLock;
 
-export async function writePages(
+export async function stagePages(
 	outputs: PageOutput[],
 	config: PipelineConfig,
-	onPageDone?: () => void,
-): Promise<WriteResult> {
-	const stats: WriteStats = { pageWrites: 0, skippedWrites: 0 };
-	if (config.dryRun) return { outputs, stats };
-	const writtenOutputs = new Array<PageOutput>(outputs.length);
-	await runOutputWrites([...outputs.entries()], async ([index, output]) => {
-		const { record, wrote } = await writePage(output, config);
-		writtenOutputs[index] = record;
-		if (wrote) stats.pageWrites++;
-		else stats.skippedWrites++;
-		onPageDone?.();
-	});
-	return { outputs: writtenOutputs, stats };
+): Promise<StagedPages> {
+	assertPageOutputs(outputs, config);
+	if (config.dryRun) {
+		return { outputs, skippedWrites: 0, writes: [], outDir: config.outDir };
+	}
+	const cleanStage = config.clean ? await createCleanStage(config) : undefined;
+	const writes: StagedWrite[] = [];
+	const stagedOutputs: PageOutput[] = [];
+	let skippedWrites = 0;
+	try {
+		for (const output of outputs) {
+			const started = performance.now();
+			const existing = config.clean
+				? undefined
+				: await readPriorOutput(config, output.outputPath);
+			const wrote = existing !== output.rendered;
+			if (!wrote) skippedWrites++;
+			if (cleanStage) {
+				await atomicWrite(
+					join(cleanStage, output.outputPath),
+					output.rendered,
+					cleanStage,
+				);
+			} else if (wrote) {
+				writes.push(
+					await stageAtomicWrite(
+						join(config.outDir, output.outputPath),
+						output.rendered,
+						config.outDir,
+					),
+				);
+			}
+			stagedOutputs.push({
+				...output,
+				timings: {
+					...output.timings,
+					writeMs: performance.now() - started,
+				},
+			});
+		}
+		const staged: StagedPages = {
+			outputs: stagedOutputs,
+			skippedWrites,
+			writes,
+			outDir: config.outDir,
+		};
+		if (cleanStage) staged.cleanStage = cleanStage;
+		return staged;
+	} catch (error) {
+		await cleanupStagedWrites(writes);
+		if (cleanStage) await rm(cleanStage, { recursive: true, force: true });
+		throw error;
+	}
 }
 
-export async function removeStalePages(
-	prior: PriorState,
-	outputs: PageOutput[],
-	config: PipelineConfig,
-): Promise<void> {
-	if (config.dryRun || config.clean) return;
-	if (!prior.enabled) return;
-	const currentPaths = new Set(outputs.map((record) => record.outputPath));
-	const stale = new Set(
-		prior.records
-			.map((record) => record.outputPath)
-			.filter((path) => !currentPaths.has(path)),
-	);
-	if (stale.size === 0) return;
-	const realOutputDir = await realpath(config.outDir);
-	await runOutputWrites([...stale], (path) =>
-		removeStalePage(realOutputDir, path, config),
-	);
-}
-
-export async function writeRunFiles(
+export async function commitStagedOutput(
+	staged: StagedPages,
 	records: RunRecord[],
 	summary: RunSummary,
 	config: PipelineConfig,
 ): Promise<void> {
 	if (config.dryRun) return;
-	await atomicWrite(
-		join(config.outDir, runFiles.manifest),
-		manifestLines(records),
-		config.outDir,
+	if (resolve(staged.outDir) !== resolve(config.outDir)) {
+		throw new Error("Staged output directory changed before commit");
+	}
+	const manifest = boundedRunFile(
+		runFiles.manifest,
+		`${records.map((record) => JSON.stringify(manifestRecord(record))).join("\n")}\n`,
+		corpusLimits.manifestBytes,
 	);
-	await atomicWrite(
-		join(config.outDir, runFiles.summary),
-		summaryJson(summary),
-		config.outDir,
+	const summaryBody = boundedRunFile(
+		runFiles.summary,
+		`${JSON.stringify(summary, null, 2)}\n`,
+		corpusLimits.summaryBytes,
 	);
+	if (staged.cleanStage) {
+		await commitCleanOutput(staged.cleanStage, manifest, summaryBody, config);
+		delete staged.cleanStage;
+		return;
+	}
+	for (const [file, body] of [
+		[runFiles.manifest, manifest],
+		[runFiles.summary, summaryBody],
+	] as const) {
+		staged.writes.push(
+			await stageAtomicWrite(join(config.outDir, file), body, config.outDir),
+		);
+	}
+	await commitWrites(staged.writes, config.outDir);
+	staged.writes.length = 0;
 	await Promise.all(
 		retiredRunFiles.map((file) =>
-			rm(join(config.outDir, file), { force: true }),
+			rm(join(config.outDir, file), { force: true }).catch(() => {}),
 		),
 	);
 }
 
-function manifestLines(records: RunRecord[]): string {
-	return `${records.map((record) => JSON.stringify(manifestRecord(record))).join("\n")}\n`;
+export async function discardStagedOutput(staged: StagedPages): Promise<void> {
+	await cleanupStagedWrites(staged.writes);
+	if (staged.cleanStage)
+		await rm(staged.cleanStage, { recursive: true, force: true });
 }
 
-function summaryJson(summary: RunSummary): string {
-	return `${JSON.stringify(summary, null, 2)}\n`;
+export async function stageStalePages(
+	staged: StagedPages,
+	prior: PriorState,
+	config: PipelineConfig,
+): Promise<void> {
+	if (config.dryRun || config.clean || !prior.enabled) return;
+	const currentPaths = new Set(
+		staged.outputs.map((record) => record.outputPath),
+	);
+	const stale = prior.records
+		.map((record) => record.outputPath)
+		.filter((path) => !currentPaths.has(path));
+	if (stale.length === 0) return;
+	const realOutputDir = await realpath(config.outDir);
+	const removals = await runBounded(
+		stale,
+		{ concurrency: 64, perOrigin: 64, key: () => "" },
+		(path) => stagedRemoval(realOutputDir, path, config),
+	);
+	staged.writes.push(
+		...removals.filter((write): write is StagedWrite => Boolean(write)),
+	);
+}
+
+function boundedRunFile(file: string, body: string, maxBytes: number) {
+	if (Buffer.byteLength(body) > maxBytes)
+		throw new Error(`${file} exceeds the supported size`);
+	return body;
 }
 
 function manifestRecord(record: RunRecord) {
-	const entry: Record<string, unknown> = { ...record };
-	for (const key of ["markdown", "links", "timings", "rendered"]) {
+	// SAFETY: RunRecord contains only JSON values; the copy is mutated only for manifest compaction.
+	const entry = { ...record } as JsonObject;
+	for (const key of ["markdown", "timings", "rendered"]) {
 		delete entry[key];
 	}
-	if ("rendered" in record) {
-		return compactManifestRecord({
-			...entry,
-			outputHash: hashContent(record.rendered),
-		});
+	for (const key of ["links", "media"]) {
+		if (Array.isArray(entry[key])) {
+			const values = entry[key].filter(
+				(value): value is string =>
+					isJsonString(value) && !validatePublicHttpUrl(value),
+			);
+			const bounded = boundedManifestUrls(values);
+			entry[key] = bounded;
+			if (bounded.length < values.length) {
+				entry[`${key}Count`] = values.length;
+				entry[`${key}Truncated`] = true;
+			}
+		}
 	}
-	return compactManifestRecord(entry);
-}
-
-function compactManifestRecord(entry: Record<string, unknown>) {
 	for (const [key, value] of Object.entries(entry)) {
-		if (Array.isArray(value) && value.length === 0) delete entry[key];
+		if (key !== "links" && Array.isArray(value) && value.length === 0) {
+			delete entry[key];
+		}
 	}
 	return entry;
 }
 
-async function runOutputWrites<T>(
-	items: readonly T[],
-	write: (item: T) => Promise<void>,
-): Promise<void> {
-	await runBounded(
-		[...items],
-		{ concurrency: 64, perOrigin: 64, key: () => "" },
-		write,
-	);
+function boundedManifestUrls(value: readonly string[]) {
+	const output: string[] = [];
+	let bytes = 2;
+	for (const item of value) {
+		const next =
+			Buffer.byteLength(JSON.stringify(item)) + (output.length ? 1 : 0);
+		if (bytes + next > 12 * 1024) break;
+		output.push(item);
+		bytes += next;
+	}
+	return output;
 }
 
-async function writePage(record: PageOutput, config: PipelineConfig) {
-	const started = performance.now();
-	const path = join(config.outDir, record.outputPath);
-	const body = record.rendered;
-	const wrote = (await readExistingBody(path)) !== body;
-	if (wrote) await atomicWrite(path, body, config.outDir);
-	const writeMs = performance.now() - started;
-	return {
-		wrote,
-		record: { ...record, timings: { ...record.timings, writeMs } },
-	};
-}
-
-async function removeStalePage(
+async function stagedRemoval(
 	realOutputDir: string,
 	outputPath: string,
 	config: PipelineConfig,
-) {
-	const target = resolvePriorOutputPath(config, outputPath);
+): Promise<StagedWrite | undefined> {
+	const target = resolveSafeRelativePath(config.outDir, outputPath);
 	if (!target) return;
-	let realTarget: string;
+	let info: Awaited<ReturnType<typeof lstat>>;
 	try {
-		realTarget = await realpath(target);
+		info = await lstat(target);
 	} catch (error) {
 		if (isNotFound(error)) return;
 		throw error;
 	}
-	if (!isInsideOrSame(realOutputDir, realTarget)) {
+	const realParent = await realpath(dirname(target));
+	if (!isInsideOrSame(realOutputDir, realParent)) {
 		throw new Error(
 			`Refusing to remove stale page outside output directory: ${outputPath}`,
 		);
 	}
-	await rm(realTarget, { force: true });
-	await pruneEmptyParents(dirname(realTarget), realOutputDir);
-}
-
-async function pruneEmptyParents(start: string, root: string) {
-	let dir = start;
-	while (dir !== root && isInsideOrSame(root, dir)) {
-		try {
-			await rmdir(dir);
-		} catch (error) {
-			if (isNotFound(error) || isNotEmpty(error)) return;
-			throw error;
-		}
-		dir = dirname(dir);
+	if (!info.isFile() && !info.isSymbolicLink()) {
+		throw new Error(`Refusing to remove non-file stale output: ${outputPath}`);
 	}
-}
-
-async function readExistingBody(path: string) {
-	try {
-		return await readFile(path, "utf8");
-	} catch {
-		return undefined;
-	}
+	return { target };
 }
 
 async function atomicWrite(path: string, body: string, root: string) {
+	const staged = await stageAtomicWrite(path, body, root);
+	try {
+		await assertSafeParent(dirname(staged.target), resolve(root), path);
+		await rename(staged.temp, staged.target);
+	} finally {
+		await rm(staged.temp, { force: true });
+	}
+}
+
+async function stageAtomicWrite(
+	path: string,
+	body: string,
+	root: string,
+): Promise<StagedWrite & { temp: string }> {
 	const target = resolve(path);
 	const resolvedRoot = resolve(root);
 	assertInsideRoot(
@@ -258,7 +321,7 @@ async function atomicWrite(path: string, body: string, root: string) {
 		`Refusing to write outside output directory: ${path}`,
 	);
 	await assertSafeParent(dirname(target), resolvedRoot, path);
-	await mkdir(dirname(target), { recursive: true });
+	await mkdir(dirname(target), { recursive: true, mode: 0o700 });
 	const [realRoot, realParent] = await Promise.all([
 		realpath(resolvedRoot),
 		realpath(dirname(target)),
@@ -267,47 +330,169 @@ async function atomicWrite(path: string, body: string, root: string) {
 		throw new Error(`Refusing to write outside output directory: ${path}`);
 	}
 	const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
-	await writeFile(temp, body);
-	await rename(temp, target);
+	try {
+		await writeFile(temp, body, { flag: "wx", mode: 0o600 });
+		await assertSafeParent(dirname(target), resolvedRoot, path);
+		return { target, temp };
+	} catch (error) {
+		await rm(temp, { force: true });
+		throw error;
+	}
+}
+
+function assertPageOutputs(outputs: PageOutput[], config: PipelineConfig) {
+	const paths = new Set<string>();
+	for (const output of outputs) {
+		if (!resolveSafeRelativePath(config.outDir, output.outputPath)) {
+			throw new Error(
+				`Refusing to write unsafe page path: ${output.outputPath}`,
+			);
+		}
+		if (paths.has(output.outputPath)) {
+			throw new Error(
+				`Refusing to write duplicate page path: ${output.outputPath}`,
+			);
+		}
+		paths.add(output.outputPath);
+		if (Buffer.byteLength(output.rendered) > corpusLimits.pageBytes) {
+			throw new Error(
+				`Page output exceeds the supported size (${Math.ceil(corpusLimits.pageBytes / 1024 / 1024)}MB): ${output.outputPath}`,
+			);
+		}
+	}
+}
+
+async function createCleanStage(config: PipelineConfig): Promise<string> {
+	const outDir = resolve(config.outDir);
+	const parent = dirname(outDir);
+	await assertSafeParent(parent, parent, config.outDir);
+	const stage = join(
+		parent,
+		`.${basename(outDir)}.docsnap-stage-${process.pid}-${randomUUID()}`,
+	);
+	await mkdir(stage, { mode: 0o700 });
+	return stage;
+}
+
+async function commitCleanOutput(
+	stage: string,
+	manifest: string,
+	summary: string,
+	config: PipelineConfig,
+) {
+	await atomicWrite(join(stage, runFiles.manifest), manifest, stage);
+	await atomicWrite(join(stage, runFiles.summary), summary, stage);
+	const outDir = resolve(config.outDir);
+	const backup = `${outDir}.backup-${process.pid}-${randomUUID()}`;
+	let movedExisting = false;
+	try {
+		try {
+			await rename(outDir, backup);
+			movedExisting = true;
+		} catch (error) {
+			if (!isNotFound(error)) throw error;
+		}
+		await rename(stage, outDir);
+	} catch (error) {
+		if (movedExisting) await rename(backup, outDir).catch(() => {});
+		throw error;
+	}
+	if (movedExisting)
+		await rm(backup, { recursive: true, force: true }).catch(() => {});
+}
+
+async function commitWrites(writes: StagedWrite[], root: string) {
+	const committed: Array<StagedWrite & { backup?: string }> = [];
+	const resolvedRoot = resolve(root);
+	try {
+		for (const write of writes) {
+			await assertSafeParent(dirname(write.target), resolvedRoot, write.target);
+			const backup = `${write.target}.${process.pid}.${randomUUID()}.backup`;
+			let info: Awaited<ReturnType<typeof lstat>> | undefined;
+			try {
+				info = await lstat(write.target);
+			} catch (error) {
+				if (!isNotFound(error)) throw error;
+			}
+			if (info && !info.isFile() && !info.isSymbolicLink()) {
+				throw new Error(`Refusing to replace non-file output: ${write.target}`);
+			}
+			if (info) await rename(write.target, backup);
+			try {
+				if (write.temp) await rename(write.temp, write.target);
+			} catch (error) {
+				if (info) await rename(backup, write.target).catch(() => {});
+				throw error;
+			}
+			committed.push(info ? { ...write, backup } : write);
+		}
+	} catch (error) {
+		for (const write of committed.reverse()) {
+			if (write.temp) await rm(write.target, { force: true }).catch(() => {});
+			if (write.backup) {
+				await rename(write.backup, write.target).catch(() => {});
+			}
+		}
+		throw error;
+	}
+	await Promise.all(
+		committed.map((write) =>
+			write.backup
+				? rm(write.backup, { force: true }).catch(() => {})
+				: undefined,
+		),
+	);
+	await Promise.all(
+		committed.map((write) =>
+			write.temp
+				? undefined
+				: pruneEmptyParents(dirname(write.target), resolvedRoot),
+		),
+	);
+}
+
+async function pruneEmptyParents(start: string, root: string) {
+	for (
+		let dir = start;
+		dir !== root && isInsideOrSame(root, dir);
+		dir = dirname(dir)
+	) {
+		try {
+			await rmdir(dir);
+		} catch {
+			return;
+		}
+	}
+}
+
+async function cleanupStagedWrites(writes: StagedWrite[]) {
+	await Promise.all(
+		writes.map((write) =>
+			write.temp ? rm(write.temp, { force: true }) : undefined,
+		),
+	);
 }
 
 async function assertSafeOutputRoot(outDir: string, raw: string) {
 	if (isAbsolute(raw)) return;
-	const cwd = await realpath(process.cwd());
-	if (!(await realPathIsInside(cwd, outDir))) {
+	if (!(await realPathIsInside(await realpath(process.cwd()), outDir))) {
 		throw new Error(`Refusing to write outside current directory: ${raw}`);
 	}
 }
 
 async function assertSafeParent(parent: string, root: string, raw: string) {
-	const realRoot = await realpath(root);
 	await assertRealPathInside(
-		realRoot,
+		await realpath(root),
 		parent,
 		`Refusing to write outside output directory: ${raw}`,
 	);
 }
 
 function assertSafeCleanDir(outDir: string, raw: string) {
-	const cwd = resolve(process.cwd());
-	const isCwdOrAncestor = isInsideOrSame(outDir, cwd);
-	if (isCwdOrAncestor) {
-		throw new Error(`Refusing to clean unsafe output directory: ${raw}`);
-	}
+	if (!isInsideOrSame(outDir, resolve(process.cwd()))) return;
+	throw new Error(`Refusing to clean unsafe output directory: ${raw}`);
 }
 
-function assertSafeOutputDir(outDir: string, raw: string) {
-	assertSafeRoot(outDir, `Refusing to use unsafe output directory: ${raw}`);
-}
-
-function isNotFound(error: unknown) {
-	return error instanceof Error && "code" in error && error.code === "ENOENT";
-}
-
-function isNotEmpty(error: unknown) {
-	return (
-		error instanceof Error &&
-		"code" in error &&
-		(error.code === "ENOTEMPTY" || error.code === "EEXIST")
-	);
+function isNotFound(cause: unknown) {
+	return cause instanceof Error && "code" in cause && cause.code === "ENOENT";
 }

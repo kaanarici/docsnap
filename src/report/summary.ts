@@ -1,8 +1,7 @@
 import { cacheSummary } from "../cache/store.ts";
 import { captureSelectionHash } from "../core/config.ts";
 import { emptyRefreshSummary } from "../core/refresh.ts";
-import type { SnapshotStats } from "../core/snapshot.ts";
-import { snapshotSchemaVersion } from "../core/snapshot.ts";
+import { type SnapshotStats, snapshotSchemaVersion } from "../core/snapshot.ts";
 import {
 	type DiscoveredUrl,
 	type DiscoveryResourceSeed,
@@ -15,7 +14,6 @@ import {
 	lowQualityConfidence,
 	type PageOutput,
 	type PageRecord,
-	type PageSuccess,
 	type PipelineConfig,
 	pageExtractors,
 	type RefreshSummary,
@@ -37,10 +35,12 @@ export function buildSummary(
 	refresh: RefreshSummary = emptyRefreshSummary(),
 	cache = cacheSummary(config),
 	seedResource?: DiscoveryResourceSeed,
-	assetRecoveryTruncated = false,
+	discoveryTruncated = false,
+	render?: RunSummary["render"],
 ): RunSummary {
-	let written = 0;
+	const written = outputs.length;
 	let failed = 0;
+	let maxEligible = 0;
 	let lowQuality = 0;
 	let qualityWarnings = 0;
 	let injectionSignalPages = 0;
@@ -58,7 +58,10 @@ export function buildSummary(
 
 	for (const record of records) {
 		bySource[record.source]++;
-		if (record.ok) continue;
+		if (record.ok) {
+			if (config.maxExplicit || record.source !== "llms") maxEligible++;
+			continue;
+		}
 		failed++;
 		byFailureKind[record.failureKind] =
 			(byFailureKind[record.failureKind] ?? 0) + 1;
@@ -75,10 +78,13 @@ export function buildSummary(
 			byInlineStateSource[record.inlineStateSource] =
 				(byInlineStateSource[record.inlineStateSource] ?? 0) + 1;
 		}
-		written++;
 		if (addRedirectedHosts(record, redirectedHosts)) hostRedirects++;
-		if (isLowQuality(record)) lowQuality++;
-		if (isQualityWarning(record)) qualityWarnings++;
+		if (record.confidence < lowQualityConfidence) lowQuality++;
+		if (
+			record.qualityReasons.length &&
+			record.confidence >= lowQualityConfidence
+		)
+			qualityWarnings++;
 		if (record.injectionSignals.length) {
 			injectionSignalPages++;
 			for (const signal of record.injectionSignals) {
@@ -86,24 +92,15 @@ export function buildSummary(
 			}
 		}
 	}
-	const reached = maxReached(config, attempted);
+	const reached = !config.pageOnly && maxEligible >= config.max;
 	const selectionHash = captureSelectionHash(config.topic);
 	const seed = seedSummary(records, outputs, config, seedResource);
 	const warnings = runWarnings(seed);
-	if (assetRecoveryTruncated) {
-		warnings.push({
-			kind: "asset_recovery_truncated",
-			message: "JS asset recovery stopped at its safety budget.",
-		});
-	}
+	const partial =
+		failed || lowQuality || reached || discoveryTruncated || render?.truncated;
 
-	return {
-		status: runStatus(
-			written,
-			failed,
-			lowQuality,
-			reached || assetRecoveryTruncated,
-		),
+	const summary: RunSummary = {
+		status: written === 0 ? "failed" : partial ? "partial" : "ok",
 		seedUrl: config.seedUrl,
 		seed,
 		warnings,
@@ -119,7 +116,7 @@ export function buildSummary(
 		max: config.max,
 		maxAppliesTo: config.maxExplicit ? "all" : "non-llms",
 		maxReached: reached,
-		...(selectionHash ? { selectionHash } : {}),
+		discoveryTruncated,
 		discovered: attempted.length,
 		deduped,
 		written,
@@ -151,43 +148,46 @@ export function buildSummary(
 		refresh,
 		cache,
 	};
+	if (selectionHash) summary.selectionHash = selectionHash;
+	if (render) summary.render = render;
+	return summary;
 }
 
 function runWarnings(seed: SeedSummary): RunWarning[] {
 	const resource = seed.kind === "discovery_resource";
 	if (!seed.included) {
-		return [
-			{
-				kind: resource ? "discovery_resource_empty" : "seed_omitted",
-				message: resource
-					? "The requested discovery resource produced no captured pages."
-					: "The requested seed page is not in the written corpus.",
-				...(seed.omissionReason ? { omissionReason: seed.omissionReason } : {}),
-				...(seed.failureKind ? { failureKind: seed.failureKind } : {}),
-				...(seed.error ? { error: seed.error } : {}),
-			},
-		];
+		const warning: Extract<
+			RunWarning,
+			{ kind: "seed_omitted" | "discovery_resource_empty" }
+		> = {
+			kind: resource ? "discovery_resource_empty" : "seed_omitted",
+			message: resource
+				? "The requested discovery resource produced no captured pages."
+				: "The requested seed page is not in the written corpus.",
+		};
+		if (seed.omissionReason) warning.omissionReason = seed.omissionReason;
+		if (seed.failureKind) warning.failureKind = seed.failureKind;
+		if (seed.error) warning.error = seed.error;
+		return [warning];
 	}
 	if (resource) {
-		return [
-			{
-				kind: "discovery_resource_seed",
-				message:
-					"The requested seed was used as a discovery resource, not captured as an exact page.",
-				...(seed.source ? { source: seed.source } : {}),
-				pagesWritten: seed.pagesWritten ?? 0,
-			},
-		];
+		const warning: Extract<RunWarning, { kind: "discovery_resource_seed" }> = {
+			kind: "discovery_resource_seed",
+			message:
+				"The requested seed was used as a discovery resource, not captured as an exact page.",
+			pagesWritten: seed.pagesWritten ?? 0,
+		};
+		if (seed.source) warning.source = seed.source;
+		return [warning];
 	}
 	if (seed.redirected) {
-		return [
-			{
-				kind: "seed_redirected",
-				message: "The requested seed redirected before capture.",
-				...(seed.url ? { url: seed.url } : {}),
-				...(seed.finalUrl ? { finalUrl: seed.finalUrl } : {}),
-			},
-		];
+		const warning: Extract<RunWarning, { kind: "seed_redirected" }> = {
+			kind: "seed_redirected",
+			message: "The requested seed redirected before capture.",
+		};
+		if (seed.url) warning.url = seed.url;
+		if (seed.finalUrl) warning.finalUrl = seed.finalUrl;
+		return [warning];
 	}
 	return [];
 }
@@ -208,13 +208,12 @@ function seedSummary(
 		return {
 			attempted: true,
 			included: true,
-			...seedLocation(url, output.finalUrl, output.redirects.length > 0),
+			...seedLocation(url, output.finalUrl),
 			outputPath: output.outputPath,
 			source: output.source,
 		};
 	}
 	const attempted = records.find((record) => record.wasSeed);
-	const resourceKind = resource ? { kind: "discovery_resource" as const } : {};
 	if (!attempted) {
 		return resource
 			? {
@@ -233,7 +232,7 @@ function seedSummary(
 				};
 	}
 	if (!attempted.ok) {
-		return {
+		const summary: SeedSummary = {
 			attempted: true,
 			included: false,
 			...seedLocation(
@@ -241,14 +240,15 @@ function seedSummary(
 				attempted.finalUrl,
 				attempted.redirects.length > 0,
 			),
-			...resourceKind,
 			source: attempted.source,
 			omissionReason: "failed",
 			failureKind: attempted.failureKind,
 			error: attempted.error,
 		};
+		if (resource) summary.kind = "discovery_resource";
+		return summary;
 	}
-	return {
+	const summary: SeedSummary = {
 		attempted: true,
 		included: false,
 		...seedLocation(
@@ -256,10 +256,11 @@ function seedSummary(
 			attempted.finalUrl,
 			attempted.redirects.length > 0,
 		),
-		...resourceKind,
 		source: attempted.source,
 		omissionReason: "not_written",
 	};
+	if (resource) summary.kind = "discovery_resource";
+	return summary;
 }
 
 function seedLocation(
@@ -267,11 +268,12 @@ function seedLocation(
 	finalUrl: string,
 	redirected = url !== finalUrl,
 ) {
-	return {
+	const location: Pick<SeedSummary, "url" | "finalUrl" | "redirected"> = {
 		url,
 		finalUrl,
-		...(redirected ? { redirected: true as const } : {}),
 	};
+	if (redirected) location.redirected = true;
+	return location;
 }
 
 function includedDiscoveryResourceSeed(
@@ -327,15 +329,8 @@ function hostKey(raw: string) {
 	}
 }
 
-export function isLowQuality(record: PageSuccess): boolean {
-	return record.confidence < lowQualityConfidence;
-}
-
-export function isQualityWarning(record: PageSuccess): boolean {
-	return record.qualityReasons.length > 0 && !isLowQuality(record);
-}
-
 function emptyCounts<T extends string>(keys: readonly T[]) {
+	// SAFETY: every key from the generic input is emitted exactly once with a number value.
 	return Object.fromEntries(keys.map((key) => [key, 0])) as Record<T, number>;
 }
 
@@ -349,21 +344,4 @@ function orderedPartialCounts<T extends string>(
 		if (count) out[key] = count;
 	}
 	return out;
-}
-
-function maxReached(config: PipelineConfig, attempted: DiscoveredUrl[]) {
-	if (config.pageOnly) return false;
-	return config.maxExplicit
-		? attempted.length >= config.max
-		: attempted.filter((item) => item.source !== "llms").length >= config.max;
-}
-
-function runStatus(
-	written: number,
-	failed: number,
-	lowQuality: number,
-	maxReached: boolean,
-) {
-	if (written === 0) return "failed";
-	return failed || lowQuality || maxReached ? "partial" : "ok";
 }

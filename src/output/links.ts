@@ -68,10 +68,5 @@ function isLocalOutputHref(
 }
 
 function isRelativeHref(href: string): boolean {
-	try {
-		new URL(href);
-		return false;
-	} catch {
-		return true;
-	}
+	return !URL.canParse(href);
 }

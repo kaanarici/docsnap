@@ -8,6 +8,7 @@ import {
 	chromeKey,
 	isArticleFooterStart,
 	isMarkdownChromeLine,
+	pipeSet,
 } from "./markdown-chrome.ts";
 export function cleanMarkdown(markdown: string): string {
 	let fence: Fence | undefined;
@@ -67,7 +68,6 @@ export function cleanMarkdown(markdown: string): string {
 		if (skippedSphinxPermalink) {
 			if (!trimmedLine) continue;
 			skippedSphinxPermalink = false;
-			if (horizontalRuleLinePattern.test(trimmedLine)) continue;
 		}
 		if (horizontalRuleLinePattern.test(trimmedLine)) continue;
 		const cleanedLine = stripSphinxPermalinks(rawCleanedLine);
@@ -136,8 +136,6 @@ function repairBrokenLinkBlocks(markdown: string) {
 		.replace(/(\]\([^)]+\))(?=\[)/g, "$1\n\n");
 }
 
-const pipeSet = (value: string) => new Set(value.split("|"));
-
 const codeFenceLanguageNames = pipeSet(
 	"bash|c|csharp|css|go|html|java|javascript|json|js|jsx|kotlin|markdown|php|python|ruby|rust|sql|swift|tsx|typescript|yaml",
 );
@@ -159,7 +157,10 @@ function codeFenceHint(line: string) {
 const filenameCodeLanguages = new Map<string, string>(
 	"cjs:javascript|css:css|go:go|htm:html|html:html|java:java|js:javascript|json:json|jsx:jsx|kt:kotlin|md:markdown|mdx:markdown|mjs:javascript|php:php|py:python|rb:ruby|rs:rust|sh:bash|sql:sql|swift:swift|ts:typescript|tsx:tsx|yaml:yaml|yml:yaml"
 		.split("|")
-		.map((pair) => pair.split(":") as [string, string]),
+		.map((pair) => {
+			const [extension = "", language = ""] = pair.split(":");
+			return [extension, language] as const;
+		}),
 );
 
 function filenameCodeLanguage(key: string) {
@@ -184,7 +185,7 @@ function nextMeaningfulLineOpensFence(
 }
 
 function fenceHasNoLanguage(line: string) {
-	return /^(\s*)(`{3,}|~{3,})$/.test(line);
+	return /^(?:\s*)(?:`{3,}|~{3,})$/.test(line);
 }
 
 function stripHeadingControlSuffix(line: string): string {
@@ -199,7 +200,7 @@ function cleanMarkdownLine(line: string) {
 	if (image !== undefined) return image;
 	return stripSelfLinkedHeading(stripHeadingControlSuffix(line))
 		.replace(/<\/?([A-Z][A-Za-z0-9]*)(?:\s[^>]*)?>/g, (match, name: string) =>
-			inlineMdxTags.has(name) ? "" : match,
+			name === "CodeStep" ? "" : match,
 		)
 		.replace(
 			/^\s*<\/?(?:svg|path|g|defs|clipPath|rect|circle|line|polyline|polygon|use|source|picture)(?:\s[^>]*)?\/?>\s*$/i,
@@ -209,7 +210,6 @@ function cleanMarkdownLine(line: string) {
 		.replace(/\s*\{\/\*.*?\*\/}\s*/g, " ")
 		.trimEnd();
 }
-const inlineMdxTags = new Set(["CodeStep"]);
 
 function stripSelfLinkedHeading(line: string): string {
 	const match = line.match(/^(#{1,6}\s+)\[([^\]]+)]\(([^)]+)\)(.*)$/);
@@ -218,6 +218,7 @@ function stripSelfLinkedHeading(line: string): string {
 }
 
 function stripInvisibleAnchorLinks(markdown: string) {
+	if (!invisibleAnchorLinkPattern.test(markdown)) return markdown;
 	return replaceMarkdownLinks(markdown, (link) =>
 		isInvisibleTextOnly(link.text) && localAnchorHref(link.href)
 			? ""
@@ -238,6 +239,10 @@ function localHeadingHref(href: string) {
 }
 
 const invisibleTextRunPattern = new RegExp(`${invisibleTextPattern}+`, "gu");
+const invisibleAnchorLinkPattern = new RegExp(
+	`\\[(?:\\s|${invisibleTextPattern})*\\]\\(`,
+	"u",
+);
 
 function normalizeImageAlt(markdown: string): string {
 	if (!markdown.includes("![")) return markdown;
@@ -368,12 +373,17 @@ function stripComponentIndent(line: string, depth: number) {
 	return stripped;
 }
 
-function openFence(line: string) {
+type OpenFence = { line: string; fence: Fence };
+
+function openFence(line: string): OpenFence | undefined {
 	const match = line.match(/^(\s*)(`{3,}|~{3,})(.*)$/);
 	if (!match) return undefined;
 
-	const marker = match[2]![0] as "`" | "~";
-	const length = match[2]!.length;
+	const fence = match[2] ?? "";
+	const marker = fence[0];
+	if (marker !== "`" && marker !== "~") return undefined;
+	const length = fence.length;
+	if (marker === "`" && match[3]!.includes("`")) return undefined;
 	const language = match[3]!.trim().match(/^([A-Za-z0-9_#+.-]+)/)?.[1] ?? "";
 	return {
 		line: `${match[1]}${match[2]}${language}`,

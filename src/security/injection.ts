@@ -1,12 +1,11 @@
 import { Buffer } from "node:buffer";
 import { parseHTML } from "linkedom";
-import { markdownLinkHrefs } from "../core/markdown.ts";
+import { markdownHrefs } from "../core/markdown.ts";
 import { invisibleTextPattern } from "../core/text.ts";
 import type { InjectionSignal } from "../core/types.ts";
 
 type SignalPattern = readonly [InjectionSignal, RegExp];
 
-const invisibleTextTestPattern = new RegExp(invisibleTextPattern, "u");
 const invisibleTextGlobalPattern = new RegExp(invisibleTextPattern, "gu");
 const maxCommentBlocks = 64;
 const maxCommentScanChars = 16 * 1024;
@@ -14,6 +13,8 @@ const maxStyleBlocks = 32;
 const maxStyleScanChars = 64 * 1024;
 const maxStyleRules = 512;
 const maxCssDeclarationChars = 16 * 1024;
+const maxEncodedCandidateChars = 16 * 1024;
+const maxEncodedCandidates = 64;
 const rawSkipTags = new Set(["script", "style", "noscript", "template", "svg"]);
 
 const unicodePatterns: SignalPattern[] = [
@@ -39,11 +40,11 @@ const instructionPatterns: SignalPattern[] = [
 	],
 	[
 		"ai-directed-instruction",
-		/\b(?:ai|assistant|llm|(?:ai|coding|the|this|your)[^\S\r\n]+agent)\b[^\r\n]{0,80}\b(?:ignore|follow|obey|execute|treat|trust|send|reveal|show|print|dump|disclose|expose|leak)\b[^\r\n]{0,80}\b(?:instructions?|prompts?|messages?|guidance|system|developer|this[^\S\r\n]+(?:page|document|content))\b/i,
+		/\b(?:ai(?=[,:]|\s+(?:please|ignore|follow|obey|execute|treat|trust|send|reveal|show|print|dump|disclose|expose|leak)\b)|assistant|llm|(?:ai|coding|the|this|your)[^\S\r\n]+agent)\b[^\r\n]{0,80}\b(?:ignore|follow|obey|execute|treat|trust|send|reveal|show|print|dump|disclose|expose|leak)\b[^\r\n]{0,80}\b(?:instructions?|prompts?|messages?|guidance|system|developer|this[^\S\r\n]+(?:page|document|content))\b/i,
 	],
 	[
 		"ai-directed-instruction",
-		/\b(?:ignore|follow|obey|execute|treat|trust|send|reveal|show|print|dump|disclose|expose|leak)\b[^\r\n]{0,80}\b(?:ai|assistant|llm|(?:ai|coding|the|this|your)[^\S\r\n]+agent)\b/i,
+		/\b(?:ignore|follow|obey|execute|treat|trust|send|reveal|show|print|dump|disclose|expose|leak)\b[^\r\n]{0,80}\b(?:ai(?=[,:])|assistant|llm|(?:ai|coding|the|this|your)[^\S\r\n]+agent)\b/i,
 	],
 	[
 		"tool-exfiltration-language",
@@ -86,83 +87,87 @@ const roleTargetPattern = new RegExp(
 	"i",
 );
 
-const confusables: Record<string, string> = {
-	"\u0391": "A",
-	"\u0392": "B",
-	"\u0395": "E",
-	"\u0396": "Z",
-	"\u0397": "H",
-	"\u0399": "I",
-	"\u039a": "K",
-	"\u039c": "M",
-	"\u039d": "N",
-	"\u039f": "O",
-	"\u03a1": "P",
-	"\u03a4": "T",
-	"\u03a5": "Y",
-	"\u03a7": "X",
-	"\u03b1": "a",
-	"\u03b5": "e",
-	"\u03b9": "i",
-	"\u03ba": "k",
-	"\u03bd": "v",
-	"\u03bf": "o",
-	"\u03c1": "p",
-	"\u03c4": "t",
-	"\u03c5": "u",
-	"\u03c7": "x",
-	"\u0405": "S",
-	"\u0406": "I",
-	"\u0408": "J",
-	"\u0410": "A",
-	"\u0412": "B",
-	"\u0415": "E",
-	"\u041a": "K",
-	"\u041c": "M",
-	"\u041d": "H",
-	"\u041e": "O",
-	"\u0420": "P",
-	"\u0421": "C",
-	"\u0422": "T",
-	"\u0423": "Y",
-	"\u0425": "X",
-	"\u0430": "a",
-	"\u0433": "r",
-	"\u0435": "e",
-	"\u043a": "k",
-	"\u043c": "m",
-	"\u043e": "o",
-	"\u0440": "p",
-	"\u0441": "c",
-	"\u0442": "t",
-	"\u0443": "y",
-	"\u0445": "x",
-	"\u0455": "s",
-	"\u0456": "i",
-	"\u0458": "j",
-	"\u04bb": "h",
-	"\u0501": "d",
-	"\u051b": "q",
-	"\u051d": "w",
-	"\u0570": "h",
-	"\u0578": "n",
-	"\u057d": "u",
-	"\u0585": "o",
-};
+const confusables = new Map(
+	Object.entries({
+		"\u0391": "A",
+		"\u0392": "B",
+		"\u0395": "E",
+		"\u0396": "Z",
+		"\u0397": "H",
+		"\u0399": "I",
+		"\u039a": "K",
+		"\u039c": "M",
+		"\u039d": "N",
+		"\u039f": "O",
+		"\u03a1": "P",
+		"\u03a4": "T",
+		"\u03a5": "Y",
+		"\u03a7": "X",
+		"\u03b1": "a",
+		"\u03b5": "e",
+		"\u03b9": "i",
+		"\u03ba": "k",
+		"\u03bd": "v",
+		"\u03bf": "o",
+		"\u03c1": "p",
+		"\u03c4": "t",
+		"\u03c5": "u",
+		"\u03c7": "x",
+		"\u0405": "S",
+		"\u0406": "I",
+		"\u0408": "J",
+		"\u0410": "A",
+		"\u0412": "B",
+		"\u0415": "E",
+		"\u041a": "K",
+		"\u041c": "M",
+		"\u041d": "H",
+		"\u041e": "O",
+		"\u0420": "P",
+		"\u0421": "C",
+		"\u0422": "T",
+		"\u0423": "Y",
+		"\u0425": "X",
+		"\u0430": "a",
+		"\u0433": "r",
+		"\u0435": "e",
+		"\u043a": "k",
+		"\u043c": "m",
+		"\u043e": "o",
+		"\u0440": "p",
+		"\u0441": "c",
+		"\u0442": "t",
+		"\u0443": "y",
+		"\u0445": "x",
+		"\u0455": "s",
+		"\u0456": "i",
+		"\u0458": "j",
+		"\u04bb": "h",
+		"\u0501": "d",
+		"\u051b": "q",
+		"\u051d": "w",
+		"\u0570": "h",
+		"\u0578": "n",
+		"\u057d": "u",
+		"\u0585": "o",
+	}),
+);
+const confusablePattern = new RegExp(`[${[...confusables.keys()].join("")}]`);
+const confusableGlobalPattern = new RegExp(confusablePattern.source, "g");
 
 export function scanRawHtmlForInjectionSignals(
 	html: string,
+	parsedDocument?: Document,
 ): InjectionSignal[] {
 	const signals = new Set<InjectionSignal>();
 	for (const signal of htmlCommentSignals(html)) signals.add(signal);
 	try {
-		const { document } = parseHTML(html);
+		const document = parsedDocument ?? parseHTML(html).document;
 		const hidden = new Set(hiddenElements(document));
-		for (const signal of visibleUnicodeSignals(document, hidden))
-			signals.add(signal);
+		addSignals(signals, visibleUnicodeSignals(document, hidden));
 		for (const element of hidden) {
 			const phraseSignals = instructionSignals(element.textContent ?? "");
-			if (phraseSignals.length === 0) continue;
+			if (phraseSignals.size === 0) continue;
 			signals.add("hidden-html-text");
 			for (const signal of phraseSignals) signals.add(signal);
 		}
@@ -182,13 +187,14 @@ function visibleUnicodeSignals(
 		const node = stack.pop();
 		if (!node) continue;
 		if (node.nodeType === 3) {
-			if (hasVisibleText(node.textContent ?? "")) {
-				for (const signal of unicodeSignals(node.textContent ?? ""))
-					signals.add(signal);
+			const text = node.textContent ?? "";
+			if (/\p{L}|\p{N}/u.test(stripInvisibleText(text))) {
+				addSignals(signals, unicodeSignals(text));
 			}
 			continue;
 		}
 		if (node.nodeType !== 1) continue;
+		// SAFETY: DOM nodeType 1 is the platform discriminator for Element nodes.
 		const element = node as Element;
 		if (hidden.has(element) || rawSkipTags.has(element.tagName.toLowerCase()))
 			continue;
@@ -201,91 +207,137 @@ function visibleUnicodeSignals(
 	return [...signals];
 }
 
-function hasVisibleText(text: string) {
-	return /\p{L}|\p{N}/u.test(stripInvisibleText(text));
-}
-
 export function scanMarkdownForInjectionSignals(
 	markdown: string,
 ): InjectionSignal[] {
-	return unique([
-		...unicodeSignals(markdown),
-		...instructionSignals(markdown),
-		...mixedScriptSignals(markdown),
-		...unsafeLinkSchemeSignals(markdown),
-		...encodedSignals(markdown),
-	]);
-}
+	const signals = new Set<InjectionSignal>();
+	for (const [signal, pattern] of unicodePatterns) {
+		if (pattern.test(markdown)) signals.add(signal);
+	}
 
-function unicodeSignals(text: string): InjectionSignal[] {
-	return unique([
-		...unicodePatterns
-			.filter(([, pattern]) => pattern.test(text))
-			.map(([signal]) => signal),
-		...zeroWidthSignals(text),
-	]);
-}
+	const direct = directInstructionSignals(markdown);
+	const revealed = instructionSignals(markdown, direct);
+	for (const signal of revealed) {
+		if (!direct.has(signal)) {
+			signals.add("zero-width-text");
+			signals.add(signal);
+		}
+	}
+	for (const signal of direct) signals.add(signal);
+	for (const signal of revealed) signals.add(signal);
 
-function instructionSignals(text: string): InjectionSignal[] {
-	const direct = directInstructionSignals(text);
-	const stripped = stripInvisibleText(text);
-	return stripped === text
-		? direct
-		: unique([...direct, ...directInstructionSignals(stripped)]);
-}
-
-function directInstructionSignals(text: string): InjectionSignal[] {
-	const signals = new Set<InjectionSignal>(
-		instructionPatterns
-			.filter(([, pattern]) => pattern.test(text))
-			.map(([signal]) => signal),
-	);
-	if (hasFakeRoleTurn(text)) signals.add("fake-system-turn");
+	const normalized = normalizeConfusables(markdown.normalize("NFKC"));
+	if (normalized !== markdown) {
+		const normalizedSignals = instructionSignals(normalized);
+		if (normalizedSignals.size > 0) {
+			signals.add("mixed-script-confusable");
+			addSignals(signals, normalizedSignals);
+		}
+	}
+	if (hasUnsafeLinkScheme(markdown)) signals.add("unsafe-link-scheme");
+	addEncodedSignals(markdown, signals);
 	return [...signals];
 }
 
-function zeroWidthSignals(text: string): InjectionSignal[] {
-	if (!invisibleTextTestPattern.test(text)) return [];
-	const direct = new Set(directInstructionSignals(text));
-	const revealed = directInstructionSignals(stripInvisibleText(text)).filter(
-		(signal) => !direct.has(signal),
-	);
-	return revealed.length ? unique(["zero-width-text", ...revealed]) : [];
+function unicodeSignals(text: string): InjectionSignal[] {
+	const signals = new Set<InjectionSignal>();
+	for (const [signal, pattern] of unicodePatterns) {
+		if (pattern.test(text)) signals.add(signal);
+	}
+	const direct = directInstructionSignals(text);
+	for (const signal of instructionSignals(text, direct)) {
+		if (!direct.has(signal)) {
+			signals.add("zero-width-text");
+			signals.add(signal);
+		}
+	}
+	return [...signals];
+}
+
+function instructionSignals(
+	text: string,
+	direct = directInstructionSignals(text),
+): Set<InjectionSignal> {
+	const signals = new Set(direct);
+	const stripped = stripInvisibleText(text);
+	if (stripped !== text) {
+		addSignals(signals, directInstructionSignals(stripped));
+	}
+	return signals;
+}
+
+function addSignals(
+	target: Set<InjectionSignal>,
+	source: Iterable<InjectionSignal>,
+) {
+	for (const signal of source) target.add(signal);
+}
+
+function directInstructionSignals(text: string): Set<InjectionSignal> {
+	const signals = new Set<InjectionSignal>();
+	for (const [signal, pattern] of instructionPatterns) {
+		if (pattern.test(text)) signals.add(signal);
+	}
+	if (hasFakeRoleTurn(text)) signals.add("fake-system-turn");
+	return signals;
 }
 
 function stripInvisibleText(text: string) {
 	return text.replace(invisibleTextGlobalPattern, "");
 }
 
-function mixedScriptSignals(text: string): InjectionSignal[] {
-	const normalized = normalizeConfusables(text.normalize("NFKC"));
-	if (normalized === text) return [];
-	const signals = instructionSignals(normalized);
-	return signals.length ? unique(["mixed-script-confusable", ...signals]) : [];
-}
-
 function normalizeConfusables(text: string) {
-	let changed = false;
-	const normalized = Array.from(text, (char) => {
-		const replacement = confusables[char];
-		if (replacement === undefined) return char;
-		changed = true;
-		return replacement;
-	}).join("");
-	return changed ? normalized : text;
+	if (!confusablePattern.test(text)) return text;
+	return text.replace(
+		confusableGlobalPattern,
+		(char) => confusables.get(char) ?? char,
+	);
 }
 
-function encodedSignals(text: string): InjectionSignal[] {
-	const signals = new Set<InjectionSignal>();
-	for (const candidate of encodedCandidates(text)) {
+function addEncodedSignals(text: string, signals: Set<InjectionSignal>) {
+	const seen = new Set<string>();
+	const pattern = /[A-Za-z0-9+/_-]{32,16385}/g;
+	for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+		if (match[0].length > maxEncodedCandidateChars) {
+			signals.add("opaque-encoded-blob");
+			while (isEncodedChar(text.charCodeAt(pattern.lastIndex)))
+				pattern.lastIndex++;
+			continue;
+		}
+		let end = pattern.lastIndex;
+		while (
+			end < text.length &&
+			end < pattern.lastIndex + 2 &&
+			text[end] === "="
+		)
+			end++;
+		pattern.lastIndex = end;
+		const candidate = text.slice(match.index, end);
+		if (seen.has(candidate)) continue;
+		if (seen.size >= maxEncodedCandidates) {
+			signals.add("opaque-encoded-blob");
+			break;
+		}
+		seen.add(candidate);
 		const decoded = decodeCandidate(candidate);
-		if (decoded && instructionSignals(decoded).length > 0) {
+		if (decoded && instructionSignals(decoded).size > 0) {
 			signals.add("encoded-injection-blob");
 			continue;
 		}
 		if (isOpaqueEncodedBlob(candidate)) signals.add("opaque-encoded-blob");
 	}
-	return [...signals];
+}
+
+function isEncodedChar(code: number) {
+	return (
+		(code >= 0x30 && code <= 0x39) ||
+		(code >= 0x41 && code <= 0x5a) ||
+		(code >= 0x61 && code <= 0x7a) ||
+		code === 0x2b ||
+		code === 0x2d ||
+		code === 0x2f ||
+		code === 0x5f
+	);
 }
 
 function isOpaqueEncodedBlob(candidate: string) {
@@ -297,26 +349,18 @@ function isOpaqueEncodedBlob(candidate: string) {
 	);
 }
 
-function unsafeLinkSchemeSignals(markdown: string): InjectionSignal[] {
-	for (const href of markdownLinkHrefs(markdown)) {
-		const scheme = hrefScheme(href);
-		if (scheme === "javascript" || scheme === "vbscript") {
-			return ["unsafe-link-scheme"];
-		}
+function hasUnsafeLinkScheme(markdown: string) {
+	for (const href of markdownHrefs(markdown)) {
+		const value = trimLeadingSpacesAndControls(href);
+		const prefix = value.slice(0, 64);
+		const normalized =
+			decodeHtmlCharRefs(decodePercentBytes(prefix)) + value.slice(64);
+		const colon = normalized.indexOf(":");
+		const scheme =
+			colon > 0 ? normalized.slice(0, colon).toLowerCase() : undefined;
+		if (scheme === "javascript" || scheme === "vbscript") return true;
 	}
-	return [];
-}
-
-function hrefScheme(href: string) {
-	const trimmed = normalizeSchemePrefix(trimLeadingSpacesAndControls(href));
-	const colon = trimmed.indexOf(":");
-	if (colon <= 0) return undefined;
-	return trimmed.slice(0, colon).toLowerCase();
-}
-
-function normalizeSchemePrefix(value: string) {
-	const prefix = value.slice(0, 64);
-	return decodeHtmlCharRefs(decodePercentBytes(prefix)) + value.slice(64);
+	return false;
 }
 
 function decodeHtmlCharRefs(value: string) {
@@ -350,17 +394,6 @@ function trimLeadingSpacesAndControls(value: string) {
 	return value.slice(index);
 }
 
-function encodedCandidates(text: string) {
-	const candidates = new Set<string>();
-	for (const match of text.matchAll(/\b[A-Za-z0-9+/_-]{32,}={0,2}\b/g)) {
-		candidates.add(match[0]);
-	}
-	for (const match of text.matchAll(/\b[0-9a-fA-F]{64,}\b/g)) {
-		candidates.add(match[0]);
-	}
-	return candidates;
-}
-
 function htmlCommentSignals(html: string): InjectionSignal[] {
 	const signals = new Set<InjectionSignal>();
 	let position = 0;
@@ -376,9 +409,9 @@ function htmlCommentSignals(html: string): InjectionSignal[] {
 		const commentSignals = instructionSignals(
 			html.slice(contentStart, scanEnd),
 		);
-		if (commentSignals.length > 0) {
+		if (commentSignals.size > 0) {
 			signals.add("html-comment-instruction");
-			for (const signal of commentSignals) signals.add(signal);
+			addSignals(signals, commentSignals);
 		}
 		if (end < 0) break;
 		position = end + 3;
@@ -391,16 +424,18 @@ function hasFakeRoleTurn(text: string) {
 		if (hasRoleInstruction(match[0] ?? "")) return true;
 	}
 	for (const match of text.matchAll(roleTagPattern)) {
-		if (hasRoleInstruction(roleTagContext(text, match.index ?? 0))) return true;
+		const index = match.index ?? 0;
+		if (
+			hasRoleInstruction(
+				text.slice(
+					Math.max(0, index - 240),
+					Math.min(text.length, index + 512),
+				),
+			)
+		)
+			return true;
 	}
 	return false;
-}
-
-function roleTagContext(text: string, index: number) {
-	return text.slice(
-		Math.max(0, index - 240),
-		Math.min(text.length, index + 512),
-	);
 }
 
 function hasRoleInstruction(text: string) {
@@ -414,58 +449,47 @@ function decodeCandidate(candidate: string): string | undefined {
 		);
 	}
 	const normalized = candidate.replace(/-/g, "+").replace(/_/g, "/");
-	const base64 = decodeBase64(normalized);
-	if (base64) return base64;
-	return undefined;
-}
-
-function decodeBase64(candidate: string): string | undefined {
-	if (candidate.length % 4 === 1) return undefined;
-	const padded = candidate.padEnd(Math.ceil(candidate.length / 4) * 4, "=");
+	if (normalized.length % 4 === 1) return undefined;
+	const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
 	if (!/^[A-Za-z0-9+/]+={0,2}$/.test(padded)) return undefined;
 	return decodedTextIfReadable(Buffer.from(padded, "base64").toString("utf8"));
 }
 
 function decodedTextIfReadable(text: string) {
-	const compact = text.replace(/\s/g, "");
-	if (!compact) return undefined;
-	const printableCount = Array.from(compact).filter((char) => {
+	let compactCount = 0;
+	let printableCount = 0;
+	for (const char of text) {
+		if (/\s/u.test(char)) continue;
+		compactCount++;
 		const code = char.codePointAt(0) ?? 0;
-		return code >= 0x20 && code !== 0x7f;
-	}).length;
-	return printableCount / compact.length >= 0.75 ? text : undefined;
+		if (code >= 0x20 && code !== 0x7f) printableCount++;
+	}
+	return compactCount && printableCount / compactCount >= 0.75
+		? text
+		: undefined;
 }
 
 function hiddenElements(document: Document): Element[] {
 	const out = new Set<Element>();
 	for (const element of document.querySelectorAll("*")) {
-		if (isInlineHidden(element)) out.add(element);
+		if (
+			element.hasAttribute("hidden") ||
+			element.getAttribute("aria-hidden")?.toLowerCase() === "true" ||
+			hidesText(element.getAttribute("style") ?? "")
+		)
+			out.add(element);
 	}
-	for (const selector of hiddenStyleSelectors(document)) {
-		try {
-			for (const element of document.querySelectorAll(selector))
-				out.add(element);
-		} catch {}
-	}
-	return [...out];
-}
-
-function isInlineHidden(element: Element) {
-	return (
-		element.hasAttribute("hidden") ||
-		element.getAttribute("aria-hidden")?.toLowerCase() === "true" ||
-		hidesText(element.getAttribute("style") ?? "")
-	);
-}
-
-function hiddenStyleSelectors(document: Document) {
-	const selectors: string[] = [];
 	let styleCount = 0;
 	for (const style of document.querySelectorAll("style")) {
 		if (styleCount++ >= maxStyleBlocks) break;
-		selectors.push(...hiddenSelectorsFromCss(style.textContent ?? ""));
+		for (const selector of hiddenSelectorsFromCss(style.textContent ?? "")) {
+			try {
+				for (const element of document.querySelectorAll(selector))
+					out.add(element);
+			} catch {}
+		}
 	}
-	return selectors;
+	return [...out];
 }
 
 function hidesText(style: string) {
@@ -488,8 +512,7 @@ function hidesText(style: string) {
 	);
 }
 
-function hiddenSelectorsFromCss(css: string) {
-	const selectors: string[] = [];
+function* hiddenSelectorsFromCss(css: string): Generator<string> {
 	const text = css.slice(0, maxStyleScanChars);
 	let position = 0;
 	for (let count = 0; count < maxStyleRules; count++) {
@@ -500,12 +523,11 @@ function hiddenSelectorsFromCss(css: string) {
 		if (hidesText(text.slice(open + 1, close))) {
 			for (const selector of text.slice(position, open).split(",")) {
 				const clean = selector.trim();
-				if (clean && !clean.startsWith("@")) selectors.push(clean);
+				if (clean && !clean.startsWith("@")) yield clean;
 			}
 		}
 		position = close + 1;
 	}
-	return selectors;
 }
 
 function whiteColorPattern(property: string) {
@@ -518,7 +540,3 @@ function whiteColorPattern(property: string) {
 // recompiled two regexes on every element of every page.
 const whiteColorText = whiteColorPattern("color");
 const whiteColorBackground = whiteColorPattern("background(?:-color)?");
-
-function unique<T>(values: T[]): T[] {
-	return [...new Set(values)];
-}

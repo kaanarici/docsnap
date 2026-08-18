@@ -1,28 +1,39 @@
-import { Defuddle } from "defuddle/node";
 import { parseHTML } from "linkedom";
 import { markdownLinkHrefs } from "../core/markdown.ts";
+import { uniqueByWhitespace, wordCount } from "../core/text.ts";
 import {
-	stripCompleteHtmlElement,
-	uniqueByWhitespace,
-	wordCount,
-} from "../core/text.ts";
-import type { FetchedUrl, FetchResult, PageRecord } from "../core/types.ts";
+	type FetchedUrl,
+	type FetchResult,
+	lowQualityConfidence,
+	type PageExtractor,
+	type PageRecord,
+} from "../core/types.ts";
 import { urlWithoutFragment } from "../core/url.ts";
 import { isFeedResponse } from "../discover/feed.ts";
-import { chromeHeading, isShellPlaceholder } from "./app-shell.ts";
+import {
+	discoverFetchedResources,
+	type PageResources,
+} from "../discover/nav.ts";
+import { scanRawHtmlForInjectionSignals } from "../security/injection.ts";
+import {
+	chromeHeading,
+	isRecoverableAppShell,
+	isShellPlaceholder,
+} from "./app-shell.ts";
 import {
 	isMarkdownLike,
 	isStructuredTextAsset,
 	languageFromUrl,
 } from "./content.ts";
+import { extractDocument } from "./document.ts";
+import { extractInlineState } from "./inline-state.ts";
+import { scriptBlocks } from "./inline-state-scan.ts";
 import {
 	type ExtractedBody,
 	failedRecord,
-	rawInjectionSignals,
 	recordFromExtracted,
 } from "./page-record.ts";
 import { scoreMarkdown } from "./quality.ts";
-import { extractSerializedText } from "./serialized-text.ts";
 import { structuredFallback } from "./structured-fallback.ts";
 import {
 	countTextChars,
@@ -35,63 +46,146 @@ import {
 } from "./structured-fallback-shared.ts";
 import { titleFromMarkdown } from "./title.ts";
 
-export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
+export type ExtractedPage = [PageRecord, PageResources, boolean];
+
+export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 	const { metadata, result, source, wasSeed } = input;
 	const started = performance.now();
+	let resources: PageResources = { links: [], media: [] };
+	let shell = false;
+	const page = (record: PageRecord): ExtractedPage => [
+		record,
+		resources,
+		shell,
+	];
 	if (!result.ok)
-		return failedRecord(
-			result,
-			source,
-			metadata,
-			result.error,
-			result.failureKind,
-			[],
-			wasSeed,
+		return page(
+			failedRecord(
+				result,
+				source,
+				metadata,
+				result.error,
+				result.failureKind,
+				[],
+				wasSeed,
+			),
 		);
+	if (result.document) {
+		const record = await extractDocument(input, started);
+		resources = {
+			links: record.links,
+			media: record.ok ? (record.media ?? []) : [],
+		};
+		return page(record);
+	}
 	// rss/atom feeds are discovery sources, not content pages; exclude them from
 	// the corpus instead of capturing the raw feed XML as a page
 	if (shouldCheckFeedResponse(result) && isFeedResponse(result))
-		return failedRecord(
-			result,
-			source,
-			metadata,
-			"feed resource used for discovery, not a content page",
-			"empty",
-			[],
-			wasSeed,
+		return page(
+			failedRecord(
+				result,
+				source,
+				metadata,
+				"feed resource used for discovery, not a content page",
+				"empty",
+				[],
+				wasSeed,
+			),
 		);
-	const signals = rawInjectionSignals(result);
+	let signals: PageRecord["injectionSignals"] = [];
 
 	try {
-		const extracted = await extractBody(result);
-		return recordFromExtracted(input, extracted, started, signals);
-	} catch (error) {
-		return failedRecord(
-			result,
-			source,
-			metadata,
-			error instanceof Error ? error.message : String(error),
-			"extract",
+		const document =
+			isStructuredTextAsset(result) || isMarkdownLike(result)
+				? undefined
+				: parseHTML(result.body).document;
+		resources = discoverFetchedResources(result, document);
+		signals = isMarkdownLike(result)
+			? []
+			: scanRawHtmlForInjectionSignals(result.body, document);
+		const scripts = document ? scriptBlocks(document) : undefined;
+		shell = document ? isRecoverableAppShell(result.body, document) : false;
+		const extracted = await extractBody(result, document, shell);
+		const staticRecord = recordFromExtracted(
+			input,
+			extracted,
+			started,
 			signals,
-			wasSeed,
+			shell,
+		);
+		if (!scripts || !shouldRecoverInlineState(shell, staticRecord)) {
+			return page(staticRecord);
+		}
+		try {
+			const inlineStarted = performance.now();
+			const inline = extractInlineState(result.body, result.finalUrl, {
+				scripts,
+				title: extracted.title,
+			});
+			if (!inline) return page(staticRecord);
+			const inlineRecord = recordFromExtracted(
+				input,
+				{
+					markdown: inline.markdown,
+					extractor: "inline-state",
+					inlineStateSource: inline.source,
+					title: titleFromMarkdown(
+						inline.markdown,
+						new URL(result.finalUrl).pathname,
+					),
+				},
+				inlineStarted,
+				signals,
+				shell,
+			);
+			return page(
+				(!inlineRecord.ok &&
+					(inlineRecord.failureKind === "not_found" ||
+						inlineRecord.failureKind === "blocked")) ||
+					(inlineRecord.ok && inlineRecord.confidence >= lowQualityConfidence)
+					? inlineRecord
+					: staticRecord,
+			);
+		} catch {
+			return page(staticRecord);
+		}
+	} catch (error) {
+		return page(
+			failedRecord(
+				result,
+				source,
+				metadata,
+				error instanceof Error ? error.message : String(error),
+				"extract",
+				signals,
+				wasSeed,
+			),
 		);
 	}
+}
+
+function shouldRecoverInlineState(shell: boolean, record: PageRecord) {
+	if (
+		record.ok &&
+		record.confidence >= 0.9 &&
+		(record.extractor === "html" ||
+			(record.extractor === "structured" && wordCount(record.markdown) >= 200))
+	) {
+		return false;
+	}
+	if (!shell) return false;
+	return record.ok
+		? record.confidence < lowQualityConfidence ||
+				record.extractor === "fallback" ||
+				record.extractor === "structured"
+		: record.failureKind === "empty" || record.failureKind === "extract";
 }
 
 // Fast precheck so the feed-root DOM parse only runs for XML-ish responses
 // or text/plain bodies that start like feed XML
 function shouldCheckFeedResponse(result: FetchResult): boolean {
-	return (
-		feedLikeContentType(result.contentType) || feedLikeBodyPrefix(result.body)
-	);
-}
-
-function feedLikeContentType(contentType: string): boolean {
-	return /(?:rss|atom)\+xml|\bxml\b/i.test(contentType);
-}
-
-function feedLikeBodyPrefix(body: string): boolean {
-	const prefix = body
+	if (/(?:rss|atom)\+xml|\bxml\b/i.test(result.contentType)) return true;
+	const prefix = result.body
 		.slice(0, 2048)
 		.replace(/^\uFEFF/, "")
 		.trimStart();
@@ -103,29 +197,39 @@ function feedLikeBodyPrefix(body: string): boolean {
 	);
 }
 
-async function extractBody(result: FetchResult): Promise<ExtractedBody> {
+async function extractBody(
+	result: FetchResult,
+	parsedDocument?: Document,
+	shell = false,
+): Promise<ExtractedBody> {
 	if (isStructuredTextAsset(result)) {
 		const title = titleFromMarkdown("", new URL(result.finalUrl).pathname);
-		return {
+		return extractedBody(
+			renderTextAsset(title, result.body, result.finalUrl),
+			"text",
 			title,
-			markdown: renderTextAsset(title, result.body, result.finalUrl),
-			extractor: "text" as const,
-		};
+		);
 	}
 	if (isMarkdownLike(result)) {
+		const body = result.body.trim();
+		const truncated = body.length > maxOutputChars;
+		const markdown = truncated ? body.slice(0, maxOutputChars) : body;
 		const title = titleFromMarkdown(
-			result.body,
+			markdown,
 			new URL(result.finalUrl).pathname,
 		);
-		return {
+		return extractedBody(
+			markdown,
+			"markdown",
 			title,
-			markdown: result.body.trim(),
-			extractor: "markdown" as const,
-		};
+			undefined,
+			truncated,
+			truncated ? body : undefined,
+		);
 	}
 
-	const cleaned = stripScriptStyleTags(result.body);
-	const document = freshDocument(cleaned);
+	const document = parsedDocument ?? parseHTML(result.body).document;
+	removeScriptsAndStyles(document);
 	const canonical = resolveCanonical(
 		document.querySelector('link[rel="canonical"]')?.getAttribute("href"),
 		result.finalUrl,
@@ -133,29 +237,52 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 	const documentTitleText = documentTitle(document);
 	const outline = largePageOutline(document, result.body, documentTitleText);
 	if (outline) {
-		return {
-			...(documentTitleText ? { title: documentTitleText } : {}),
-			...(canonical ? { canonicalUrl: canonical } : {}),
-			markdown: outline,
-			extractor: "fallback" as const,
-		};
+		return extractedBody(outline, "fallback", documentTitleText, canonical);
 	}
 
+	if (document.querySelectorAll("*").length > maxDefuddleElements) {
+		const fallback = structuredOrFlat(document, result.finalUrl);
+		return extractedBody(
+			fallback.markdown,
+			fallback.extractor,
+			documentTitleText,
+			canonical,
+			fallback.truncated,
+		);
+	}
 	// Skip Defuddle only when the structured pass is already substantial,
 	// high-confidence, and not a shell.
-	const fast = strongStructuredFastPath(
-		document,
-		result.finalUrl,
-		documentTitleText,
-		result.body,
-	);
-	if (fast) {
-		return {
-			...(documentTitleText ? { title: documentTitleText } : {}),
-			...(canonical ? { canonicalUrl: canonical } : {}),
-			markdown: fast,
-			extractor: "structured" as const,
-		};
+	const structuredStatus = { truncated: false };
+	const structured = {
+		markdown: structuredFallback(document, result.finalUrl, structuredStatus),
+		...structuredStatus,
+	};
+	if (
+		isStrongStructuredFastPath(
+			structured.markdown,
+			document,
+			documentTitleText,
+			result.body,
+		)
+	) {
+		return extractedBody(
+			structured.markdown,
+			"structured",
+			documentTitleText,
+			canonical,
+			structured.truncated,
+		);
+	}
+	const declared = shell ? declaredMarkdown(document) : undefined;
+	if (declared && wordCount(structured.markdown) < 20) {
+		return extractedBody(
+			declared.markdown,
+			"markdown",
+			documentTitleText,
+			canonical,
+			declared.truncated,
+			declared.injectionSource,
+		);
 	}
 
 	const parsed = await parseWithDefuddle(document, result.finalUrl);
@@ -163,117 +290,180 @@ async function extractBody(result: FetchResult): Promise<ExtractedBody> {
 		const title = parsed.title || documentTitleText;
 		const markdown = parsed.content.trim();
 		if (isShellPlaceholder(markdown, title, result.body)) {
-			return {
-				...(title ? { title } : {}),
-				...(canonical ? { canonicalUrl: canonical } : {}),
-				markdown: "",
-				extractor: "fallback" as const,
-			};
-		}
-		const serialized =
-			scoreMarkdown(markdown, title).confidence < 0.6
-				? extractSerializedText(result.body, title)
-				: undefined;
-		if (serialized) {
-			return {
-				...(title ? { title } : {}),
-				...(canonical ? { canonicalUrl: canonical } : {}),
-				markdown: serialized,
-				extractor: "fallback" as const,
-			};
+			return extractedBody("", "fallback", title, canonical);
 		}
 		const fallback = chromeOnlyExtractedMarkdown(markdown)
-			? structuredOrFlat(freshDocument(cleaned), result.finalUrl)
+			? structuredOrFlat(
+					freshDocument(result.body),
+					result.finalUrl,
+					structured,
+				)
 			: undefined;
 		if (fallback && wordCount(fallback.markdown) > 20) {
-			return {
-				...(title ? { title } : {}),
-				...(canonical ? { canonicalUrl: canonical } : {}),
-				markdown: fallback.markdown,
-				extractor: fallback.extractor,
-			};
+			return extractedBody(
+				fallback.markdown,
+				fallback.extractor,
+				title,
+				canonical,
+				fallback.truncated,
+			);
 		}
-		return {
-			...(title ? { title } : {}),
-			...(canonical ? { canonicalUrl: canonical } : {}),
-			markdown,
-			extractor: "html" as const,
-		};
+		return extractedBody(markdown, "html", title, canonical);
 	}
 
 	const title = documentTitleText;
-	const fallbackDocument = freshDocument(cleaned);
-	const fallback = structuredOrFlat(fallbackDocument, result.finalUrl);
-	const serialized =
-		wordCount(fallback.markdown) < 40
-			? extractSerializedText(result.body, title)
-			: undefined;
-	const metadata = serialized
+	const fallbackDocument = freshDocument(result.body);
+	const fallback = structuredOrFlat(
+		fallbackDocument,
+		result.finalUrl,
+		structured,
+	);
+	const metadata = fallback.markdown
 		? undefined
 		: metadataMarkdown(fallbackDocument, title);
-	const markdown = serialized ?? (fallback.markdown || metadata || "");
-	const extractor = serialized
-		? ("fallback" as const)
-		: fallback.markdown
-			? fallback.extractor
-			: ("fallback" as const);
+	const markdown = fallback.markdown || metadata || "";
+	const extractor = fallback.markdown
+		? fallback.extractor
+		: ("fallback" as const);
 	// Meta-tag-only output is marketing copy, not captured page content.
-	const metadataOnly = !serialized && !fallback.markdown && Boolean(metadata);
+	const metadataOnly = !fallback.markdown && Boolean(metadata);
 	const isShell =
 		isShellPlaceholder(markdown, title, result.body) ||
 		(metadataOnly && Boolean(markdown));
-	return {
-		...(title ? { title } : {}),
-		...(canonical ? { canonicalUrl: canonical } : {}),
-		markdown: isShell ? "" : markdown,
+	return extractedBody(
+		isShell ? "" : markdown,
 		extractor,
+		title,
+		canonical,
+		fallback.truncated,
+	);
+}
+
+function extractedBody(
+	markdown: string,
+	extractor: PageExtractor,
+	title?: string,
+	canonicalUrl?: string,
+	truncated = false,
+	injectionSource?: string,
+): ExtractedBody {
+	const extracted: ExtractedBody = { markdown, extractor };
+	if (title) extracted.title = title;
+	if (canonicalUrl) extracted.canonicalUrl = canonicalUrl;
+	if (truncated) extracted.truncated = true;
+	if (injectionSource) extracted.injectionSource = injectionSource;
+	return extracted;
+}
+
+function declaredMarkdown(document: Document) {
+	let markdown = "";
+	for (const node of document.querySelectorAll("pre[data-content-type]")) {
+		const type = node
+			.getAttribute("data-content-type")
+			?.split(";", 1)[0]
+			?.trim()
+			.toLowerCase();
+		const text = node.textContent?.trim() ?? "";
+		if (
+			type === "text/markdown" &&
+			node.closest('[aria-hidden="true"],[hidden]') &&
+			wordCount(text) >= 20 &&
+			text.length > markdown.length
+		) {
+			markdown = text;
+		}
+	}
+	if (!markdown) return undefined;
+	const truncated = markdown.length > maxOutputChars;
+	const declared: DeclaredMarkdown = {
+		markdown: truncated ? markdown.slice(0, maxOutputChars) : markdown,
+		truncated,
 	};
+	if (truncated) declared.injectionSource = markdown;
+	return declared;
 }
 
 function freshDocument(html: string) {
-	return parseHTML(html).document;
+	const document = parseHTML(html).document;
+	removeScriptsAndStyles(document);
+	return document;
+}
+
+function removeScriptsAndStyles(document: Document) {
+	document.querySelectorAll("script,style").forEach((node) => {
+		node.remove();
+	});
 }
 
 const fastPathMinWords = 200;
 const fastPathMinConfidence = 0.9;
-function strongStructuredFastPath(
+const maxDefuddleElements = 10_000;
+
+type DeclaredMarkdown = {
+	markdown: string;
+	truncated: boolean;
+	injectionSource?: string;
+};
+
+function isStrongStructuredFastPath(
+	markdown: string,
 	document: Document,
-	baseUrl: string,
 	title: string | undefined,
 	html: string,
-): string | undefined {
-	const markdown = structuredFallback(document, baseUrl);
-	if (!markdown || wordCount(markdown) < fastPathMinWords) return undefined;
-	if (isShellPlaceholder(markdown, title, html)) return undefined;
-	const referenceLinkCount =
-		markdown.match(/^- \[[^\]]+\]\([^)]+\)$/gm)?.length ?? 0;
+): boolean {
+	const minWords = document.querySelector("[data-docsnap-root]")
+		? 20
+		: fastPathMinWords;
 	if (
-		scoreMarkdown(markdown, title).confidence < fastPathMinConfidence &&
-		referenceLinkCount < 50
-	) {
-		return undefined;
-	}
-	return markdown;
+		!markdown ||
+		wordCount(markdown) < minWords ||
+		!/^#{1,6}\s+/m.test(markdown)
+	)
+		return false;
+	if (isShellPlaceholder(markdown, title, html)) return false;
+	if (minWords < fastPathMinWords) return true;
+	const referenceLinkCount =
+		markdown.match(/^[ \t]*- \[[^\]]+\]\([^)]+\)$/gm)?.length ?? 0;
+	return (
+		scoreMarkdown(markdown, title).confidence >= fastPathMinConfidence ||
+		referenceLinkCount >= 50
+	);
 }
 
 function structuredOrFlat(
 	document: Document,
 	baseUrl: string,
-): { markdown: string; extractor: "structured" | "fallback" } {
-	const structured = structuredFallback(document, baseUrl);
-	if (wordCount(structured) >= 20) {
-		return { markdown: structured, extractor: "structured" };
+	structured?: { markdown: string; truncated: boolean },
+) {
+	const status = { truncated: false };
+	const result = structured ?? {
+		markdown: structuredFallback(document, baseUrl, status),
+		...status,
+	};
+	if (wordCount(result.markdown) >= 20) {
+		return { ...result, extractor: "structured" as const };
 	}
-	return { markdown: pageText(document), extractor: "fallback" };
+	const fallback = pageText(document);
+	return {
+		...fallback,
+		extractor: "fallback" as const,
+		truncated: result.truncated || fallback.truncated,
+	};
 }
 
 function pageText(document: Document) {
-	const element =
-		document.querySelector("main") ??
-		document.querySelector("article") ??
-		elementWithText(document.body) ??
-		elementWithText(document.documentElement);
-	return element ? readableText(element) : "";
+	const candidates = [
+		document.querySelector("main"),
+		document.querySelector("article"),
+		document.body,
+		document.documentElement,
+	];
+	for (const element of candidates) {
+		if (!element) continue;
+		const result = readableText(element);
+		if (wordCount(result.markdown) >= 8) return result;
+	}
+	return { markdown: "", truncated: false };
 }
 
 function largePageOutline(
@@ -320,53 +510,60 @@ function chromeOnlyExtractedMarkdown(markdown: string) {
 	);
 }
 
-function readableText(node: Node): string {
+function readableText(node: Node) {
 	const parts: string[] = [];
 	const stack: Array<{ node: Node; inAnchor: boolean }> = [
 		{ node, inAnchor: false },
 	];
 	let visits = 0;
 	let chars = 0;
+	let outputChars = 0;
 	let anchorChars = 0;
+	let clipped = false;
 	while (
 		stack.length > 0 &&
 		visits++ < maxSerializeVisits &&
-		chars < maxOutputChars
+		outputChars < maxOutputChars
 	) {
 		const frame = stack.pop()!;
 		if (frame.node.nodeType === 3) {
-			const value = frame.node.textContent ?? "";
+			const raw = frame.node.textContent ?? "";
+			const value = raw.slice(0, maxOutputChars - outputChars);
+			clipped ||= value.length < raw.length;
 			parts.push(value);
+			outputChars += value.length;
 			const textChars = countTextChars(value);
 			chars += textChars;
 			if (frame.inAnchor) anchorChars += textChars;
 			continue;
 		}
-		if (!isElement(frame.node)) continue;
-		if (shouldSkipElement(frame.node)) continue;
+		if (!isElement(frame.node) || shouldSkipElement(frame.node)) continue;
 		const inAnchor = frame.inAnchor || tagName(frame.node) === "a";
 		const children = frame.node.childNodes;
 		const remaining = Math.max(0, maxSerializeVisits - visits);
 		let pushed = 0;
-		for (let index = children.length - 1; index >= 0; index--) {
-			if (pushed >= remaining) break;
+		for (
+			let index = children.length - 1;
+			index >= 0 && pushed < remaining;
+			index--
+		) {
 			const child = children[index];
 			if (!child) continue;
 			stack.push({ node: child, inAnchor });
 			pushed++;
 		}
 	}
-	if (chars > 0 && anchorChars / chars >= 0.5) return "";
-	return parts
-		.join(" ")
-		.replace(/\s+/g, " ")
-		.replace(/\s+([,.;:!?])/g, "$1")
-		.trim();
-}
-
-function elementWithText(element: Element | null): Element | undefined {
-	const text = element ? readableText(element) : "";
-	return wordCount(text) >= 8 ? (element ?? undefined) : undefined;
+	const truncated = clipped || visits >= maxSerializeVisits || stack.length > 0;
+	if (chars > 0 && anchorChars / chars >= 0.5)
+		return { markdown: "", truncated };
+	return {
+		markdown: parts
+			.join(" ")
+			.replace(/\s+/g, " ")
+			.replace(/\s+([,.;:!?])/g, "$1")
+			.trim(),
+		truncated,
+	};
 }
 
 function renderTextAsset(title: string, body: string, url: string) {
@@ -375,13 +572,6 @@ function renderTextAsset(title: string, body: string, url: string) {
 	// closes early and splits the rendered block.
 	const fence = "`".repeat(Math.max(3, maxBacktickRun(body) + 1));
 	return `# ${title}\n\n${fence}${language}\n${body.trim()}\n${fence}`;
-}
-
-function stripScriptStyleTags(html: string): string {
-	return stripCompleteHtmlElement(
-		stripCompleteHtmlElement(html, "script"),
-		"style",
-	);
 }
 
 // Defuddle can write parse warnings to stderr; silence only during active parses.
@@ -409,6 +599,7 @@ function endDefuddleParse() {
 async function parseWithDefuddle(document: Document, url: string) {
 	silenceConsoleDuringParse();
 	try {
+		const { Defuddle } = await import("defuddle/node");
 		return await Defuddle(document, url, {
 			markdown: true,
 			useAsync: false,

@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { onTestFinished } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hashContent, snapshotStats } from "../src/core/snapshot.ts";
@@ -6,15 +7,32 @@ import type {
 	FetchResult,
 	PageOutput,
 	PipelineConfig,
+	RunRecord,
+	RunSummary,
 } from "../src/core/types.ts";
 import { renderPage } from "../src/output/page.ts";
-import { writeRunFiles } from "../src/output/writer.ts";
+import {
+	commitStagedOutput,
+	discardStagedOutput,
+	stagePages,
+} from "../src/output/writer.ts";
 import { buildSummary } from "../src/report/summary.ts";
 
 type OkFetchResult = Extract<FetchResult, { ok: true; notModified?: false }>;
 
-export function tempDir(label: string): Promise<string> {
-	return mkdtemp(join(tmpdir(), `docsnap-${label}-`));
+export async function tempDir(label: string): Promise<string> {
+	const root = await mkdtemp(join(tmpdir(), `docsnap-${label}-`));
+	onTestFinished(() => rm(root, { recursive: true, force: true }));
+	return root;
+}
+
+export function setTestEnv(name: string, value: string) {
+	const prior = process.env[name];
+	process.env[name] = value;
+	onTestFinished(() => {
+		if (prior === undefined) delete process.env[name];
+		else process.env[name] = prior;
+	});
 }
 
 export function testConfig(
@@ -81,13 +99,20 @@ export function testPage(
 		qualityReasons: [],
 		outputPath: "guide.md",
 	};
-	return { ...base, rendered: renderPage(base) };
+	const rendered = renderPage(base);
+	return { ...base, rendered, outputHash: hashContent(rendered) };
+}
+
+export async function writeRunMetadata(
+	records: RunRecord[],
+	summary: RunSummary,
+	config: PipelineConfig,
+) {
+	await commitRun([], records, summary, config);
 }
 
 export async function writeValidCorpus(outputDir: string) {
-	await mkdir(outputDir, { recursive: true });
 	const page = testPage();
-	await writeFile(join(outputDir, page.outputPath), page.rendered);
 	const snapshot = snapshotStats([
 		{ path: page.outputPath, body: page.rendered },
 	]);
@@ -101,6 +126,20 @@ export async function writeValidCorpus(outputDir: string) {
 		snapshot,
 		1,
 	);
-	await writeRunFiles([page], summary, config);
+	await commitRun([page], [page], summary, config);
 	return { config, page, summary };
+}
+
+export async function commitRun(
+	pages: PageOutput[],
+	records: RunRecord[],
+	summary: RunSummary,
+	config: PipelineConfig,
+) {
+	const staged = await stagePages(pages, config);
+	try {
+		await commitStagedOutput(staged, records, summary, config);
+	} finally {
+		await discardStagedOutput(staged);
+	}
 }

@@ -1,5 +1,5 @@
 import { realpathSync } from "node:fs";
-import { realpath } from "node:fs/promises";
+import { lstat, realpath, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import {
 	basename,
@@ -30,17 +30,13 @@ export function isInsideOrSame(parent: string, child: string): boolean {
 	return path === "" || (!path.startsWith("..") && !parse(path).root);
 }
 
-function isInsideRoot(root: string, target: string): boolean {
-	return isInsideOrSame(resolve(root), resolve(target));
-}
-
 export function assertInsideRoot(
 	root: string,
 	target: string,
 	message: string,
 ): string {
 	const next = resolve(target);
-	if (!isInsideRoot(root, next)) throw new Error(message);
+	if (!isInsideOrSame(resolve(root), next)) throw new Error(message);
 	return next;
 }
 
@@ -87,6 +83,68 @@ export async function assertRealPathInside(
 	message: string,
 ): Promise<void> {
 	if (!(await realPathIsInside(root, target))) throw new Error(message);
+}
+
+export async function assertTrustedMutationPath(
+	dir: string,
+	message: string,
+): Promise<void> {
+	const uid = process.getuid?.();
+	if (uid === undefined) return;
+	const resolved = resolve(dir);
+	const existing = await nearestExistingPath(resolved);
+	const real = await realpath(existing);
+	const ownsRoot = existing === resolved;
+	await assertTrustedAncestors(existing, uid, message, ownsRoot);
+	if (real !== existing)
+		await assertTrustedAncestors(real, uid, message, ownsRoot);
+}
+
+async function assertTrustedAncestors(
+	path: string,
+	uid: number,
+	message: string,
+	ownsRoot: boolean,
+) {
+	const root = await stat(path);
+	if (
+		!root.isDirectory() ||
+		(root.uid !== uid && root.uid !== 0) ||
+		(ownsRoot && (root.uid !== uid || (root.mode & 0o022) !== 0)) ||
+		(!ownsRoot && (root.mode & 0o022) !== 0 && (root.mode & 0o1000) === 0)
+	) {
+		throw new Error(message);
+	}
+	let child = resolve(path);
+	for (
+		let parent = dirname(child);
+		;
+		child = parent, parent = dirname(parent)
+	) {
+		const info = await stat(parent);
+		if (!info.isDirectory() || (info.uid !== uid && info.uid !== 0)) {
+			throw new Error(message);
+		}
+		if ((info.mode & 0o022) !== 0) {
+			const entry = await lstat(child);
+			if ((info.mode & 0o1000) === 0 || entry.uid !== uid) {
+				throw new Error(message);
+			}
+		}
+		if (parent === dirname(parent)) return;
+	}
+}
+
+async function nearestExistingPath(path: string): Promise<string> {
+	for (let current = path; ; current = dirname(current)) {
+		try {
+			await lstat(current);
+			return current;
+		} catch (error) {
+			if (!(error instanceof Error) || !("code" in error)) throw error;
+			if (error.code !== "ENOENT" || current === dirname(current)) throw error;
+		}
+	}
 }
 
 export function isWindowsAbsolute(path: string): boolean {

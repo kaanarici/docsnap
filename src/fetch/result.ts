@@ -48,14 +48,6 @@ function normalizeFailureError(error: string): string {
 		: error;
 }
 
-export function robotsBlockedResult(input: string | FetchResult): FetchResult {
-	return failureResult(
-		failureFields(input),
-		"blocked by robots.txt",
-		"blocked",
-	);
-}
-
 export function emptyResourceResult(
 	input: string | FetchResult,
 	error: string,
@@ -63,58 +55,33 @@ export function emptyResourceResult(
 	return failureResult(failureFields(input, true), error, "empty");
 }
 
-type FilteredNonPageOptions = {
-	redirects?: RedirectHop[];
-	status: number;
-	contentType: string;
-	body: string;
-	fetchMs: number;
-	etag?: string;
-	lastModified?: string;
-	fetchedAt?: string;
-	defaultFetchedAt?: boolean;
-};
+type FailedFetchFields = Omit<
+	Extract<FetchResult, { ok: false }>,
+	"ok" | "error" | "failureKind"
+>;
 
 export function filteredNonPageResult(
-	url: string,
-	finalUrl: string,
-	options: FilteredNonPageOptions,
+	input: FetchResult,
+	defaultFetchedAt = false,
 ): FetchResult {
-	const redirected =
-		url !== finalUrl ||
-		(options.redirects !== undefined && options.redirects.length > 0);
+	const fields = { ...failureFields(input, true), body: input.body };
+	if (!fields.fetchedAt && defaultFetchedAt) {
+		fields.fetchedAt = new Date().toISOString();
+	}
 	return failureResult(
-		{
-			url,
-			finalUrl,
-			redirects: options.redirects ?? [],
-			status: options.status,
-			contentType: options.contentType,
-			body: options.body,
-			fetchMs: options.fetchMs,
-			...(options.etag ? { etag: options.etag } : {}),
-			...(options.lastModified ? { lastModified: options.lastModified } : {}),
-			...(options.fetchedAt || options.defaultFetchedAt
-				? { fetchedAt: options.fetchedAt ?? new Date().toISOString() }
-				: {}),
-		},
-		redirected
+		fields,
+		input.url !== input.finalUrl || input.redirects?.length
 			? "redirected to a filtered non-page URL"
 			: "filtered non-page URL",
 		"blocked",
 	);
 }
 
-type FailedFetchFields = Omit<
-	Extract<FetchResult, { ok: false }>,
-	"ok" | "error" | "failureKind"
->;
-
 function failureFields(
 	input: string | FetchResult,
 	includeValidators = false,
 ): FailedFetchFields {
-	if (typeof input === "string") {
+	if (isUrl(input)) {
 		return {
 			url: input,
 			finalUrl: input,
@@ -125,7 +92,7 @@ function failureFields(
 			fetchMs: 0,
 		};
 	}
-	return {
+	const fields: FailedFetchFields = {
 		url: input.url,
 		finalUrl: input.finalUrl,
 		redirects: input.redirects ?? [],
@@ -133,14 +100,17 @@ function failureFields(
 		contentType: input.contentType,
 		body: "",
 		fetchMs: input.fetchMs,
-		...(includeValidators && input.etag ? { etag: input.etag } : {}),
-		...(includeValidators && input.lastModified
-			? { lastModified: input.lastModified }
-			: {}),
-		...(includeValidators && input.fetchedAt
-			? { fetchedAt: input.fetchedAt }
-			: {}),
 	};
+	if (includeValidators && input.etag) fields.etag = input.etag;
+	if (includeValidators && input.lastModified) {
+		fields.lastModified = input.lastModified;
+	}
+	if (includeValidators && input.fetchedAt) fields.fetchedAt = input.fetchedAt;
+	return fields;
+}
+
+function isUrl(input: string | FetchResult): input is string {
+	return typeof input === "string";
 }
 
 function failureResult(

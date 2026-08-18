@@ -1,27 +1,45 @@
-import { readFile, realpath } from "node:fs/promises";
-import { join } from "node:path";
-import { isInsideOrSame, resolveSafeRelativePath } from "../core/fs-safety.ts";
+import { resolveSafeRelativePath } from "../core/fs-safety.ts";
 import {
 	identityKeyGroups,
 	type identityKeys,
 	identityUrls,
 } from "../core/identity.ts";
+import {
+	isJsonNumber,
+	isJsonObject,
+	isJsonString,
+	type JsonValue,
+	jsonEnum,
+	parseJsonValue,
+} from "../core/json.ts";
 import { hashContent } from "../core/snapshot.ts";
 import type {
 	ConditionalRequest,
-	DiscoverySource,
-	PageExtractor,
 	PageSuccess,
 	PipelineConfig,
-	RunSummary,
+	RedirectHop,
 } from "../core/types.ts";
-import { filterInjectionSignals } from "../core/types.ts";
+import {
+	discoverySources,
+	filterInjectionSignals,
+	inlineStateSources,
+	pageExtractors,
+} from "../core/types.ts";
+import { corpusLimits, readBoundedCorpusFile } from "../corpus/access.ts";
 import { scanMarkdownForInjectionSignals } from "../security/injection.ts";
 import { runFiles } from "./files.ts";
 
-export type PriorPage = Omit<PageSuccess, "markdown" | "rendered"> & {
+export type PriorPage = Omit<
+	PageSuccess,
+	"fetchedAt" | "links" | "markdown" | "media" | "rendered" | "timings"
+> & {
 	outputPath: string;
+	fetchedAt?: string;
 	outputHash?: string;
+	links?: string[];
+	linksCount?: number;
+	linksTruncated?: true;
+	media?: string[];
 };
 
 export type PriorState = {
@@ -33,20 +51,39 @@ export type PriorState = {
 
 type OutputRoot = { outDir: string };
 
+export function resolvePriorOutputPath(
+	config: OutputRoot,
+	outputPath: string,
+): string | undefined {
+	return resolveSafeRelativePath(config.outDir, outputPath);
+}
+
 export async function loadPrior(config: PipelineConfig): Promise<PriorState> {
 	if (config.clean) return disabled("clean");
 	try {
 		const [text, summaryText] = await Promise.all([
-			readFile(join(config.outDir, runFiles.manifest), "utf8"),
-			readFile(join(config.outDir, runFiles.summary), "utf8"),
+			readBoundedCorpusFile(
+				config.outDir,
+				runFiles.manifest,
+				corpusLimits.manifestBytes,
+			),
+			readBoundedCorpusFile(
+				config.outDir,
+				runFiles.summary,
+				corpusLimits.summaryBytes,
+			),
 		]);
 		const records = parsePriorManifest(text, config);
-		if (!priorMatchesSummary(summaryText, records)) {
+		if (!priorMatchesSummary(summaryText, records, config.seedUrl)) {
 			throw new Error("manifest and summary disagree");
 		}
 		return enabled(records);
 	} catch (error) {
-		if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+		if (
+			error instanceof Error &&
+			(error.message === "output_dir does not exist" ||
+				error.message.startsWith("Corpus file not found:"))
+		) {
 			return disabled("missing_manifest");
 		}
 		return disabled("invalid_manifest");
@@ -59,12 +96,21 @@ export function conditionalRequestForPrior(
 ): ConditionalRequest | undefined {
 	if (!prior.enabled) return undefined;
 	const record = prior.find(input);
-	if (!record || (!record.etag && !record.lastModified)) return undefined;
-	return {
-		...(record.etag ? { etag: record.etag } : {}),
-		...(record.lastModified ? { lastModified: record.lastModified } : {}),
+	if (
+		!record ||
+		record.render ||
+		record.linksTruncated ||
+		(record.linksCount ?? 0) > (record.links?.length ?? 0) ||
+		(!record.etag && !record.lastModified)
+	) {
+		return undefined;
+	}
+	const request: ConditionalRequest = {
 		urls: identityUrls(record),
 	};
+	if (record.etag) request.etag = record.etag;
+	if (record.lastModified) request.lastModified = record.lastModified;
+	return request;
 }
 
 export async function recoverPriorPage(
@@ -84,23 +130,19 @@ export async function recoverPriorPage(
 	}
 	const markdown = markdownFromRendered(rendered);
 	if (hashContent(markdown) !== prior.contentHash) return undefined;
-	const { outputHash, ...record } = prior;
+	const { linksCount, linksTruncated, outputHash, ...record } = prior;
+	void linksCount;
+	void linksTruncated;
 	void outputHash;
 	const recoveredSignals = filterInjectionSignals([
 		...record.injectionSignals,
 		...scanMarkdownForInjectionSignals(markdown),
 	]);
-	const etag = updates.etag ?? record.etag;
-	const lastModified = updates.lastModified ?? record.lastModified;
-	return {
+	const recovered: PageSuccess = {
 		...record,
-		redirects: record.redirects ?? [],
-		qualityReasons: record.qualityReasons ?? [],
 		links: record.links ?? [],
 		injectionSignals: recoveredSignals,
 		markdown,
-		...(etag ? { etag } : {}),
-		...(lastModified ? { lastModified } : {}),
 		fetchedAt:
 			record.fetchedAt ?? updates.fetchedAt ?? new Date().toISOString(),
 		timings: {
@@ -109,28 +151,21 @@ export async function recoverPriorPage(
 			writeMs: 0,
 		},
 	};
-}
-
-export function resolvePriorOutputPath(
-	config: OutputRoot,
-	outputPath: string,
-): string | undefined {
-	return resolveSafeRelativePath(config.outDir, outputPath);
+	if (updates.etag) recovered.etag = updates.etag;
+	if (updates.lastModified) recovered.lastModified = updates.lastModified;
+	return recovered;
 }
 
 export async function readPriorOutput(
 	config: OutputRoot,
 	outputPath: string,
 ): Promise<string | undefined> {
-	const priorPath = resolvePriorOutputPath(config, outputPath);
-	if (!priorPath) return undefined;
 	try {
-		const [base, target] = await Promise.all([
-			realpath(config.outDir),
-			realpath(priorPath),
-		]);
-		if (!isInsideOrSame(base, target)) return undefined;
-		return await readFile(target, "utf8");
+		return await readBoundedCorpusFile(
+			config.outDir,
+			outputPath,
+			corpusLimits.pageBytes,
+		);
 	} catch {
 		return undefined;
 	}
@@ -157,10 +192,15 @@ function disabled(reason: NonNullable<PriorState["reason"]>): PriorState {
 function parsePriorManifest(text: string, config: PipelineConfig): PriorPage[] {
 	const lines = text.split(/\n/).filter((line) => line.trim());
 	const pages: PriorPage[] = [];
+	const outputPaths = new Set<string>();
 	for (const line of lines) {
-		const record = JSON.parse(line) as unknown;
-		if (!isManifestRecord(record)) throw new Error("invalid manifest record");
-		if (isReusablePrior(record, config)) pages.push(normalizePrior(record));
+		const record = parseReusablePrior(parseJsonValue(line), config);
+		if (!record) continue;
+		if (outputPaths.has(record.outputPath)) {
+			throw new Error("duplicate manifest output path");
+		}
+		outputPaths.add(record.outputPath);
+		pages.push(record);
 	}
 	return pages;
 }
@@ -168,83 +208,160 @@ function parsePriorManifest(text: string, config: PipelineConfig): PriorPage[] {
 function priorMatchesSummary(
 	summaryText: string,
 	records: PriorPage[],
+	seedUrl: string,
 ): boolean {
-	const summary = JSON.parse(summaryText) as Partial<RunSummary>;
-	if (typeof summary.written !== "number") return false;
-	if (summary.written !== records.length) return false;
-	const seedPath = summary.seed?.outputPath;
+	const summary = parseJsonValue(summaryText);
+	if (
+		!isJsonObject(summary) ||
+		!isJsonNumber(summary["written"]) ||
+		summary["written"] !== records.length ||
+		summary["seedUrl"] !== seedUrl
+	)
+		return false;
+	const seed = summary["seed"];
+	const seedPath = isJsonObject(seed) ? seed["outputPath"] : undefined;
 	return (
-		typeof seedPath !== "string" ||
+		!isJsonString(seedPath) ||
 		records.some((record) => record.outputPath === seedPath)
 	);
 }
 
-function isManifestRecord(value: unknown): value is { ok: boolean } {
-	return Boolean(value && typeof value === "object" && "ok" in value);
-}
-
-function isReusablePrior(
-	value: { ok: boolean },
-	config: PipelineConfig,
-): value is PriorPage {
-	const record = value as Partial<PriorPage>;
-	return (
-		record.ok === true &&
-		typeof record.url === "string" &&
-		typeof record.finalUrl === "string" &&
-		typeof record.outputPath === "string" &&
-		resolvePriorOutputPath(config, record.outputPath) !== undefined &&
-		typeof record.contentHash === "string" &&
-		typeof record.status === "number" &&
-		isDiscoverySource(record.source) &&
-		isPageExtractor(record.extractor) &&
-		typeof record.confidence === "number"
-	);
-}
-
-function normalizePrior(record: PriorPage): PriorPage {
-	return {
-		...record,
-		links: Array.isArray(record.links) ? record.links : [],
-		qualityReasons: Array.isArray(record.qualityReasons)
-			? record.qualityReasons
-			: [],
-		injectionSignals: filterInjectionSignals(record.injectionSignals),
-		redirects: Array.isArray(record.redirects) ? record.redirects : [],
+export function parseReusablePrior(
+	value: JsonValue,
+	config: OutputRoot,
+): PriorPage | undefined {
+	if (!isJsonObject(value) || value["ok"] !== true) return undefined;
+	const source =
+		value["source"] === "asset"
+			? "crawl"
+			: jsonEnum(value["source"], discoverySources);
+	const extractor = jsonEnum(value["extractor"], pageExtractors);
+	const redirects =
+		value["redirects"] === undefined ? [] : parseRedirects(value["redirects"]);
+	if (
+		!isJsonString(value["url"]) ||
+		!isJsonString(value["finalUrl"]) ||
+		!isJsonString(value["outputPath"]) ||
+		resolveSafeRelativePath(config.outDir, value["outputPath"]) === undefined ||
+		!isJsonString(value["contentHash"]) ||
+		!isJsonNumber(value["status"]) ||
+		!isJsonNumber(value["confidence"]) ||
+		!source ||
+		!extractor ||
+		!redirects
+	) {
+		return undefined;
+	}
+	const record: PriorPage = {
+		ok: true,
+		url: value["url"],
+		finalUrl: value["finalUrl"],
+		outputPath: value["outputPath"],
+		contentHash: value["contentHash"],
+		status: value["status"],
+		confidence: value["confidence"],
+		source,
+		extractor,
+		redirects,
+		injectionSignals: filterInjectionSignals(value["injectionSignals"]),
+		qualityReasons: stringArray(value["qualityReasons"]) ?? [],
 	};
+	if (isJsonString(value["fetchedAt"])) record.fetchedAt = value["fetchedAt"];
+	if (value["wasSeed"] === true) record.wasSeed = true;
+	if (value["linksTruncated"] === true) record.linksTruncated = true;
+	if (isJsonNumber(value["linksCount"]))
+		record.linksCount = value["linksCount"];
+	for (const key of [
+		"outputHash",
+		"canonicalUrl",
+		"title",
+		"etag",
+		"lastModified",
+		"publishedAt",
+		"updatedAt",
+	] as const) {
+		const item = value[key];
+		if (isJsonString(item)) record[key] = item;
+	}
+	for (const key of ["aliases", "links", "media"] as const) {
+		const items = stringArray(value[key]);
+		if (items) record[key] = items;
+	}
+	const inlineStateSource = jsonEnum(
+		value["inlineStateSource"],
+		inlineStateSources,
+	);
+	if (inlineStateSource) record.inlineStateSource = inlineStateSource;
+	if (value["render"] !== undefined) {
+		const render = parseRender(value["render"]);
+		if (!render) return undefined;
+		record.render = render;
+	}
+	return record;
 }
 
-function isDiscoverySource(value: unknown): value is DiscoverySource {
-	return (
-		value === "seed" ||
-		value === "llms" ||
-		value === "sitemap" ||
-		value === "feed" ||
-		value === "nav" ||
-		value === "crawl" ||
-		value === "asset"
+function parseRedirects(
+	value: JsonValue | undefined,
+): RedirectHop[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const redirects = value.map(parseRedirect);
+	if (redirects.some((redirect) => redirect === undefined)) return undefined;
+	return redirects.filter(
+		(redirect): redirect is RedirectHop => redirect !== undefined,
 	);
 }
 
-function isPageExtractor(value: unknown): value is PageExtractor {
-	return (
-		value === "markdown" ||
-		value === "html" ||
-		value === "text" ||
-		value === "inline-state" ||
-		value === "fallback" ||
-		value === "structured"
-	);
+function parseRedirect(value: JsonValue): RedirectHop | undefined {
+	if (
+		!isJsonObject(value) ||
+		!isJsonString(value["from"]) ||
+		!isJsonString(value["to"]) ||
+		(value["type"] !== "http" &&
+			value["type"] !== "refresh" &&
+			value["type"] !== "client") ||
+		(value["status"] !== undefined && !isJsonNumber(value["status"]))
+	) {
+		return undefined;
+	}
+	const redirect: RedirectHop = {
+		from: value["from"],
+		to: value["to"],
+		type: value["type"],
+	};
+	if (isJsonNumber(value["status"])) redirect.status = value["status"];
+	return redirect;
 }
 
-type PriorIndex = {
-	exact: Map<string, PriorPage>;
-	route: Map<string, PriorPage>;
-	ambiguousExact: Set<string>;
-	ambiguousRoute: Set<string>;
-};
+function parseRender(
+	value: JsonValue | undefined,
+): NonNullable<PriorPage["render"]> | undefined {
+	if (
+		!isJsonObject(value) ||
+		value["renderer"] !== "chrome-cdp" ||
+		!isJsonNumber(value["renderMs"]) ||
+		!isJsonNumber(value["blockedRequests"]) ||
+		!isJsonNumber(value["fulfilledRequests"]) ||
+		!isJsonNumber(value["relayedBytes"]) ||
+		(value["truncated"] !== undefined && value["truncated"] !== true)
+	) {
+		return undefined;
+	}
+	const render: NonNullable<PriorPage["render"]> = {
+		renderer: "chrome-cdp",
+		renderMs: value["renderMs"],
+		blockedRequests: value["blockedRequests"],
+		fulfilledRequests: value["fulfilledRequests"],
+		relayedBytes: value["relayedBytes"],
+	};
+	if (value["truncated"] === true) render.truncated = true;
+	return render;
+}
 
-function buildIndex(records: PriorPage[]): PriorIndex {
+function stringArray(value: JsonValue | undefined): string[] | undefined {
+	return Array.isArray(value) && value.every(isJsonString) ? value : undefined;
+}
+
+function buildIndex(records: PriorPage[]) {
 	const exact = new Map<string, PriorPage>();
 	const route = new Map<string, PriorPage>();
 	const ambiguousExact = new Set<string>();
@@ -254,7 +371,7 @@ function buildIndex(records: PriorPage[]): PriorIndex {
 		for (const key of keys.exact) indexPage(exact, ambiguousExact, key, record);
 		for (const key of keys.route) indexPage(route, ambiguousRoute, key, record);
 	}
-	return { exact, route, ambiguousExact, ambiguousRoute };
+	return { exact, route };
 }
 
 function indexPage(
@@ -273,17 +390,15 @@ function indexPage(
 }
 
 function findPrior(
-	index: PriorIndex,
+	index: ReturnType<typeof buildIndex>,
 	input: Parameters<typeof identityKeys>[0],
 ): PriorPage | undefined {
 	const keys = identityKeyGroups(input);
 	for (const key of keys.exact) {
-		if (index.ambiguousExact.has(key)) continue;
 		const record = index.exact.get(key);
 		if (record) return record;
 	}
 	for (const key of keys.route) {
-		if (index.ambiguousRoute.has(key)) continue;
 		const record = index.route.get(key);
 		if (record) return record;
 	}
@@ -291,12 +406,11 @@ function findPrior(
 }
 
 export function markdownFromRendered(rendered: string): string {
-	if (!rendered.startsWith("---\n")) return stripOneTrailingNewline(rendered);
+	let markdown = rendered;
+	if (!rendered.startsWith("---\n")) {
+		return rendered.endsWith("\n") ? rendered.slice(0, -1) : rendered;
+	}
 	const end = rendered.indexOf("\n---\n", 4);
-	if (end < 0) return stripOneTrailingNewline(rendered);
-	return stripOneTrailingNewline(rendered.slice(end + 5));
-}
-
-function stripOneTrailingNewline(value: string) {
-	return value.endsWith("\n") ? value.slice(0, -1) : value;
+	if (end >= 0) markdown = rendered.slice(end + 5);
+	return markdown.endsWith("\n") ? markdown.slice(0, -1) : markdown;
 }

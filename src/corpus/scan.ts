@@ -4,6 +4,7 @@ import {
 	assertSafeRoot,
 	isInsideOrSame,
 	isWindowsAbsolute,
+	realPathIsInside,
 } from "../core/fs-safety.ts";
 import { runFiles } from "../output/files.ts";
 
@@ -23,6 +24,12 @@ export async function scanCorpora(
 	options: ScanOptions = {},
 ) {
 	const root = scanRoot(rootDir, options);
+	if (
+		!options.allowAbsoluteRoot &&
+		!(await realPathIsInside(resolve(process.cwd()), root))
+	) {
+		throw new Error("root_dir must stay under cwd");
+	}
 	const found: string[] = [];
 	let visited = 0;
 	let truncated = false;
@@ -59,7 +66,7 @@ export async function scanCorpora(
 	return { dirs: found, truncated, skipped };
 }
 
-export function assertSafeProjectRoot(rootDir: string): void {
+function assertSafeProjectRoot(rootDir: string): void {
 	if (!rootDir || isAbsolute(rootDir) || isWindowsAbsolute(rootDir)) {
 		throw new Error("root_dir must be a relative directory under cwd");
 	}
@@ -85,8 +92,8 @@ function scanRoot(rootDir: string, options: ScanOptions): string {
 	return resolve(process.cwd(), rootDir);
 }
 
-function errorCode(error: unknown): string {
-	return error instanceof Error && "code" in error ? String(error.code) : "";
+function errorCode(cause: unknown): string {
+	return cause instanceof Error && "code" in cause ? String(cause.code) : "";
 }
 
 function displayPath(path: string) {

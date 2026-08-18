@@ -4,11 +4,10 @@ import type {
 	DiscoveredUrl,
 	PipelineConfig,
 } from "../core/types.ts";
-import { canonicalUrlSearch, classifyDiscoveryResource } from "../core/url.ts";
-import { looksLikeAppShell } from "../extract/app-shell.ts";
+import { classifyDiscoveryResource, isDocumentPath } from "../core/url.ts";
+import { isRecoverableAppShell } from "../extract/app-shell.ts";
 import { isMarkdownLike } from "../extract/content.ts";
 import { fetchText, preferredMarkdownAccept } from "../fetch/fetcher.ts";
-import { robotsBlockedResult } from "../fetch/result.ts";
 import type { Robots } from "./robots.ts";
 import { normalizeDiscoveryResourceUrl, normalizeUrl } from "./url.ts";
 
@@ -29,16 +28,6 @@ export async function pageOnlyDiscovery(
 	pageConditional?: ConditionalRequest,
 ): Promise<DiscoveredUrl[]> {
 	const pageSeed = withRequestedSearch(config.seedUrl, inputSeed);
-	if (!seedRobots.allowed(pageSeed)) {
-		return [
-			{
-				url: pageSeed,
-				source: "seed",
-				wasSeed: true,
-				fetched: robotsBlockedResult(pageSeed),
-			},
-		];
-	}
 	if (config.perOrigin < 2) {
 		const alternate = await markdownAlternateSeed(
 			config,
@@ -47,8 +36,7 @@ export async function pageOnlyDiscovery(
 			pageConditional,
 		);
 		return [
-			alternate ??
-				(await fetchPageSeed(config, pageSeed, seedRobots, pageConditional)),
+			alternate ?? (await fetchPageSeed(config, pageSeed, pageConditional)),
 		];
 	}
 	const controller = new AbortController();
@@ -71,7 +59,6 @@ export async function pageOnlyDiscovery(
 		const pagePromise = fetchPageSeed(
 			config,
 			pageSeed,
-			seedRobots,
 			pageConditional,
 			controller.signal,
 		);
@@ -96,34 +83,48 @@ function usablePageSeed(page: DiscoveredUrl) {
 	return Boolean(
 		response?.ok &&
 			(response.notModified ||
-				(hasMarkdownBody(response.body) && !looksLikeAppShell(response.body))),
+				response.document ||
+				(hasMarkdownBody(response.body) &&
+					!isRecoverableAppShell(response.body))),
 	);
 }
 
 async function fetchPageSeed(
 	config: PipelineConfig,
 	pageSeed: string,
-	seedRobots: Robots,
 	conditional?: ConditionalRequest,
 	signal?: AbortSignal,
 ): Promise<DiscoveredUrl> {
-	const fetched = await fetchText(
+	const options = signal ? { signal } : undefined;
+	let fetched = await fetchText(
 		pageSeed,
 		config,
 		preferredMarkdownAccept,
 		conditional,
-		(url) =>
-			new URL(url).origin === new URL(pageSeed).origin &&
-			seedRobots.allowed(url),
-		signal ? { signal } : undefined,
+		undefined,
+		options,
 	);
+	if (
+		fetched.ok &&
+		!fetched.notModified &&
+		!fetched.document &&
+		isMarkdownLike(fetched) &&
+		!hasMarkdownBody(fetched.body)
+	) {
+		fetched = await fetchText(
+			pageSeed,
+			config,
+			undefined,
+			conditional,
+			undefined,
+			options,
+		);
+	}
 	return {
 		url: pageSeed,
 		source: "seed",
 		wasSeed: true,
-		...(fetched.ok || fetched.error !== "blocked by robots.txt"
-			? { fetched }
-			: {}),
+		fetched,
 	};
 }
 
@@ -136,15 +137,16 @@ async function markdownAlternateSeed(
 ): Promise<DiscoveredUrl | undefined> {
 	const alternate = markdownAlternateUrl(pageSeed);
 	if (!alternate || !seedRobots.allowed(alternate)) return;
+	const origin = new URL(pageSeed).origin;
 	const response = await fetchText(
 		alternate,
 		config,
 		preferredMarkdownAccept,
 		conditional,
-		(url) =>
-			new URL(url).origin === new URL(pageSeed).origin &&
-			seedRobots.allowed(url),
-		{ followRouteFallbacks: false, ...(signal ? { signal } : {}) },
+		(url) => new URL(url).origin === origin && seedRobots.allowed(url),
+		signal
+			? { followRouteFallbacks: false, signal }
+			: { followRouteFallbacks: false },
 	);
 	if (!response.ok) return;
 	if (
@@ -157,7 +159,12 @@ async function markdownAlternateSeed(
 
 function markdownAlternateUrl(raw: string): string | undefined {
 	const url = new URL(raw);
-	if (url.search || /\.(?:md|mdx|txt)$/i.test(url.pathname)) return;
+	if (
+		url.search ||
+		/\.(?:md|mdx|txt)$/i.test(url.pathname) ||
+		isDocumentPath(url.pathname)
+	)
+		return;
 	url.pathname = url.pathname.endsWith("/")
 		? `${url.pathname}index.md`
 		: `${url.pathname}.md`;
@@ -168,43 +175,21 @@ export function seedFirstCorpus(
 	seed: DiscoveredUrl,
 	corpus: DiscoveredUrl[],
 	config: PipelineConfig,
+	limit = config.max,
 ): DiscoveredUrl[] {
 	const seedMetadata =
 		seed.metadata ?? corpus.find((item) => item.url === seed.url)?.metadata;
-	const out: DiscoveredUrl[] = [
-		{ ...seed, ...(seedMetadata ? { metadata: seedMetadata } : {}) },
-	];
+	const first: DiscoveredUrl = { ...seed };
+	if (seedMetadata) first.metadata = seedMetadata;
+	const out: DiscoveredUrl[] = [first];
 	const seen = new Set([seed.url]);
 	for (const item of corpus) {
 		if (seen.has(item.url)) continue;
-		if (config.maxExplicit && out.length >= config.max) break;
+		if (config.maxExplicit && out.length >= limit) break;
 		seen.add(item.url);
 		out.push(item);
 	}
 	return out;
-}
-
-export function seedFirstDiscovery(
-	config: PipelineConfig,
-	discovered: DiscoveredUrl[],
-): DiscoveredUrl[] {
-	if (
-		config.pageOnly ||
-		classifyDiscoveryResource(config.seedUrl) ||
-		discovered.some((item) => item.wasSeed)
-	) {
-		return discovered;
-	}
-	const seed = seedInputUrl(config.seedUrl);
-	const seedKey = candidateKey(seed);
-	const matched = discovered.findIndex(
-		(item) => candidateKey(item.url) === seedKey,
-	);
-	if (matched >= 0)
-		return discovered.map((item, index) =>
-			index === matched ? { ...item, wasSeed: true as const } : item,
-		);
-	return [{ url: seed, source: "seed", wasSeed: true }, ...discovered];
 }
 
 function withRequestedSearch(raw: string, normalized: string) {
@@ -217,14 +202,4 @@ function withRequestedSearch(raw: string, normalized: string) {
 	} catch {
 		return normalized;
 	}
-}
-
-export function candidateKey(raw: string) {
-	const url = new URL(raw);
-	url.hash = "";
-	const search = canonicalUrlSearch(url);
-	url.search = "";
-	if (url.pathname !== "/") url.pathname = url.pathname.replace(/\/+$/, "");
-	url.pathname = url.pathname.replace(/\.(?:html?|mdx?|txt)$/i, "");
-	return `${url.href}${search}`;
 }

@@ -1,3 +1,4 @@
+import { maxGeneratedCapturePages } from "../core/config.ts";
 import { markdownLinkHrefs } from "../core/markdown.ts";
 import type { FetchResult, PipelineConfig } from "../core/types.ts";
 import { isLlmsResourcePath } from "../core/url.ts";
@@ -14,6 +15,9 @@ const CORPUS_INDEX_LIMIT = 256;
 export type LlmsDiscoveryOptions = {
 	cache?: Map<string, Promise<FetchResult>>;
 	allowResource?: (url: string) => Promise<boolean> | boolean;
+	limit?: number;
+	initialFetchLimit?: number;
+	truncated?: boolean;
 };
 
 export async function discoverLlms(
@@ -24,14 +28,23 @@ export async function discoverLlms(
 	const requestedScope = scopeFromSeed(seed);
 	const urls = new Set<string>();
 	const seen = new Set<string>();
+	const limit = config.maxExplicit
+		? (options.limit ?? config.max)
+		: maxGeneratedCapturePages;
+	const scanLimit = config.maxExplicit ? limit : limit + 1;
 	const queue = llmsCandidateUrls(seed);
 	const fetchAllowed = async (url: string) => {
-		if (options.allowResource && !(await options.allowResource(url))) return;
+		if (
+			!options.cache?.has(url) &&
+			options.allowResource &&
+			!(await options.allowResource(url))
+		)
+			return;
 		return fetchLlmsText(url, config, options);
 	};
 	const initialUrls = queue.slice(
 		0,
-		Math.min(config.concurrency, config.perOrigin),
+		options.initialFetchLimit ?? Math.min(config.concurrency, config.perOrigin),
 	);
 	const initialResponses = await Promise.all(initialUrls.map(fetchAllowed));
 	const initial = new Map(
@@ -40,7 +53,7 @@ export async function discoverLlms(
 	while (
 		queue.length > 0 &&
 		seen.size < CORPUS_INDEX_LIMIT &&
-		(!config.maxExplicit || urls.size < config.max)
+		urls.size < scanLimit
 	) {
 		const llmsUrl = queue.shift()!;
 		if (seen.has(llmsUrl)) continue;
@@ -51,13 +64,6 @@ export async function discoverLlms(
 		if (!response) continue;
 		if (!response.ok || !isLlmsCorpus(response.contentType, response.body))
 			continue;
-		// redirects can land on a robots-disallowed URL; never use that content
-		if (
-			options.allowResource &&
-			response.finalUrl !== llmsUrl &&
-			!(await options.allowResource(response.finalUrl))
-		)
-			continue;
 		const corpusBase = response.finalUrl;
 		for (const link of corpusLinks(
 			response.body,
@@ -65,25 +71,27 @@ export async function discoverLlms(
 			requestedScope,
 			config,
 		)) {
-			if (new URL(link).pathname === "/") continue;
-			if (isLlmsResourcePath(new URL(link).pathname)) {
+			const pathname = new URL(link).pathname;
+			if (pathname === "/") continue;
+			if (isLlmsResourcePath(pathname)) {
 				if (!seen.has(link)) queue.push(link);
 				continue;
 			}
-			if (shouldExpandIndex(link, corpusBase, seen, urls, config)) {
+			if (shouldExpandIndex(link, corpusBase, seen, urls, scanLimit)) {
 				urls.add(link);
 				queue.push(link);
-				if (config.maxExplicit && urls.size >= config.max) break;
+				if (urls.size >= scanLimit) break;
 				continue;
 			}
 			urls.add(link);
-			if (config.maxExplicit && urls.size >= config.max) break;
+			if (urls.size >= scanLimit) break;
 		}
 	}
-	return [...urls];
+	if (!config.maxExplicit && urls.size > limit) options.truncated = true;
+	return [...urls].slice(0, limit);
 }
 
-export function llmsCandidateUrls(seed: string): string[] {
+function llmsCandidateUrls(seed: string): string[] {
 	const base = new URL(seed);
 	const dir = base.pathname.endsWith("/")
 		? base.pathname
@@ -128,13 +136,9 @@ function isLlmsCorpus(contentType: string, body: string) {
 	const type = contentType.toLowerCase().split(";")[0]?.trim() ?? "";
 	if (
 		type &&
-		![
-			"text/markdown",
-			"text/plain",
-			"text/x-markdown",
-			"application/markdown",
-			"application/octet-stream",
-		].includes(type)
+		!/^text\/(?:markdown|plain|x-markdown)$|^application\/(?:markdown|octet-stream)$/.test(
+			type,
+		)
 	)
 		return false;
 	return looksLikeCorpus(text);
@@ -181,7 +185,11 @@ function corpusLinks(
 	requestedScope: string,
 	config: PipelineConfig,
 ) {
-	const explicit = corpusEntryLinks(body, base);
+	const explicit = corpusEntryLinks(
+		body,
+		base,
+		config.maxExplicit ? config.max : maxGeneratedCapturePages + 1,
+	);
 	const links = [
 		...new Set([...explicit, ...guessFullCorpusUrls(body, base, explicit)]),
 	];
@@ -193,17 +201,23 @@ function corpusLinks(
 	return orderByTopic(scopeRanked, base, requestedScope, config.topic);
 }
 
-function corpusEntryLinks(body: string, base: string) {
+function corpusEntryLinks(body: string, base: string, limit: number) {
 	const links = new Set<string>();
-	for (const line of body.split("\n")) {
-		const first = markdownLinkHrefs(line)[0];
+	let start = 0;
+	while (start <= body.length && links.size < limit) {
+		const newline = body.indexOf("\n", start);
+		const line = body.slice(start, newline < 0 ? body.length : newline);
+		const first = markdownLinkHrefs(line, 1)[0];
 		if (first !== undefined) {
 			const url = normalizeUrl(first, base);
 			if (url) links.add(url);
-			continue;
+		} else if (!languageListingLine(line)) {
+			for (const url of sameScopeLinks(line, base, limit - links.size)) {
+				links.add(url);
+			}
 		}
-		if (languageListingLine(line)) continue;
-		for (const url of sameScopeLinks(line, base)) links.add(url);
+		if (newline < 0) break;
+		start = newline + 1;
 	}
 	return [...links];
 }
@@ -215,23 +229,15 @@ function languageListingLine(line: string) {
 	);
 }
 
-function isFullCorpus(raw: string) {
-	return /(^|\/)llms-full\.txt$/i.test(new URL(raw).pathname);
-}
-
 function linkRank(raw: string, base: string, requestedScope: string) {
 	const scope = base.replace(/\/[^/]*$/, "/");
 	const url = new URL(raw);
 	return (
 		Number(!pathInScope(url.pathname, requestedScope)) * 4 +
 		Number(!pathInScope(url.pathname, new URL(scope).pathname)) +
-		Number(isFullCorpus(raw)) * 2 +
-		lowValueCorpusPathRank(url.pathname)
+		Number(/(^|\/)llms-full\.txt$/i.test(url.pathname)) * 2 +
+		(/(?:^|\/)(?:widgets?|playground|chat)\//i.test(url.pathname) ? 10 : 0)
 	);
-}
-
-function lowValueCorpusPathRank(pathname: string) {
-	return /(?:^|\/)(?:widgets?|playground|chat)\//i.test(pathname) ? 10 : 0;
 }
 
 function shouldExpandIndex(
@@ -239,13 +245,13 @@ function shouldExpandIndex(
 	base: string,
 	seen: Set<string>,
 	urls: Set<string>,
-	config: PipelineConfig,
+	limit: number,
 ) {
 	const url = new URL(raw);
 	return (
 		url.origin === new URL(base).origin &&
 		url.pathname.endsWith("/index.md") &&
 		!seen.has(url.href) &&
-		(!config.maxExplicit || urls.size < config.max)
+		urls.size < limit
 	);
 }

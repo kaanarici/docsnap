@@ -28,6 +28,30 @@ export function countLabel(count: number, singular: string, plural?: string) {
 	return `${count} ${count === 1 ? singular : (plural ?? `${singular}s`)}`;
 }
 
+export function terminalText(value: string) {
+	let result = "";
+	for (const character of value) {
+		const code = character.charCodeAt(0);
+		if (
+			(code < 0x20 && code !== 0x09 && code !== 0x0a) ||
+			(code >= 0x7f && code <= 0x9f)
+		)
+			continue;
+		result += character;
+	}
+	return result;
+}
+
+export function citationId(
+	outputPath: string,
+	lineStart: number,
+	lineEnd: number,
+	contentHash: string,
+) {
+	const hash = contentHash ? `@${contentHash.slice(0, 12)}` : "";
+	return `${outputPath}#L${lineStart}-L${lineEnd}${hash}`;
+}
+
 export const invisibleTextPattern =
 	"(?:\\u034f|\\p{Variation_Selector}|[\\u00ad\\u115f\\u1160\\u180e\\u200b-\\u200d\\u2060-\\u2064\\u2800\\u3164\\ufeff\\uffa0])";
 
@@ -66,7 +90,7 @@ export function stripCompleteHtmlElement(
 		const start = lower.indexOf(openToken, index);
 		if (start === -1) break;
 		const afterName = start + openToken.length;
-		if (!tagNameBoundary(lower[afterName])) {
+		if (!/[\s>/]/.test(lower[afterName] ?? "")) {
 			index = afterName;
 			continue;
 		}
@@ -79,8 +103,4 @@ export function stripCompleteHtmlElement(
 		index = cursor;
 	}
 	return cursor === 0 ? html : out + html.slice(cursor);
-}
-
-function tagNameBoundary(char: string | undefined) {
-	return char === undefined || /[\s>/]/.test(char);
 }

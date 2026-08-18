@@ -1,8 +1,4 @@
-import {
-	type PriorPage,
-	type PriorState,
-	readPriorOutput,
-} from "../output/prior.ts";
+import { type PriorState, readPriorOutput } from "../output/prior.ts";
 import { captureSelectionHash } from "./config.ts";
 import { identityKeys } from "./identity.ts";
 import type {
@@ -52,6 +48,7 @@ export async function refreshSummary(
 	if (!prior.enabled) return emptyRefreshSummary(prior.reason);
 
 	const changedPages: RefreshChangedPage[] = [];
+	const currentKeys = new Set<string>();
 	let checked = 0;
 	let fresh = 0;
 	let changed = 0;
@@ -59,26 +56,38 @@ export async function refreshSummary(
 
 	for (const record of outputs) {
 		const previous = prior.find(record);
-		const change = previous
-			? (await existingOutputMatches(config, previous, record))
+		const previousOutput =
+			previous?.outputPath === record.outputPath
+				? await readPriorOutput(config, previous.outputPath)
+				: undefined;
+		const change = !previous
+			? "new"
+			: previousOutput === record.rendered
 				? "unchanged"
-				: "changed"
-			: "new";
+				: "changed";
 		if (previous) checked++;
 		if (change === "new") fresh++;
 		else if (change === "changed") changed++;
 		else unchanged++;
 		if (change !== "unchanged") {
-			changedPages.push(changeEntry(change, record, previous));
+			const entry: RefreshChangedPage = {
+				change,
+				url: record.url,
+				finalUrl: record.finalUrl,
+				outputPath: record.outputPath,
+			};
+			if (previous?.outputPath && previous.outputPath !== record.outputPath) {
+				entry.previousOutputPath = previous.outputPath;
+			}
+			changedPages.push(entry);
 		}
+		for (const key of identityKeys(record)) currentKeys.add(key);
 	}
 
-	const currentKeys = new Set<string>();
-	for (const record of outputs) addKeys(currentKeys, record);
-	const removed = prior.records.filter(
-		(record) => !identityKeys(record).some((key) => currentKeys.has(key)),
-	);
-	for (const record of removed) {
+	let removed = 0;
+	for (const record of prior.records) {
+		if (identityKeys(record).some((key) => currentKeys.has(key))) continue;
+		removed++;
 		changedPages.push({
 			change: "removed",
 			url: record.url,
@@ -88,21 +97,23 @@ export async function refreshSummary(
 		});
 	}
 
-	return {
+	const summary: RefreshSummary = {
 		enabled: prior.enabled,
-		...(prior.reason ? { reason: prior.reason } : {}),
 		priorRecords: prior.records.length,
 		checked,
 		notModified: counters.notModified,
 		reused: counters.reused,
 		fallbackRefetches: counters.fallbackRefetches,
+		pageWrites: 0,
 		skippedWrites: counters.skippedWrites,
 		new: fresh,
 		changed,
 		unchanged,
-		removed: removed.length,
+		removed,
 		changedPages,
 	};
+	if (prior.reason) summary.reason = prior.reason;
+	return summary;
 }
 
 export function emptyRefreshSummary(
@@ -116,6 +127,7 @@ export function emptyRefreshSummary(
 		notModified: 0,
 		reused: 0,
 		fallbackRefetches: 0,
+		pageWrites: 0,
 		skippedWrites: 0,
 		new: 0,
 		changed: 0,
@@ -123,42 +135,4 @@ export function emptyRefreshSummary(
 		removed: 0,
 		changedPages: [],
 	};
-}
-
-async function existingOutputMatches(
-	config: PipelineConfig,
-	previous: PriorPage,
-	current: PageOutput,
-) {
-	if (previous.outputPath !== current.outputPath) return false;
-	try {
-		return (
-			(await readPriorOutput(config, previous.outputPath)) === current.rendered
-		);
-	} catch {
-		return false;
-	}
-}
-
-function changeEntry(
-	change: "new" | "changed",
-	record: PageOutput,
-	previous: PriorPage | undefined,
-): RefreshChangedPage {
-	return {
-		change,
-		url: record.url,
-		finalUrl: record.finalUrl,
-		outputPath: record.outputPath,
-		...(previous?.outputPath && previous.outputPath !== record.outputPath
-			? { previousOutputPath: previous.outputPath }
-			: {}),
-	};
-}
-
-function addKeys(
-	target: Set<string>,
-	input: Parameters<typeof identityKeys>[0],
-) {
-	for (const key of identityKeys(input)) target.add(key);
 }

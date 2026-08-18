@@ -6,10 +6,12 @@ import type {
 	DiscoveredUrl,
 	FetchedUrl,
 	FetchResult,
+	HeaderMap,
 	PipelineConfig,
 	RedirectHop,
 } from "../core/types.ts";
-import { decodeResponseBody } from "./body.ts";
+import { validatePublicHttpUrl } from "../security/url.ts";
+import { decodeResponseBody, documentPayload } from "./body.ts";
 import { type Cookie, cookieHeader, storeCookies } from "./cookies.ts";
 import { refreshUrl } from "./refresh.ts";
 import { failed, failureKind } from "./result.ts";
@@ -18,6 +20,40 @@ import { type HttpResponse, requestPublicHttp } from "./transport.ts";
 import { withWritersideTopic } from "./writerside.ts";
 export type FetchUrlGate = (url: string) => boolean | Promise<boolean>;
 export const preferredMarkdownAccept = "text/markdown, text/plain, */*;q=0.8";
+const responseHeaders = new WeakMap<FetchResult, HeaderMap>();
+
+type RequestHeaders = {
+	accept: string;
+	"user-agent": string;
+	cookie?: string;
+	"if-none-match"?: string;
+	"if-modified-since"?: string;
+};
+
+type ConditionalHeaders = {
+	"if-none-match"?: string;
+	"if-modified-since"?: string;
+};
+
+type ResponseMetadata = Pick<FetchResult, "fetchedAt"> &
+	Partial<
+		Pick<
+			FetchResult,
+			| "etag"
+			| "lastModified"
+			| "cacheControl"
+			| "ageSeconds"
+			| "vary"
+			| "setCookie"
+		>
+	>;
+
+type FetchDiscovery = Pick<FetchedUrl, "source" | "wasSeed" | "metadata">;
+
+export function responseHeadersFor(result: FetchResult) {
+	return responseHeaders.get(result);
+}
+
 interface FetchTextOptions {
 	followRouteFallbacks?: boolean;
 	signal?: AbortSignal;
@@ -33,22 +69,9 @@ export async function fetchText(
 ): Promise<FetchResult> {
 	const started = performance.now();
 	const signal = deadlineSignal(options?.signal, config.timeoutMs);
-	const fetchOptions = { ...(options ?? {}), signal };
-	const uncached: UncachedFetch = (
-		raw,
-		fetchConfig,
-		nextAccept,
-		nextConditional,
-		nextAllowUrl,
-	) =>
-		fetchTextUncached(
-			raw,
-			fetchConfig,
-			nextAccept,
-			nextConditional,
-			nextAllowUrl,
-			fetchOptions,
-		);
+	const fetchOptions = { ...options, signal };
+	const uncached: UncachedFetch = (...args) =>
+		fetchTextUncached(...args, fetchOptions);
 	try {
 		return await awaitWithSignal(
 			fetchWithCache(url, config, accept, conditional, uncached, allowUrl),
@@ -105,7 +128,7 @@ export async function fetchTextUncached(
 					fallback,
 					result.status,
 					started,
-					signal.aborted ? "request timed out" : "blocked by robots.txt",
+					deniedUrlError(fallback, signal),
 					redirects,
 				);
 			}
@@ -124,7 +147,7 @@ export async function fetchTextUncached(
 				next,
 				result.status,
 				started,
-				signal.aborted ? "request timed out" : "blocked by robots.txt",
+				deniedUrlError(next, signal),
 				redirects,
 			);
 		}
@@ -160,58 +183,50 @@ async function fetchOnce(
 ): Promise<FetchResult> {
 	let requestUrl = currentUrl;
 	const redirects = [...redirectsSoFar];
+	const failure = (finalUrl: string, status: number, error: string) =>
+		fail(url, finalUrl, status, started, error, redirects);
 	const seenRedirects = new Set<string>();
 	const cookies: Cookie[] = [];
+	let cookieTainted = false;
 	for (let attempt = 0; attempt < 3; attempt++) {
 		try {
 			signal?.throwIfAborted();
-			const headers: { accept: string; "user-agent": string; cookie?: string } =
-				{
-					accept,
-					"user-agent": config.userAgent,
-				};
+			const headers: RequestHeaders = {
+				accept,
+				"user-agent": config.userAgent,
+			};
 			const sentConditional = conditionalHeaders(conditional, requestUrl);
 			Object.assign(headers, sentConditional);
 			const cookie = cookieHeader(cookies, requestUrl);
-			if (cookie) headers.cookie = cookie;
+			if (cookie) {
+				headers.cookie = cookie;
+				cookieTainted = true;
+			}
 			const requestStarted = performance.now();
-			const response = await requestPublicHttp(requestUrl, headers, config, {
-				...(signal ? { signal } : {}),
-				maxBytes,
-			});
+			const requestOptions = signal ? { signal, maxBytes } : { maxBytes };
+			const response = await requestPublicHttp(
+				requestUrl,
+				headers,
+				config,
+				requestOptions,
+			);
+			cookieTainted ||= responseSetsCookie(response);
 			storeCookies(cookies, requestUrl, response);
 			const redirect = redirectUrl(response, requestUrl);
 			if (redirect) {
 				if (redirect instanceof Error) {
-					return fail(
-						url,
-						requestUrl,
-						response.status,
-						started,
-						redirect.message,
-						redirects,
-					);
+					return failure(requestUrl, response.status, redirect.message);
 				}
 				if (seenRedirects.has(redirect) || seenRedirects.size >= 8) {
-					return fail(
-						url,
-						requestUrl,
-						response.status,
-						started,
-						"too many redirects",
-						redirects,
-					);
+					return failure(requestUrl, response.status, "too many redirects");
 				}
 				const hop = redirectHop(requestUrl, redirect, "http", response.status);
 				if (hop) redirects.push(hop);
 				if (!(await urlAllowed(redirect, allowUrl, signal))) {
-					return fail(
-						url,
+					return failure(
 						redirect,
 						response.status,
-						started,
-						signal?.aborted ? "request timed out" : "blocked by robots.txt",
-						redirects,
+						deniedUrlError(redirect, signal),
 					);
 				}
 				seenRedirects.add(redirect);
@@ -221,7 +236,11 @@ async function fetchOnce(
 			}
 			const contentLength = Number(response.headers.get("content-length") ?? 0);
 			if (contentLength > maxBytes) {
-				return tooLarge(url, response, started, maxBytes, redirects);
+				return failure(
+					response.url,
+					response.status,
+					`response exceeds ${maxBytes} bytes`,
+				);
 			}
 			if (shouldRetry(response.status, attempt)) {
 				await awaitWithSignal(
@@ -231,13 +250,10 @@ async function fetchOnce(
 				continue;
 			}
 			if (response.headers.get("x-amzn-waf-action"))
-				return fail(
-					url,
+				return failure(
 					requestUrl,
 					response.status,
-					started,
 					"blocked by client challenge",
-					redirects,
 				);
 			const fetchedAt = new Date().toISOString();
 			const base = {
@@ -248,8 +264,7 @@ async function fetchOnce(
 				body: "",
 				fetchMs: performance.now() - started,
 				redirects,
-				...responseValidators(response, fetchedAt),
-				...responseCache(response, requestStarted),
+				...responseMetadata(response, requestStarted, fetchedAt, cookieTainted),
 			};
 			// 304 only counts as not-modified when we sent a validator for this URL.
 			if (response.status === 304 && Object.keys(sentConditional).length > 0) {
@@ -261,47 +276,46 @@ async function fetchOnce(
 					notModified: true,
 				} satisfies FetchResult;
 			}
-			const decoded = decodeResponseBody(response, response.body);
-			const text = await withWritersideTopic(
-				decoded,
-				requestUrl,
-				headers,
-				config,
-				allowUrl,
-				signal,
-			);
-			const full = { ...base, body: text };
+			const document =
+				response.status >= 200 && response.status <= 299
+					? documentPayload(response, response.body)
+					: undefined;
+			const body = document
+				? ""
+				: await withWritersideTopic(
+						decodeResponseBody(response, response.body),
+						requestUrl,
+						headers,
+						config,
+						allowUrl,
+						signal,
+					);
+			const full = document ? { ...base, body, document } : { ...base, body };
+			let result: FetchResult;
 			if (response.status >= 200 && response.status <= 299) {
-				return { ...full, ok: true } satisfies FetchResult;
+				result = { ...full, ok: true };
+			} else {
+				result = {
+					...full,
+					ok: false,
+					error: `HTTP ${response.status}`,
+					failureKind: failureKind(response.status, `HTTP ${response.status}`),
+				};
 			}
-			return {
-				...full,
-				ok: false,
-				error: `HTTP ${response.status}`,
-				failureKind: failureKind(response.status, `HTTP ${response.status}`),
-			} satisfies FetchResult;
+			responseHeaders.set(result, response.headers);
+			return result;
 		} catch (error) {
 			if (signal?.aborted) {
-				return fail(
-					url,
-					requestUrl,
-					0,
-					started,
-					"request timed out",
-					redirects,
-				);
+				return failure(requestUrl, 0, "request timed out");
 			}
 			if (attempt < 2 && isRetryableFetchError(error)) {
 				await awaitWithSignal(Bun.sleep(retryDelayMs(attempt)), signal);
 				continue;
 			}
-			return fail(
-				url,
+			return failure(
 				requestUrl,
 				0,
-				started,
 				error instanceof Error ? error.message : String(error),
-				redirects,
 			);
 		}
 	}
@@ -327,6 +341,12 @@ async function urlAllowed(
 		return false;
 	}
 }
+
+function deniedUrlError(url: string, signal?: AbortSignal) {
+	if (signal?.aborted) return "request timed out";
+	const unsafe = validatePublicHttpUrl(url);
+	return unsafe ? `unsafe URL: ${unsafe}` : "blocked by robots.txt";
+}
 function redirectUrl(
 	response: HttpResponse,
 	base: string,
@@ -349,52 +369,49 @@ function redirectUrl(
 function conditionalHeaders(
 	conditional: ConditionalRequest | undefined,
 	requestUrl: string,
-): Partial<Record<"if-none-match" | "if-modified-since", string>> {
-	if (!conditional || !conditionalApplies(conditional, requestUrl)) return {};
-	return {
-		...(conditional.etag ? { "if-none-match": conditional.etag } : {}),
-		...(conditional.lastModified
-			? { "if-modified-since": conditional.lastModified }
-			: {}),
-	};
-}
-
-function conditionalApplies(
-	conditional: ConditionalRequest,
-	requestUrl: string,
-) {
+): ConditionalHeaders {
 	const request = artifactUrl(requestUrl);
-	return Boolean(
-		request &&
-			conditional.urls
-				.map(artifactUrl)
-				.some((url) => url !== undefined && url === request),
-	);
+	if (
+		!conditional ||
+		!request ||
+		!conditional.urls.some((url) => artifactUrl(url) === request)
+	)
+		return {};
+	const headers: ConditionalHeaders = {};
+	if (conditional.etag) headers["if-none-match"] = conditional.etag;
+	if (conditional.lastModified) {
+		headers["if-modified-since"] = conditional.lastModified;
+	}
+	return headers;
 }
 
-function responseValidators(response: HttpResponse, fetchedAt: string) {
+function responseMetadata(
+	response: HttpResponse,
+	started: number,
+	fetchedAt: string,
+	cookieTainted: boolean,
+) {
 	const etag = cleanHeader(response.headers.get("etag"));
 	const lastModified = cleanHeader(response.headers.get("last-modified"));
-	return {
-		...(etag ? { etag } : {}),
-		...(lastModified ? { lastModified } : {}),
-		fetchedAt,
-	};
-}
-
-function responseCache(response: HttpResponse, started: number) {
 	const cacheControl = cleanHeader(response.headers.get("cache-control"));
 	const ageSeconds = responseAgeSeconds(response, started);
 	const vary = cleanHeader(response.headers.get("vary"));
-	const setCookie =
+	const setCookie = cookieTainted || responseSetsCookie(response);
+	const metadata: ResponseMetadata = { fetchedAt };
+	if (etag) metadata.etag = etag;
+	if (lastModified) metadata.lastModified = lastModified;
+	if (cacheControl) metadata.cacheControl = cacheControl;
+	if (ageSeconds) metadata.ageSeconds = ageSeconds;
+	if (vary) metadata.vary = vary;
+	if (setCookie) metadata.setCookie = true;
+	return metadata;
+}
+
+function responseSetsCookie(response: HttpResponse) {
+	return (
 		(response.headers.getSetCookie?.().length ?? 0) > 0 ||
-		response.headers.get("set-cookie") !== null;
-	return {
-		...(cacheControl ? { cacheControl } : {}),
-		...(ageSeconds ? { ageSeconds } : {}),
-		...(vary ? { vary } : {}),
-		...(setCookie ? { setCookie: true } : {}),
-	};
+		response.headers.get("set-cookie") !== null
+	);
 }
 
 function responseAgeSeconds(response: HttpResponse, started: number) {
@@ -422,7 +439,9 @@ function redirectHop(
 	const cleanFrom = artifactUrl(from);
 	const cleanTo = artifactUrl(to);
 	if (!cleanFrom || !cleanTo) return undefined;
-	return { from: cleanFrom, to: cleanTo, type, ...(status ? { status } : {}) };
+	const redirect: RedirectHop = { from: cleanFrom, to: cleanTo, type };
+	if (status) redirect.status = status;
+	return redirect;
 }
 
 function artifactFinalUrl(raw: string, fallback: string) {
@@ -498,16 +517,6 @@ function docsMarkdownFallback(url: URL): string | undefined {
 	return next.href;
 }
 
-function tooLarge(
-	url: string,
-	response: HttpResponse,
-	started: number,
-	maxBytes: number,
-	redirects: RedirectHop[],
-) {
-	const error = `response exceeds ${maxBytes} bytes`;
-	return fail(url, response.url, response.status, started, error, redirects);
-}
 export function fetchMany(
 	urls: DiscoveredUrl[],
 	config: PipelineConfig,
@@ -522,11 +531,11 @@ export function fetchMany(
 			key: (item) => new URL(item.url).origin,
 		},
 		async (item): Promise<FetchedUrl> => {
-			const discovery = {
+			const discovery: FetchDiscovery = {
 				source: item.source,
-				...(item.wasSeed ? { wasSeed: true as const } : {}),
-				...(item.metadata ? { metadata: item.metadata } : {}),
 			};
+			if (item.wasSeed) discovery.wasSeed = true;
+			if (item.metadata) discovery.metadata = item.metadata;
 			if (
 				item.fetched &&
 				!item.fetched.ok &&

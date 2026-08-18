@@ -3,10 +3,13 @@ import type { PipelineConfig } from "../core/types.ts";
 import { isLlmsResourcePath } from "../core/url.ts";
 import { pathInScope } from "./url.ts";
 
-export function candidateWindowConfig(config: PipelineConfig): PipelineConfig {
-	if (!config.maxExplicit) return config;
+export function candidateWindow(
+	config: PipelineConfig,
+	limit = config.max,
+): number {
+	if (!config.maxExplicit) return limit;
 	// Rank a reserve without turning small --max runs into 256-page discovery.
-	return { ...config, max: Math.max(config.max * 4, 32) };
+	return Math.max(limit * 4, 32);
 }
 
 export function orderByTopic(

@@ -59,10 +59,6 @@ function isUsefulShortPage(
 		(hasTitle &&
 			words >= 10 &&
 			markdown.length >= 80 &&
-			(links > 0 || /[.!?]/.test(markdown))) ||
-		(hasTitle &&
-			words >= 24 &&
-			markdown.length >= 180 &&
-			/[.!?]\s/.test(markdown))
+			(links > 0 || /[.!?]/.test(markdown)))
 	);
 }

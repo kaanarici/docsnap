@@ -63,12 +63,9 @@ function requestAddress(
 ): Promise<HttpResponse> {
 	const request =
 		resolved.url.protocol === "https:" ? httpsRequest : httpRequest;
-	const port =
-		resolved.url.port === ""
-			? resolved.url.protocol === "https:"
-				? 443
-				: 80
-			: Number(resolved.url.port);
+	const port = Number(
+		resolved.url.port || (resolved.url.protocol === "https:" ? 443 : 80),
+	);
 	const lookup = pinnedLookup(address);
 	return new Promise((resolve, reject) => {
 		let settled = false;
@@ -84,11 +81,11 @@ function requestAddress(
 			cleanup();
 			resolve(response);
 		};
-		const rejectOnce = (error: unknown) => {
+		const rejectOnce = (cause: unknown) => {
 			if (settled) return;
 			settled = true;
 			cleanup();
-			reject(error);
+			reject(cause);
 		};
 		const req = request(
 			{
@@ -109,23 +106,34 @@ function requestAddress(
 				const status = res.statusCode ?? 0;
 				const headers = responseHeaders(res);
 				if (status >= 300 && status <= 399) {
-					res.resume();
+					// Redirect bodies are never consumed. Closing the response keeps an
+					// attacker from streaming outside the byte and wall-clock limits after
+					// the caller has already moved on to the next hop.
+					if (res.socket) res.socket.destroy();
+					else res.destroy();
 					resolveOnce({ url: raw, status, headers, body: new Uint8Array() });
 					return;
 				}
 				void readIncoming(res, maxBytes)
-					.then((body) => decodeContent(body, res, maxBytes))
 					.then((body) =>
 						resolveOnce({
 							url: raw,
 							status,
 							headers,
-							body,
+							body: decodeContent(
+								body,
+								res.headers["content-encoding"]?.toString(),
+								maxBytes,
+							),
 						}),
 					)
 					.catch(rejectOnce);
 			},
 		);
+		const abort = (error: Error) => {
+			req.destroy(error);
+			rejectOnce(error);
+		};
 		req.on("error", rejectOnce);
 		if (signal) {
 			const onAbort = () => {
@@ -133,8 +141,7 @@ function requestAddress(
 					signal.reason instanceof Error
 						? signal.reason
 						: new Error("request aborted");
-				req.destroy(error);
-				rejectOnce(error);
+				abort(error);
 			};
 			signal.addEventListener("abort", onAbort, { once: true });
 			removeAbort = () => signal.removeEventListener("abort", onAbort);
@@ -145,39 +152,21 @@ function requestAddress(
 		}
 		// the socket timeout above is idle-based; a server trickling bytes resets
 		// it forever, so a whole-request wall-clock deadline bounds the worst case
-		deadline = setTimeout(() => {
-			const error = deadlineError();
-			req.destroy(error);
-			rejectOnce(error);
-		}, deadlineMs);
-		req.on("timeout", () => {
-			const error = new Error("request timed out");
-			req.destroy(error);
-			rejectOnce(error);
-		});
+		deadline = setTimeout(() => abort(deadlineError()), deadlineMs);
+		req.on("timeout", () => abort(new Error("request timed out")));
 		req.end();
 	});
 }
 
 export function pinnedLookup(address: PublicAddress): LookupFunction {
-	return ((_hostname: string, options: unknown, callback?: unknown) => {
-		const done = typeof options === "function" ? options : callback;
-		if (typeof done !== "function") throw new Error("missing DNS callback");
-		if (typeof options === "function") {
-			done(null, address.address, address.family);
+	const lookup: LookupFunction = (_hostname, options, callback) => {
+		if (options.all) {
+			callback(null, [{ address: address.address, family: address.family }]);
 			return;
 		}
-		if (
-			options &&
-			typeof options === "object" &&
-			"all" in options &&
-			options.all === true
-		) {
-			done(null, [{ address: address.address, family: address.family }]);
-			return;
-		}
-		done(null, address.address, address.family);
-	}) as LookupFunction;
+		callback(null, address.address, address.family);
+	};
+	return lookup;
 }
 
 function deadlineError() {
@@ -185,49 +174,48 @@ function deadlineError() {
 	return new Error("request timed out: whole-request deadline exceeded");
 }
 
-function decodeContent(
+export function decodeContent(
 	body: Uint8Array,
-	response: IncomingMessage,
+	contentEncoding: string | undefined,
 	maxBytes: number,
 ): Uint8Array {
-	const encoding = response.headers["content-encoding"]
-		?.toString()
-		.toLowerCase();
-	if (!encoding || encoding === "identity") return body;
+	const encodings = (contentEncoding ?? "")
+		.split(",")
+		.map((value) => value.trim().toLowerCase())
+		.filter((value) => value && value !== "identity");
+	if (encodings.length === 0) return body;
 	const options = { maxOutputLength: maxBytes };
-	if (encoding.includes("br")) return brotliDecompressSync(body, options);
-	if (encoding.includes("gzip") || encoding.includes("x-gzip")) {
-		return gunzipSync(body, options);
+	let decoded = body;
+	for (const encoding of encodings.reverse()) {
+		if (encoding === "br") decoded = brotliDecompressSync(decoded, options);
+		else if (encoding === "gzip" || encoding === "x-gzip") {
+			decoded = gunzipSync(decoded, options);
+		} else if (encoding === "deflate") {
+			decoded = inflateSync(decoded, options);
+		} else {
+			throw new Error(`unsupported content encoding: ${encoding}`);
+		}
 	}
-	if (encoding.includes("deflate")) return inflateSync(body, options);
-	return body;
+	return decoded;
 }
 
 function responseHeaders(response: IncomingMessage): HeaderMap {
 	const headers = new Headers();
-	const setCookie: string[] = [];
 	for (const [name, value] of Object.entries(response.headers)) {
 		if (Array.isArray(value)) {
-			for (const item of value) {
-				headers.append(name, item);
-				if (name.toLowerCase() === "set-cookie") setCookie.push(item);
-			}
+			for (const item of value) headers.append(name, item);
 		} else if (value !== undefined) {
 			headers.set(name, value);
-			if (name.toLowerCase() === "set-cookie") setCookie.push(value);
 		}
 	}
-	return {
-		get: (name) => headers.get(name),
-		getSetCookie: () => setCookie,
-	};
+	return headers;
 }
 
 async function readIncoming(
 	response: IncomingMessage,
 	maxBytes: number,
 ): Promise<Uint8Array> {
-	const chunks: Uint8Array[] = [];
+	const chunks: Buffer[] = [];
 	let bytes = 0;
 	for await (const chunk of response) {
 		const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -238,11 +226,5 @@ async function readIncoming(
 		}
 		chunks.push(buffer);
 	}
-	const body = new Uint8Array(bytes);
-	let offset = 0;
-	for (const chunk of chunks) {
-		body.set(chunk, offset);
-		offset += chunk.byteLength;
-	}
-	return body;
+	return Buffer.concat(chunks, bytes);
 }

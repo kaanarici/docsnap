@@ -11,6 +11,7 @@ import {
 	acquireCacheLock,
 	cacheConditional,
 	cachedFetchResult,
+	cacheKey,
 	cacheRequest,
 	readCache,
 	refreshCacheEntry,
@@ -43,14 +44,10 @@ export async function fetchWithCache(
 	uncached: UncachedFetch,
 	allowUrl?: UrlGate,
 ): Promise<FetchResult> {
-	if (conditional || validatePublicHttpUrl(url)) {
+	const unsafe = validatePublicHttpUrl(url);
+	if (conditional || unsafe) {
 		const result = await uncached(url, config, accept, conditional, allowUrl);
-		if (
-			!conditional ||
-			!result.ok ||
-			isNotModifiedResult(result) ||
-			validatePublicHttpUrl(url)
-		) {
+		if (!conditional || !result.ok || isNotModifiedResult(result) || unsafe) {
 			return result;
 		}
 		await writeThroughCache(url, config, accept, result);
@@ -83,9 +80,7 @@ function singleFlight(
 	}
 	const existing = pending.get(key);
 	if (existing) return existing;
-	const promise = run().finally(() => {
-		pending?.delete(key);
-	});
+	const promise = run().finally(() => pending.delete(key));
 	pending.set(key, promise);
 	return promise;
 }
@@ -136,10 +131,10 @@ async function fillCold(
 				result,
 			);
 			return cachedFetchResult(
-				url,
 				entry,
 				stale.body,
 				performance.now() - started,
+				url,
 			);
 		}
 		await writeCacheResult(config, first.key, request, result);
@@ -156,25 +151,18 @@ async function freshHit(
 	allowUrl: UrlGate | undefined,
 ): Promise<FetchResult | undefined> {
 	const result = cachedFetchResult(
-		url,
 		lookup.entry,
 		lookup.body,
 		performance.now() - started,
+		url,
 	);
-	return (await cachedAllowed(result, allowUrl)) ? result : undefined;
-}
-
-async function cachedAllowed(
-	result: FetchResult,
-	allowUrl: UrlGate | undefined,
-) {
-	if (!allowUrl) return true;
+	if (!allowUrl) return result;
 	if (result.url === result.finalUrl && (result.redirects?.length ?? 0) === 0)
-		return true;
+		return result;
 	try {
-		return await allowUrl(result.finalUrl);
+		return (await allowUrl(result.finalUrl)) ? result : undefined;
 	} catch {
-		return false;
+		return undefined;
 	}
 }
 
@@ -185,7 +173,7 @@ async function writeThroughCache(
 	result: FetchResult,
 ) {
 	const request = cacheRequest(url, config, accept);
-	const key = (await readCache(config, request, { count: false })).key;
+	const key = cacheKey(request);
 	const lock = await acquireCacheLock(config, key);
 	if (!lock) return;
 	try {

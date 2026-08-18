@@ -4,7 +4,7 @@ export type Cookie = {
 	name: string;
 	value: string;
 	domain: string;
-	hostOnly: boolean;
+	path: string;
 	secure: boolean;
 };
 
@@ -15,10 +15,10 @@ export function cookieHeader(cookies: Cookie[], raw: string) {
 		.filter(
 			(cookie) =>
 				(!cookie.secure || url.protocol === "https:") &&
-				(cookie.hostOnly
-					? cookie.domain === host
-					: host === cookie.domain || host.endsWith(`.${cookie.domain}`)),
+				cookie.domain === host &&
+				pathMatches(url.pathname, cookie.path),
 		)
+		.sort((a, b) => b.path.length - a.path.length)
 		.map((cookie) => `${cookie.name}=${cookie.value}`)
 		.join("; ");
 }
@@ -28,7 +28,9 @@ export function storeCookies(
 	raw: string,
 	response: HttpResponse,
 ) {
-	const host = new URL(raw).hostname.toLowerCase();
+	const url = new URL(raw);
+	const host = url.hostname.toLowerCase();
+	const requestPath = url.pathname;
 	const values = response.headers.getSetCookie?.() ?? [
 		response.headers.get("set-cookie") ?? "",
 	];
@@ -38,75 +40,40 @@ export function storeCookies(
 		if (!pair) continue;
 		const split = pair.indexOf("=");
 		if (split <= 0) continue;
-		const rawDomain = parts
-			.find((part) => /^domain=/i.test(part))
-			?.slice("domain=".length)
-			.replace(/^\./, "")
-			.toLowerCase();
-		const acceptedDomain =
-			rawDomain &&
-			domainMatches(host, rawDomain) &&
-			!isRejectedCookieDomain(rawDomain)
-				? rawDomain
-				: undefined;
-		const domain = acceptedDomain ?? host;
+		const pathAttribute = parts
+			.slice(1)
+			.find((part) => /^path=/i.test(part))
+			?.slice(5);
 		const cookie = {
 			name: pair.slice(0, split),
 			value: pair.slice(split + 1),
-			domain,
-			hostOnly: acceptedDomain === undefined,
+			domain: host,
+			path:
+				pathAttribute?.startsWith("/") === true
+					? pathAttribute
+					: defaultPath(requestPath),
 			secure: parts.some((part) => /^secure$/i.test(part)),
 		};
 		const index = cookies.findIndex(
-			(item) => item.name === cookie.name && item.domain === cookie.domain,
+			(item) =>
+				item.name === cookie.name &&
+				item.domain === cookie.domain &&
+				item.path === cookie.path,
 		);
 		if (index >= 0) cookies[index] = cookie;
 		else cookies.push(cookie);
 	}
 }
 
-function domainMatches(host: string, domain: string) {
+function pathMatches(pathname: string, cookiePath: string) {
 	return (
-		domain.includes(".") && (host === domain || host.endsWith(`.${domain}`))
+		pathname === cookiePath ||
+		(pathname.startsWith(cookiePath) &&
+			(cookiePath.endsWith("/") || pathname[cookiePath.length] === "/"))
 	);
 }
 
-const publicSuffixCookieDomains = new Set([
-	"ac.uk",
-	"co.in",
-	"co.jp",
-	"co.nz",
-	"co.uk",
-	"co.za",
-	"com.au",
-	"com.br",
-	"com.mx",
-	"gov.uk",
-	"net.au",
-	"org.au",
-	"org.uk",
-]);
-
-const sharedHostCookieDomains = new Set([
-	"appspot.com",
-	"cloudflarepages.com",
-	"firebaseapp.com",
-	"fly.dev",
-	"github.io",
-	"gitlab.io",
-	"glitch.me",
-	"herokuapp.com",
-	"netlify.app",
-	"pages.dev",
-	"readthedocs.io",
-	"replit.app",
-	"surge.sh",
-	"vercel.app",
-	"web.app",
-]);
-
-function isRejectedCookieDomain(domain: string) {
-	return (
-		publicSuffixCookieDomains.has(domain) || sharedHostCookieDomains.has(domain)
-	);
+function defaultPath(pathname: string) {
+	const end = pathname.lastIndexOf("/");
+	return end <= 0 ? "/" : pathname.slice(0, end);
 }

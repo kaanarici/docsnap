@@ -1,8 +1,18 @@
 import { describe, expect, test } from "bun:test";
+import { candidateKey, identityKeys } from "../src/core/identity.ts";
+import {
+	classifyDiscoveryResource,
+	relatedHost,
+	sameSharedHostPlatform,
+	scopeFromFeedResource,
+} from "../src/core/url.ts";
+import { discoverFeed } from "../src/discover/feed.ts";
+import { normalizeUrl } from "../src/discover/url.ts";
 import {
 	validatePublicHttpUrl,
 	validateResolvedAddresses,
 } from "../src/security/url.ts";
+import { okFetch, testConfig } from "./fixtures.ts";
 
 describe("IP address rejection", () => {
 	test.each([
@@ -65,4 +75,110 @@ describe("resolved-address validation", () => {
 		).toEqual([{ address: "1.1.1.1", family: 4 }]);
 		expect(() => validateResolvedAddresses([])).toThrow("did not resolve");
 	});
+});
+
+describe("URL identity", () => {
+	test("does not trust unrelated country-domain registrants", () => {
+		for (const suffix of ["co.kr", "com.tr"]) {
+			expect(relatedHost(`victim.${suffix}`, `attacker.${suffix}`)).toBeFalse();
+			expect(
+				sameSharedHostPlatform(`victim.${suffix}`, `attacker.${suffix}`),
+			).toBeFalse();
+		}
+	});
+
+	test("collapses route-equivalent index and extension forms", () => {
+		const guide = candidateKey("https://example.com/guide");
+		for (const url of [
+			"https://example.com/guide/",
+			"https://example.com/guide.html",
+			"https://example.com/guide/index.html",
+		]) {
+			expect(candidateKey(url)).toBe(guide);
+		}
+	});
+
+	test("preserves encoded path separators", () => {
+		const encoded = new Set(
+			identityKeys({ url: "https://example.com/item/a%2Fb" }),
+		);
+		expect(
+			identityKeys({ url: "https://example.com/item/a/b" }).some((key) =>
+				encoded.has(key),
+			),
+		).toBeFalse();
+	});
+
+	test("preserves semantic queries and removes tracking parameters", () => {
+		expect(normalizeUrl("https://example.com/guide?version=1")).not.toBe(
+			normalizeUrl("https://example.com/guide?version=2"),
+		);
+		expect(
+			normalizeUrl(
+				"https://example.com/guide?version=1&utm_source=test&fbclid=x",
+			),
+		).toBe("https://example.com/guide?version=1");
+	});
+
+	test("rejects explicit login-return destinations", () => {
+		expect(
+			normalizeUrl(
+				"https://community.example.com/start?post_login_redirect=%2Fdocs",
+			),
+		).toBeUndefined();
+		expect(normalizeUrl("https://docs.example.com/guide?redirect=/next")).toBe(
+			"https://docs.example.com/guide?redirect=%2Fnext",
+		);
+	});
+});
+
+test.each([
+	["https://daringfireball.net/feeds/main", "/"],
+	["https://planetpython.org/rss20.xml", "/"],
+	["https://example.com/blog/rss.xml", "/blog/"],
+	["https://example.com/blog/rss", "/blog/"],
+	["https://example.com/headlines/rss", "/headlines/"],
+])("derives content scope from feed resource %s", (url, scope) => {
+	expect(classifyDiscoveryResource(url)?.source).toBe("feed");
+	expect(scopeFromFeedResource(url)).toBe(scope);
+});
+
+test("widens only an empty feed path scope without crossing origins", async () => {
+	const seed = "https://example.com/headlines/rss";
+	const response = okFetch(
+		seed,
+		`<rss><channel>
+			<item><link>https://example.com/Articles/1/</link></item>
+			<item><link>https://outside.example/Articles/2/</link></item>
+		</channel></rss>`,
+		{ contentType: "application/rss+xml" },
+	);
+	const found = await discoverFeed(
+		seed,
+		seed,
+		scopeFromFeedResource(seed),
+		testConfig("unused"),
+		{ response },
+	);
+	expect(found.pages.map((page) => page.url)).toEqual([
+		"https://example.com/Articles/1/",
+	]);
+
+	const blogSeed = "https://example.com/blog/rss";
+	const blog = await discoverFeed(
+		blogSeed,
+		blogSeed,
+		scopeFromFeedResource(blogSeed),
+		testConfig("unused"),
+		{
+			response: okFetch(
+				blogSeed,
+				"<rss><channel><item><link>https://example.com/blog/1</link></item><item><link>https://example.com/elsewhere/2</link></item></channel></rss>",
+				{ contentType: "application/rss+xml" },
+			),
+		},
+	);
+	expect(blog.pages.map((page) => page.url)).toEqual([
+		"https://example.com/blog/1",
+	]);
 });

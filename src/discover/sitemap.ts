@@ -1,5 +1,4 @@
-import { DOMParser } from "linkedom";
-import { runBounded } from "../core/parallel.ts";
+import { maxGeneratedCapturePages } from "../core/config.ts";
 import { escapeRegExp } from "../core/text.ts";
 import type { PipelineConfig } from "../core/types.ts";
 import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
@@ -10,40 +9,43 @@ type SitemapOptions = {
 	accept?: (url: string) => boolean;
 	scope?: string;
 	allowResource?: FetchUrlGate | undefined;
-	// A blocked seed may use only sitemaps explicitly declared by robots.txt.
-	declaredOnly?: boolean;
 };
-
-const SITEMAP_INDEX_CHILD_CONCURRENCY = 4;
+type SitemapStatus = {
+	truncated: boolean;
+	resources: number;
+	deadline: number;
+};
+const maxSitemapLocations = 10_000;
 
 export async function discoverSitemaps(
 	seed: string,
 	sitemapUrls: string[],
 	config: PipelineConfig,
 	options: SitemapOptions = {},
-): Promise<string[]> {
+): Promise<{ urls: string[]; truncated: boolean }> {
 	const limit = options.limit ?? Number.POSITIVE_INFINITY;
-	if (limit <= 0) return [];
+	if (limit <= 0) return { urls: [], truncated: false };
 
 	const base = new URL(seed);
+	const status: SitemapStatus = {
+		truncated: false,
+		resources: 0,
+		deadline: performance.now() + Math.min(config.timeoutMs, 3_000),
+	};
 	const candidates = new Set<string>();
 	const addCandidate = (raw: string) => {
 		const url = absoluteHttpUrl(raw, base.href);
-		if (url && sameOrigin(url, base.origin)) candidates.add(url);
+		if (url && new URL(url).origin === base.origin) candidates.add(url);
 	};
-	if (!options.declaredOnly) {
-		for (const sitemap of scopedSitemapCandidates(base)) addCandidate(sitemap);
-	}
+	for (const sitemap of scopedSitemapCandidates(base)) addCandidate(sitemap);
 	for (const sitemap of sitemapUrls) addCandidate(sitemap);
-	if (!options.declaredOnly) {
-		for (const path of [
-			"/sitemap.xml",
-			"/sitemap_index.xml",
-			"/sitemap-index.xml",
-			"/sitemap-0.xml",
-		]) {
-			addCandidate(`${base.origin}${path}`);
-		}
+	for (const path of [
+		"/sitemap.xml",
+		"/sitemap_index.xml",
+		"/sitemap-index.xml",
+		"/sitemap-0.xml",
+	]) {
+		addCandidate(`${base.origin}${path}`);
 	}
 
 	const found = new Set<string>();
@@ -55,9 +57,10 @@ export async function discoverSitemaps(
 			limit,
 			origin: base.origin,
 			scope,
+			status,
 		});
 	}
-	return [...found];
+	return { urls: [...found], truncated: status.truncated };
 }
 
 function scopedSitemapCandidates(base: URL) {
@@ -72,136 +75,129 @@ async function readSitemap(
 	depth: number,
 	found: Set<string>,
 	options: Required<Pick<SitemapOptions, "limit" | "scope">> &
-		SitemapOptions & { origin: string },
-): Promise<"blocked" | "empty" | "found"> {
-	const before = found.size;
-	if (depth > 3 || found.size >= options.limit) return "empty";
-	if (options.allowResource && !(await options.allowResource(url)))
-		return "blocked";
+		SitemapOptions & { origin: string; status: SitemapStatus },
+): Promise<void> {
+	if (found.size >= options.limit) return;
+	if (depth > 3 || options.status.resources >= maxGeneratedCapturePages) {
+		options.status.truncated = true;
+		return;
+	}
+	options.status.resources++;
+	if (options.allowResource && !(await options.allowResource(url))) return;
+	const remaining = Math.ceil(options.status.deadline - performance.now());
+	if (remaining <= 0) {
+		options.status.truncated = true;
+		return;
+	}
+	const signal = AbortSignal.timeout(remaining);
 	const response = await fetchText(
 		url,
 		config,
 		"application/xml,text/xml,*/*;q=0.8",
 		undefined,
 		options.allowResource,
+		{ signal },
 	);
-	if (!response.ok)
-		return response.status === 403 || response.failureKind === "blocked"
-			? "blocked"
-			: "empty";
-	if (
-		options.allowResource &&
-		response.finalUrl !== url &&
-		!(await options.allowResource(response.finalUrl))
-	)
-		return "blocked";
-	if (new URL(response.finalUrl).origin !== options.origin) return "empty";
-	if (!response.body.includes("<")) return "empty";
-	const document = new DOMParser().parseFromString(response.body, "text/xml");
-	const rawLocs = [...document.querySelectorAll("loc")]
-		.map((element) => absoluteHttpUrl(element.textContent ?? "", url))
+	options.status.truncated ||= signal.aborted;
+	if (!response.ok || new URL(response.finalUrl).origin !== options.origin)
+		return;
+	if (!response.body.includes("<")) return;
+	const locations = sitemapLocs(response.body);
+	options.status.truncated ||= locations.truncated;
+	const rawLocs = locations.urls
+		.map((raw) => absoluteHttpUrl(raw, url))
 		.filter((value): value is string => Boolean(value));
-	const locs = rawLocs
-		.filter((loc) => sameOrigin(loc, options.origin))
-		.map((loc) => normalizeUrl(loc))
-		.filter((value): value is string => Boolean(value));
-	const sitemapLocs = rawLocs.filter(
-		(loc) => sameOrigin(loc, options.origin) && isSitemapUrl(loc),
-	);
-	const xmlLocs = rawLocs.filter(
-		(loc) => sameOrigin(loc, options.origin) && isXmlUrl(loc),
-	);
-	const pageLocs = locs.filter((loc) => !isXmlUrl(loc));
-	const rootName = document.documentElement?.localName;
-	const indexLocs = rootName === "sitemapindex" ? xmlLocs : sitemapLocs;
+	const xmlLocs: string[] = [];
+	const pageLocs: string[] = [];
+	for (const loc of rawLocs) {
+		if (new URL(loc).origin !== options.origin) continue;
+		if (isXmlUrl(loc)) xmlLocs.push(loc);
+		else {
+			const page = normalizeUrl(loc);
+			if (page) pageLocs.push(page);
+		}
+	}
+	const nested = xmlLocs.filter(isSitemapUrl);
+	const rootName = response.body
+		.match(/<\s*(sitemapindex|urlset)\b/i)?.[1]
+		?.toLowerCase();
+	const indexLocs = rootName === "sitemapindex" ? xmlLocs : nested;
 	const isIndex =
 		rootName === "sitemapindex" ||
-		(sitemapLocs.length > 0 && sitemapLocs.length === rawLocs.length);
-	if (!isIndex) {
-		for (const loc of locs) {
-			if (found.size >= options.limit) break;
-			if (!options.accept || options.accept(loc)) found.add(loc);
-		}
-		return found.size > before ? "found" : "empty";
-	}
-	if (rootName === "sitemapindex") {
+		(nested.length > 0 && nested.length === rawLocs.length);
+	if (!isIndex || rootName === "sitemapindex") {
 		for (const loc of pageLocs) {
-			if (found.size >= options.limit) return "found";
+			if (found.size >= options.limit) return;
 			if (!options.accept || options.accept(loc)) found.add(loc);
 		}
-		if (xmlLocs.length === 0) return found.size > before ? "found" : "empty";
+		if (!isIndex || xmlLocs.length === 0) return;
 	}
 
-	const childSitemaps = prioritizedSitemaps(indexLocs, options.scope).slice(
-		0,
-		50,
+	const children = prioritizedSitemaps(indexLocs, options.scope);
+	const childLimit = Math.min(children.length, 50);
+	if (childLimit < children.length) options.status.truncated = true;
+	const selected = children.slice(0, childLimit);
+	const concurrency = Math.max(
+		1,
+		Math.min(4, config.concurrency, config.perOrigin),
 	);
-	const childConcurrency =
-		options.limit <= 10 ? 1 : SITEMAP_INDEX_CHILD_CONCURRENCY;
-	if (childConcurrency === 1) {
-		let blocked = 0;
-		for (const child of childSitemaps) {
-			const result = await readSitemap(
-				child,
-				config,
-				depth + 1,
-				found,
-				options,
-			);
-			if (found.size >= options.limit) return "found";
-			blocked = result === "blocked" ? blocked + 1 : 0;
-			if (blocked >= 5) break;
+	for (
+		let offset = 0;
+		offset < selected.length && found.size < options.limit;
+		offset += concurrency
+	) {
+		const remaining = options.limit - found.size;
+		const batches = await Promise.all(
+			selected.slice(offset, offset + concurrency).map(async (child) => {
+				const pages = new Set<string>();
+				await readSitemap(child, config, depth + 1, pages, {
+					...options,
+					limit: remaining,
+				});
+				return pages;
+			}),
+		);
+		for (const pages of batches) {
+			for (const page of pages) {
+				if (found.size >= options.limit) break;
+				found.add(page);
+			}
 		}
-		return found.size > before ? "found" : "empty";
 	}
-	await runBounded(
-		childSitemaps,
-		{
-			concurrency: childConcurrency,
-			perOrigin: config.perOrigin,
-			key: (child) => new URL(child).origin,
-		},
-		async (child) => {
-			if (found.size >= options.limit) return;
-			await readSitemap(child, config, depth + 1, found, options);
-		},
-	);
-	return found.size > before ? "found" : "empty";
 }
 
 function prioritizedSitemaps(locs: string[], scope: string) {
+	const hints = scope
+		.split("/")
+		.filter((part) => part.length > 2)
+		.map(scopePartVariants);
+	const ranks = new Map<string, number>();
+	for (const raw of locs) {
+		const pathname = new URL(raw).pathname.toLowerCase();
+		const score = hints.reduce(
+			(total, variants) =>
+				total + Number(variants.some((variant) => variant.test(pathname))),
+			0,
+		);
+		ranks.set(raw, score * 10_000 + sitemapPartNumber(pathname));
+	}
 	const ordered = [...locs].sort(
-		(a, b) => sitemapRank(b, scope) - sitemapRank(a, scope),
+		(a, b) => (ranks.get(b) ?? 0) - (ranks.get(a) ?? 0),
 	);
 	if (scope === "/") return ordered;
-	const scoped = locs.filter((loc) =>
+	const scoped = ordered.filter((loc) =>
 		pathInScope(new URL(loc).pathname, scope),
 	);
 	if (scoped.length > 0) {
 		const scopedSet = new Set(scoped);
-		return [
-			...scoped.sort((a, b) => sitemapRank(b, scope) - sitemapRank(a, scope)),
-			...ordered.filter((loc) => !scopedSet.has(loc)),
-		];
+		return [...scoped, ...ordered.filter((loc) => !scopedSet.has(loc))];
 	}
 	return ordered;
 }
 
-function sitemapRank(raw: string, scope: string) {
-	return sitemapHintScore(raw, scope) * 10_000 + sitemapPartNumber(raw);
+function sitemapPartNumber(pathname: string) {
+	return Number(pathname.match(/(?:^|\/|[_-])(\d+)\.xml$/i)?.[1] ?? 0);
 }
-
-function sitemapHintScore(raw: string, scope: string) {
-	const pathname = new URL(raw).pathname.toLowerCase();
-	return scope
-		.split("/")
-		.filter((part) => part.length > 2)
-		.reduce((score, part) => {
-			const variants = scopePartVariants(part);
-			return score + Number(variants.some((variant) => variant.test(pathname)));
-		}, 0);
-}
-
 function scopePartVariants(part: string) {
 	const lower = part.toLowerCase();
 	// Bound and escape the seed-derived segment before building a RegExp.
@@ -215,14 +211,53 @@ function scopePartVariants(part: string) {
 	);
 }
 
-function sitemapPartNumber(raw: string) {
-	return Number(
-		new URL(raw).pathname.match(/(?:^|\/|[_-])(\d+)\.xml$/i)?.[1] ?? 0,
-	);
-}
-
 function isSitemapUrl(raw: string) {
 	return /(?:^|\/)sitemap[^/]*\.xml$/i.test(new URL(raw).pathname);
+}
+
+function sitemapLocs(xml: string) {
+	const locs: string[] = [];
+	const open = /<loc(?:\s[^>]*)?>/gi;
+	const close = /<\/loc\s*>/gi;
+	for (let match = open.exec(xml); match; match = open.exec(xml)) {
+		if (locs.length >= maxSitemapLocations) {
+			return { urls: locs, truncated: true };
+		}
+		close.lastIndex = open.lastIndex;
+		const end = close.exec(xml);
+		if (!end) break;
+		let value = xml.slice(open.lastIndex, end.index).trim();
+		if (value.startsWith("<![CDATA[") && value.endsWith("]]>")) {
+			value = value.slice(9, -3);
+		}
+		locs.push(decodeXml(value));
+		open.lastIndex = close.lastIndex;
+	}
+	return { urls: locs, truncated: false };
+}
+
+function decodeXml(value: string) {
+	return value.replace(
+		/&(?:amp|lt|gt|quot|apos|#(\d+)|#x([0-9a-f]+));/gi,
+		(entity, decimal: string | undefined, hex: string | undefined) => {
+			if (decimal || hex) {
+				const codePoint = Number.parseInt(
+					decimal ?? hex ?? "",
+					decimal ? 10 : 16,
+				);
+				return codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : entity;
+			}
+			return (
+				{
+					"&amp;": "&",
+					"&lt;": "<",
+					"&gt;": ">",
+					"&quot;": '"',
+					"&apos;": "'",
+				}[entity.toLowerCase()] ?? entity
+			);
+		},
+	);
 }
 
 function isXmlUrl(raw: string) {
@@ -232,20 +267,12 @@ function isXmlUrl(raw: string) {
 function absoluteHttpUrl(raw: string, base: string) {
 	try {
 		const url = new URL(raw, base);
-		if (!["http:", "https:"].includes(url.protocol)) return;
+		if (url.protocol !== "http:" && url.protocol !== "https:") return;
 		if (url.username || url.password) return;
 		url.hash = "";
 		return url.href;
 	} catch {
 		return;
-	}
-}
-
-function sameOrigin(raw: string, origin: string) {
-	try {
-		return new URL(raw).origin === origin;
-	} catch {
-		return false;
 	}
 }
 

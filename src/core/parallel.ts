@@ -10,7 +10,7 @@ export async function awaitWithSignal<T>(
 ): Promise<T> {
 	if (!signal) return promise;
 	signal.throwIfAborted();
-	let rejectAbort: (reason?: unknown) => void = () => {};
+	let rejectAbort: (cause?: unknown) => void = () => {};
 	const aborted = new Promise<never>((_, reject) => {
 		rejectAbort = reject;
 	});
@@ -29,7 +29,8 @@ export async function runBounded<T, R>(
 	worker: (item: T) => Promise<R>,
 ): Promise<R[]> {
 	const queue = items.map((item, index) => ({ item, index }));
-	const results: R[] = new Array(items.length);
+	const results: R[] = [];
+	results.length = items.length;
 	const activeByKey = new Map<string, number>();
 	const waiters: Array<() => void> = [];
 	let failure: unknown;

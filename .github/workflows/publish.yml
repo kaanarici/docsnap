@@ -14,13 +14,23 @@ jobs:
     outputs:
       version: ${{ steps.package.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.3.11
+          bun-version: 1.3.14
       - run: bun ci
       - run: bun run check
       - run: bun run publish:dry
+      - name: Smoke packed CLI
+        run: |
+          ARCHIVE_DIR=$(mktemp -d)
+          INSTALL_DIR=$(mktemp -d)
+          ARCHIVE="$ARCHIVE_DIR/docsnap.tgz"
+          bun pm pack --filename "$ARCHIVE" --quiet
+          cd "$INSTALL_DIR"
+          bun add "$ARCHIVE"
+          ./node_modules/.bin/docsnap --version
+          ./node_modules/.bin/docsnap --help >/dev/null
       - name: Verify release identity
         id: package
         run: |
@@ -44,7 +54,7 @@ jobs:
         run: |
           NAME="${{ steps.package.outputs.name }}"
           VERSION="${{ steps.package.outputs.version }}"
-          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+          if bun pm view "$NAME@$VERSION" version >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "$NAME@$VERSION already exists on npm"
           else
@@ -68,9 +78,9 @@ jobs:
           NAME="${{ steps.package.outputs.name }}"
           VERSION="${{ steps.package.outputs.version }}"
           for _ in 1 2 3 4 5 6; do
-            PUBLISHED=$(npm view "$NAME@$VERSION" version 2>/dev/null || true)
-            LATEST=$(npm view "$NAME" dist-tags.latest 2>/dev/null || true)
-            GIT_HEAD=$(npm view "$NAME@$VERSION" gitHead 2>/dev/null || true)
+            PUBLISHED=$(bun pm view "$NAME@$VERSION" version 2>/dev/null || true)
+            LATEST=$(bun pm view "$NAME" dist-tags.latest 2>/dev/null || true)
+            GIT_HEAD=$(bun pm view "$NAME@$VERSION" gitHead 2>/dev/null || true)
             if test "$PUBLISHED" = "$VERSION" && \
               test "$LATEST" = "$VERSION" && \
               test "$GIT_HEAD" = "$GITHUB_SHA"; then

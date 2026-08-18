@@ -20,13 +20,13 @@ export function shouldRetry(status: number, attempt: number): boolean {
 	return attempt < 2 && (status === 429 || status >= 500);
 }
 
-export function isRetryableFetchError(error: unknown): boolean {
+export function isRetryableFetchError(cause: unknown): boolean {
 	return (
-		error instanceof Error &&
-		!isTimeoutError(error) &&
-		!refusedErrorPattern.test(error.message) &&
-		!isTooLargeError(error.message) &&
-		!isUnsafeUrlError(error.message)
+		cause instanceof Error &&
+		!isTimeoutError(cause) &&
+		!refusedErrorPattern.test(cause.message) &&
+		!isTooLargeError(cause.message) &&
+		!isUnsafeUrlError(cause.message)
 	);
 }
 
@@ -38,9 +38,9 @@ export function isUnsafeUrlError(error: string): boolean {
 	return unsafeUrlErrorPattern.test(error);
 }
 
-function isTimeoutError(error: unknown) {
+function isTimeoutError(cause: unknown) {
 	return (
-		error instanceof Error &&
-		/timed out|timeout/i.test(`${error.name} ${error.message}`)
+		cause instanceof Error &&
+		/timed out|timeout/i.test(`${cause.name} ${cause.message}`)
 	);
 }

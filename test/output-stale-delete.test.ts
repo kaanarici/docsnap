@@ -1,8 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { snapshotStats } from "../src/core/snapshot.ts";
 import type { PriorPage, PriorState } from "../src/output/prior.ts";
-import { removeStalePages } from "../src/output/writer.ts";
+import {
+	commitStagedOutput,
+	discardStagedOutput,
+	stagePages,
+	stageStalePages,
+} from "../src/output/writer.ts";
+import { buildSummary } from "../src/report/summary.ts";
 import { tempDir, testConfig, testPage } from "./fixtures.ts";
 
 function priorFor(outputPath: string): PriorState {
@@ -17,12 +24,25 @@ function priorFor(outputPath: string): PriorState {
 	};
 }
 
+async function commitRemoval(prior: PriorState, root: string) {
+	const config = testConfig(root);
+	const staged = await stagePages([], config);
+	try {
+		await stageStalePages(staged, prior, config);
+		const summary = buildSummary([], [], config, [], 0, snapshotStats([]), 1);
+		await commitStagedOutput(staged, [], summary, config);
+	} finally {
+		await discardStagedOutput(staged);
+	}
+}
+
 describe("stale page deletion", () => {
 	test("removes stale pages contained by the real output root", async () => {
 		const root = await tempDir("stale-contained");
-		await writeFile(join(root, "stale.md"), "stale");
-		await removeStalePages(priorFor("stale.md"), [], testConfig(root));
-		await expect(readFile(join(root, "stale.md"), "utf8")).rejects.toThrow();
+		await mkdir(join(root, "old"));
+		await writeFile(join(root, "old/stale.md"), "stale");
+		await commitRemoval(priorFor("old/stale.md"), root);
+		await expect(readdir(join(root, "old"))).rejects.toThrow();
 	});
 
 	test("does not delete through a symlink outside the output root", async () => {
@@ -32,8 +52,27 @@ describe("stale page deletion", () => {
 		await writeFile(join(outside, "keep.md"), "keep");
 		await symlink(outside, join(root, "linked"));
 		await expect(
-			removeStalePages(priorFor("linked/keep.md"), [], testConfig(root)),
+			commitRemoval(priorFor("linked/keep.md"), root),
 		).rejects.toThrow("outside output directory");
 		expect(await readFile(join(outside, "keep.md"), "utf8")).toBe("keep");
+	});
+
+	test("unlinks a stale symlink without deleting its current target", async () => {
+		const root = await tempDir("stale-symlink");
+		await writeFile(join(root, "keep.md"), "keep");
+		await symlink("keep.md", join(root, "stale.md"));
+		await commitRemoval(priorFor("stale.md"), root);
+		expect(await readFile(join(root, "keep.md"), "utf8")).toBe("keep");
+		await expect(readFile(join(root, "stale.md"), "utf8")).rejects.toThrow();
+	});
+
+	test("restores stale pages when the metadata commit fails", async () => {
+		const root = await tempDir("stale-rollback");
+		await writeFile(join(root, "stale.md"), "stale");
+		await mkdir(join(root, "manifest.jsonl"));
+		await expect(commitRemoval(priorFor("stale.md"), root)).rejects.toThrow(
+			"non-file output",
+		);
+		expect(await readFile(join(root, "stale.md"), "utf8")).toBe("stale");
 	});
 });

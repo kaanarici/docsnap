@@ -1,4 +1,4 @@
-import { parseHTML } from "linkedom";
+import { isJsonString, type JsonValue, parseJsonValue } from "../core/json.ts";
 import { escapeRegExp } from "../core/text.ts";
 
 export type ScriptBlock = {
@@ -11,26 +11,12 @@ const nextFlightPush = "self.__next_f.push(";
 const maxNextFlightScanBytes = 4 * 1024 * 1024;
 const maxNextFlightChunks = 4_096;
 
-export function scriptBlocks(html: string): ScriptBlock[] {
-	const { document } = parseHTML(html);
+export function scriptBlocks(document: Document): ScriptBlock[] {
 	return Array.from(document.querySelectorAll("script")).map((script) => ({
 		id: script.getAttribute("id") ?? "",
 		type: script.getAttribute("type") ?? "",
 		body: script.textContent ?? "",
 	}));
-}
-
-export function htmlTitle(html: string) {
-	const { document } = parseHTML(html);
-	return (
-		document.querySelector("h1")?.textContent?.trim() ||
-		document.querySelector("title")?.textContent?.trim() ||
-		document
-			.querySelector('meta[property="og:title"],meta[name="twitter:title"]')
-			?.getAttribute("content")
-			?.trim() ||
-		undefined
-	);
 }
 
 export function nextFlightChunks(html: string): string[] {
@@ -47,14 +33,14 @@ export function nextFlightChunks(html: string): string[] {
 			start + maxNextFlightScanBytes - scanned,
 		);
 		const argument = balancedExpression(html, start, scanEnd);
-		scanned += Math.max(0, argument.end - start);
+		scanned += argument.end - start;
 		cursor = Math.max(argument.end, start + 1);
 		chunkCount++;
 		if (!argument.value) continue;
 		const parsed = parseJson(argument.value);
 		if (Array.isArray(parsed)) {
 			for (const item of parsed) {
-				if (typeof item === "string") chunks.push(item);
+				if (isJsonString(item)) chunks.push(item);
 			}
 			continue;
 		}
@@ -64,11 +50,9 @@ export function nextFlightChunks(html: string): string[] {
 }
 
 export function assignedExpression(body: string, name: string) {
-	const pattern = new RegExp(
-		`(?:window\\.)?${escapeRegExp(name)}\\s*=\\s*`,
-		"g",
+	const match = new RegExp(`(?:window\\.)?${escapeRegExp(name)}\\s*=\\s*`).exec(
+		body,
 	);
-	const match = pattern.exec(body);
 	if (!match) return undefined;
 	return balancedExpression(body, match.index + match[0].length).value;
 }
@@ -83,21 +67,19 @@ export function parseJsonExpression(expression: string) {
 	return parseJson(decodeStringLiteral(jsonParse[1]!));
 }
 
-export function parseJson(value: string): unknown {
+export function parseJson(value: string): JsonValue | undefined {
 	try {
-		return JSON.parse(value.trim());
+		return parseJsonValue(value.trim());
 	} catch {
 		return undefined;
 	}
 }
 
-export function stringLiterals(input: string): string[] {
-	const out: string[] = [];
+export function* stringLiterals(input: string) {
 	for (const match of input.matchAll(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g)) {
 		const decoded = decodeStringLiteral(match[0]);
-		if (decoded) out.push(decoded);
+		if (decoded) yield decoded;
 	}
-	return out;
 }
 
 export function decodeLooseEscapes(value: string) {
@@ -118,29 +100,24 @@ export function decodeEntities(value: string) {
 		/&(?:#x([0-9a-f]+)|#([0-9]+)|nbsp|amp|lt|gt|quot|apos);/gi,
 		(entity, hex: string | undefined, decimal: string | undefined) => {
 			if (hex || decimal) {
-				return entityFromCode(
-					Number.parseInt(hex ?? decimal ?? "", hex ? 16 : 10),
-				);
+				const code = Number.parseInt(hex ?? decimal ?? "", hex ? 16 : 10);
+				return Number.isInteger(code) && code >= 0 && code <= 0x10ffff
+					? String.fromCodePoint(code)
+					: "";
 			}
-			return namedEntities[entity.toLowerCase()] ?? entity;
+			return namedEntities.get(entity.toLowerCase()) ?? entity;
 		},
 	);
 }
 
-function entityFromCode(code: number) {
-	return Number.isInteger(code) && code >= 0 && code <= 0x10ffff
-		? String.fromCodePoint(code)
-		: "";
-}
-
-const namedEntities: Record<string, string> = {
-	"&nbsp;": " ",
-	"&amp;": "&",
-	"&lt;": "<",
-	"&gt;": ">",
-	"&quot;": '"',
-	"&apos;": "'",
-};
+const namedEntities = new Map([
+	["&nbsp;", " "],
+	["&amp;", "&"],
+	["&lt;", "<"],
+	["&gt;", ">"],
+	["&quot;", '"'],
+	["&apos;", "'"],
+]);
 
 type BalancedExpression = {
 	value?: string;
@@ -154,14 +131,8 @@ export function balancedExpression(
 ): BalancedExpression {
 	const limit = Math.min(input.length, Math.max(start, maxEnd));
 	const opening = input[start];
-	const closing =
-		opening === "{"
-			? "}"
-			: opening === "["
-				? "]"
-				: opening === "("
-					? ")"
-					: undefined;
+	const pairIndex = opening ? "{[(".indexOf(opening) : -1;
+	const closing = pairIndex < 0 ? undefined : "}])"[pairIndex];
 	if (!closing) return untilSemicolon(input, start, limit);
 	let depth = 0;
 	let quote = "";
@@ -202,9 +173,11 @@ function untilSemicolon(input: string, start: number, maxEnd: number) {
 
 function decodeStringLiteral(literal: string) {
 	try {
-		if (literal.startsWith('"')) return JSON.parse(literal);
-		const body = literal.slice(1, -1).replace(/\\'/g, "'");
-		return JSON.parse(`"${body.replace(/"/g, '\\"')}"`);
+		const json = literal.startsWith('"')
+			? literal
+			: `"${literal.slice(1, -1).replace(/\\'/g, "'").replace(/"/g, '\\"')}"`;
+		const parsed = parseJsonValue(json);
+		return isJsonString(parsed) ? parsed : "";
 	} catch {
 		return "";
 	}

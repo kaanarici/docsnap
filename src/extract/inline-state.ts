@@ -1,23 +1,20 @@
+import { isJsonObject, isJsonString, type JsonValue } from "../core/json.ts";
 import { uniqueByWhitespace, whitespaceKey, wordCount } from "../core/text.ts";
 import type { InlineStateSource } from "../core/types.ts";
 import {
 	assignedExpression,
 	decodeLooseEscapes,
-	htmlTitle,
 	nextFlightChunks,
 	parseJson,
 	parseJsonExpression,
 	type ScriptBlock,
-	scriptBlocks,
 	stringLiterals,
 } from "./inline-state-scan.ts";
 import { cleanInlineText, looksLikeTailwind } from "./inline-state-text.ts";
 
-type TextKind = "heading" | "paragraph";
-
 type TextCandidate = {
 	text: string;
-	kind: TextKind;
+	kind: "heading" | "paragraph";
 	weight: number;
 };
 
@@ -26,20 +23,6 @@ type ExtractionCandidate = {
 	source: InlineStateSource;
 	words: number;
 	weight: number;
-};
-
-type StructuredObject = Record<string, unknown> & {
-	mainEntity?: unknown;
-	step?: unknown;
-};
-
-type QuestionObject = Record<string, unknown> & {
-	acceptedAnswer?: unknown;
-	name?: unknown;
-};
-
-type AnswerObject = Record<string, unknown> & {
-	text?: unknown;
 };
 
 const maxWalkNodes = 8_000;
@@ -66,14 +49,15 @@ const proseKeys = new Set([
 export function extractInlineState(
 	html: string,
 	url: string,
+	prepared: { scripts: ScriptBlock[]; title: string | undefined },
 ): { markdown: string; source: InlineStateSource } | undefined {
-	const scripts = scriptBlocks(html);
-	const title = htmlTitle(html) ?? titleFromUrl(url);
+	const scripts = prepared.scripts;
+	const title = prepared.title ?? titleFromUrl(url);
 	const candidates = [
-		nextDataCandidate(scripts, title),
+		jsonScriptCandidate(scripts, title, "__NEXT_DATA__", "next-data"),
 		rscCandidate(html, title),
 		assignmentCandidate(scripts, title, "nuxt", ["__NUXT__"]),
-		nuxtDataCandidate(scripts, title),
+		jsonScriptCandidate(scripts, title, "__NUXT_DATA__", "nuxt"),
 		assignmentCandidate(scripts, title, "remix", ["__remixContext"]),
 		assignmentCandidate(scripts, title, "redux", [
 			"__PRELOADED_STATE__",
@@ -89,12 +73,6 @@ export function extractInlineState(
 	return { markdown: best.markdown, source: best.source };
 }
 
-function nextDataCandidate(scripts: ScriptBlock[], title: string | undefined) {
-	const script = scripts.find((item) => item.id === "__NEXT_DATA__");
-	if (!script) return undefined;
-	return parsedJsonCandidate("next-data", title, script.body);
-}
-
 function rscCandidate(html: string, title: string | undefined) {
 	const payload = nextFlightChunks(html).join("");
 	if (!payload) return undefined;
@@ -103,12 +81,6 @@ function rscCandidate(html: string, title: string | undefined) {
 		addReadable(texts, value, "", "rsc");
 	}
 	return assembleCandidate("rsc", title, texts);
-}
-
-function nuxtDataCandidate(scripts: ScriptBlock[], title: string | undefined) {
-	const script = scripts.find((item) => item.id === "__NUXT_DATA__");
-	if (!script) return undefined;
-	return parsedJsonCandidate("nuxt", title, script.body);
 }
 
 function assignmentCandidate(
@@ -160,17 +132,20 @@ function genericJsonCandidate(
 			continue;
 		}
 		const parsed = parseJson(script.body);
-		if (parsed !== undefined) collectValue(parsed, texts, [], { nodes: 0 });
+		if (parsed !== undefined) collectValue(parsed, texts);
 	}
 	return assembleCandidate("json", title, texts);
 }
 
-function parsedJsonCandidate(
-	source: InlineStateSource,
+function jsonScriptCandidate(
+	scripts: ScriptBlock[],
 	title: string | undefined,
-	body: string,
+	id: string,
+	source: InlineStateSource,
 ) {
-	const parsed = parseJson(body);
+	const script = scripts.find((item) => item.id === id);
+	if (!script) return undefined;
+	const parsed = parseJson(script.body);
 	return parsed === undefined
 		? undefined
 		: objectCandidate(source, title, parsed);
@@ -179,27 +154,25 @@ function parsedJsonCandidate(
 function objectCandidate(
 	source: InlineStateSource,
 	title: string | undefined,
-	value: unknown,
+	value: JsonValue,
 ) {
 	const texts: TextCandidate[] = [];
-	collectValue(value, texts, [], { nodes: 0 });
+	collectValue(value, texts);
 	return assembleCandidate(source, title, texts);
 }
 
-function collectStructuredData(value: unknown, out: TextCandidate[]): void {
+function collectStructuredData(value: JsonValue, out: TextCandidate[]): void {
 	const items = Array.isArray(value) ? value : [value];
 	for (const item of items) {
-		if (!item || typeof item !== "object") continue;
-		const graph = Array.isArray((item as Record<string, unknown>)["@graph"])
-			? ((item as Record<string, unknown>)["@graph"] as unknown[])
-			: [item];
+		if (!isJsonObject(item)) continue;
+		const graph = Array.isArray(item["@graph"]) ? item["@graph"] : [item];
 		for (const entry of graph) collectStructuredEntry(entry, out);
 	}
 }
 
-function collectStructuredEntry(value: unknown, out: TextCandidate[]) {
-	if (!value || typeof value !== "object") return;
-	const object = value as StructuredObject;
+function collectStructuredEntry(value: JsonValue, out: TextCandidate[]) {
+	if (!isJsonObject(value)) return;
+	const object = value;
 	if (!structuredType(object["@type"])) return;
 	for (const key of [
 		"headline",
@@ -209,41 +182,37 @@ function collectStructuredEntry(value: unknown, out: TextCandidate[]) {
 		"text",
 	]) {
 		const item = object[key];
-		if (typeof item === "string") addReadable(out, item, key, "ld-json");
+		if (isJsonString(item)) addReadable(out, item, key, "ld-json");
 	}
-	const entities = arrayValue(object.mainEntity);
-	for (const entity of entities) {
-		if (!entity || typeof entity !== "object") continue;
-		const question = entity as QuestionObject;
-		if (typeof question.name === "string")
-			addReadable(out, question.name, "question", "ld-json");
-		const answer = question.acceptedAnswer;
-		if (answer && typeof answer === "object") {
-			const text = (answer as AnswerObject).text;
-			if (typeof text === "string") addReadable(out, text, "answer", "ld-json");
+	for (const entity of arrayValue(object["mainEntity"])) {
+		if (!isJsonObject(entity)) continue;
+		if (isJsonString(entity["name"]))
+			addReadable(out, entity["name"], "question", "ld-json");
+		const answer = entity["acceptedAnswer"];
+		if (isJsonObject(answer)) {
+			if (isJsonString(answer["text"]))
+				addReadable(out, answer["text"], "answer", "ld-json");
 		}
 	}
-	for (const step of arrayValue(object.step)) {
-		if (typeof step === "string") addReadable(out, step, "text", "ld-json");
-		else if (step && typeof step === "object") {
-			const stepObject = step as Record<string, unknown>;
+	for (const step of arrayValue(object["step"])) {
+		if (isJsonString(step)) addReadable(out, step, "text", "ld-json");
+		else if (isJsonObject(step)) {
 			for (const key of ["name", "text"]) {
-				if (typeof stepObject[key] === "string")
-					addReadable(out, stepObject[key] as string, key, "ld-json");
+				if (isJsonString(step[key]))
+					addReadable(out, step[key], key, "ld-json");
 			}
 		}
 	}
 }
 
 function collectValue(
-	value: unknown,
+	value: JsonValue,
 	out: TextCandidate[],
-	path: string[],
-	state: { nodes: number },
+	key = "",
+	state = { nodes: 0 },
 ): void {
 	if (state.nodes++ > maxWalkNodes) return;
-	if (typeof value === "string") {
-		const key = path.at(-1) ?? "";
+	if (isJsonString(value)) {
 		if (value.length > 2_000) {
 			for (const item of stringLiterals(decodeLooseEscapes(value))) {
 				addReadable(out, item, key, "json");
@@ -253,13 +222,13 @@ function collectValue(
 		return;
 	}
 	if (Array.isArray(value)) {
-		for (const item of value) collectValue(item, out, path, state);
+		for (const item of value) collectValue(item, out, key, state);
 		return;
 	}
-	if (!value || typeof value !== "object") return;
-	for (const [key, item] of Object.entries(value)) {
-		if (skipKey(key)) continue;
-		collectValue(item, out, [...path, key], state);
+	if (!isJsonObject(value)) return;
+	for (const [childKey, item] of Object.entries(value)) {
+		if (skipKey(childKey)) continue;
+		collectValue(item, out, childKey, state);
 	}
 }
 
@@ -284,22 +253,35 @@ function assembleCandidate(
 	texts: TextCandidate[],
 ): ExtractionCandidate | undefined {
 	const normalizedTitle = title ? headingText(title) : undefined;
+	const normalizedTitleKey = normalizedTitle?.toLowerCase();
 	const seen = new Set<string>();
 	const body: TextCandidate[] = [];
+	const comparableByLead = new Map<string, ComparableText[]>();
+	let proseWords = 0;
+	let weight = 0;
 	for (const item of texts) {
 		const key = whitespaceKey(item.text).toLowerCase();
-		if (!key || key === normalizedTitle?.toLowerCase() || seen.has(key))
+		if (!key || key === normalizedTitleKey || seen.has(key)) continue;
+		const comparable = comparableText(item.text);
+		const matches = comparable
+			? comparableByLead.get(comparable.lead)
+			: undefined;
+		if (
+			comparable &&
+			matches?.some((existing) => nearDuplicate(comparable, existing))
+		)
 			continue;
 		seen.add(key);
 		body.push(item);
+		if (item.kind === "paragraph") proseWords += wordCount(item.text);
+		weight += item.weight;
+		if (comparable) {
+			const group = matches ?? [];
+			group.push(comparable);
+			comparableByLead.set(comparable.lead, group);
+		}
 		if (body.length >= maxParagraphs) break;
 	}
-	const proseWords = wordCount(
-		body
-			.filter((item) => item.kind === "paragraph")
-			.map((item) => item.text)
-			.join(" "),
-	);
 	if (proseWords < 30) return undefined;
 	const parts = [
 		normalizedTitle ? `# ${normalizedTitle}` : undefined,
@@ -313,8 +295,30 @@ function assembleCandidate(
 		markdown,
 		source,
 		words: proseWords,
-		weight: body.reduce((sum, item) => sum + item.weight, 0),
+		weight,
 	};
+}
+
+type ComparableText = {
+	lead: string;
+	words: Set<string>;
+};
+
+function nearDuplicate(left: ComparableText, right: ComparableText) {
+	const minimum = Math.min(left.words.size, right.words.size);
+	let overlap = 0;
+	for (const word of left.words) {
+		if (right.words.has(word) && ++overlap / minimum >= 0.55) return true;
+	}
+	return false;
+}
+
+function comparableText(text: string): ComparableText | undefined {
+	const words = (text.toLowerCase().match(/[a-z0-9]+/g) ?? []).map((word) =>
+		/\d/.test(word) ? "#" : word,
+	);
+	if (words.length < 10) return;
+	return { lead: words.slice(0, 5).join(" "), words: new Set(words) };
 }
 
 function readableText(
@@ -390,18 +394,17 @@ function skipKey(key: string) {
 	);
 }
 
-function structuredType(value: unknown) {
+function structuredType(value: JsonValue | undefined) {
 	const types = Array.isArray(value) ? value : [value];
 	return types.some(
 		(type) =>
-			typeof type === "string" &&
+			isJsonString(type) &&
 			/^(?:Article|TechArticle|WebPage|FAQPage|HowTo|Question|Answer)$/i.test(
 				type,
 			),
 	);
 }
 
-function arrayValue(value: unknown) {
-	if (Array.isArray(value)) return value;
-	return value === undefined ? [] : [value];
+function arrayValue(value: JsonValue | undefined): JsonValue[] {
+	return value === undefined ? [] : Array.isArray(value) ? value : [value];
 }

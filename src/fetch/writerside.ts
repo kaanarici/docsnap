@@ -1,8 +1,16 @@
+import {
+	isJsonObject,
+	isJsonString,
+	type JsonValue,
+	parseJsonValue,
+} from "../core/json.ts";
 import { awaitWithSignal } from "../core/parallel.ts";
 import type { PipelineConfig } from "../core/types.ts";
+import { maxPublicUrlChars } from "../security/url.ts";
 import { requestPublicHttp } from "./transport.ts";
 
 type RequestHeaders = { accept: string; "user-agent": string; cookie?: string };
+const maxTopicNodes = 20_000;
 
 export async function withWritersideTopic(
 	html: string,
@@ -24,21 +32,27 @@ export async function withWritersideTopic(
 		return html;
 	signal?.throwIfAborted();
 	try {
+		const remainingBytes = config.maxBytes - Buffer.byteLength(html);
+		if (remainingBytes <= 0) return html;
 		const cookie = headers.cookie;
+		const requestHeaders: RequestHeaders = {
+			accept: "application/json,text/plain;q=0.9,*/*;q=0.8",
+			"user-agent": headers["user-agent"],
+		};
+		if (cookie) requestHeaders.cookie = cookie;
 		const response = await requestPublicHttp(
 			topicUrl,
-			{
-				accept: "application/json,text/plain;q=0.9,*/*;q=0.8",
-				"user-agent": headers["user-agent"],
-				...(cookie ? { cookie } : {}),
-			},
+			requestHeaders,
 			config,
-			signal ? { signal } : undefined,
+			signal
+				? { signal, maxBytes: remainingBytes }
+				: { maxBytes: remainingBytes },
 		);
 		if (response.status < 200 || response.status > 299) return html;
 		const topic = new TextDecoder().decode(response.body).trim();
 		if (!topic) return html;
-		return `${html}\n${writersideNav(topic, base)}<script type="application/json" id="__DOCSNAP_WRITERSIDE_TOPIC__">${safeScriptJson(topic)}</script>`;
+		const enriched = `${html}\n${writersideNav(topic, base)}<script type="application/json" id="__DOCSNAP_WRITERSIDE_TOPIC__">${safeScriptJson(topic)}</script>`;
+		return Buffer.byteLength(enriched) <= config.maxBytes ? enriched : html;
 	} catch {
 		return html;
 	}
@@ -77,34 +91,45 @@ function writersideNav(topic: string, base: string): string {
 }
 
 function writersideLinks(topic: string, base: string): string[] {
-	let json: unknown;
+	let json: JsonValue;
 	try {
-		json = JSON.parse(topic);
+		json = parseJsonValue(topic);
 	} catch {
 		return [];
 	}
 	const origin = new URL(base).origin;
 	const out = new Set<string>();
-	const visit = (value: unknown) => {
+	const pending: JsonValue[] = [json];
+	let visited = 0;
+	while (pending.length && visited++ < maxTopicNodes && out.size < 200) {
+		const value = pending.pop()!;
 		if (Array.isArray(value)) {
-			for (const item of value) visit(item);
-			return;
+			const count = Math.min(
+				value.length,
+				maxTopicNodes - visited - pending.length,
+			);
+			for (let index = count - 1; index >= 0; index--) {
+				pending.push(value[index]!);
+			}
+			continue;
 		}
-		if (!value || typeof value !== "object") return;
-		const record = value as { url?: unknown } & Record<string, unknown>;
-		if (typeof record.url === "string") {
+		if (!isJsonObject(value)) continue;
+		const record = value;
+		if (isJsonString(record["url"])) {
 			try {
-				const url = new URL(record.url, base);
-				if (url.origin === origin) {
+				const url = new URL(record["url"], base);
+				if (url.origin === origin && url.href.length <= maxPublicUrlChars) {
 					url.hash = "";
 					out.add(url.href);
 				}
 			} catch {}
 		}
-		for (const item of Object.values(record)) visit(item);
-	};
-	visit(json);
-	return [...out].slice(0, 200);
+		for (const key in record) {
+			if (pending.length + visited >= maxTopicNodes) break;
+			pending.push(record[key]!);
+		}
+	}
+	return [...out];
 }
 
 function escapeHtml(value: string): string {

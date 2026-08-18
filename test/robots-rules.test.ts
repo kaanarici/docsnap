@@ -36,4 +36,45 @@ describe("robots rules", () => {
 		);
 		expect(robots.allowed(`${origin}/same`)).toBe(true);
 	});
+
+	test("normalizes percent-encoded octets without treating encoded separators as slashes", () => {
+		const robots = parseRobots(
+			[
+				"User-agent: *",
+				"Disallow: /private",
+				"Disallow: /item/a%2Fb",
+				"Disallow: /caf%C3%A9",
+			].join("\n"),
+			origin,
+		);
+		expect(robots.allowed(`${origin}/pr%69vate`)).toBe(false);
+		expect(robots.allowed(`${origin}/item/a%2fb`)).toBe(false);
+		expect(robots.allowed(`${origin}/item/a/b`)).toBe(true);
+		expect(robots.allowed(`${origin}/caf%C3%A9`)).toBe(false);
+	});
+
+	test.each([
+		[
+			"rule budget",
+			[
+				"User-agent: *",
+				...Array.from({ length: 6_000 }, (_, i) => `Disallow: /${i}`),
+			].join("\n"),
+		],
+		[
+			"line budget",
+			`${"#\n".repeat(100_000)}User-agent: *\nDisallow: /private\n`,
+		],
+		[
+			"user-agent budget",
+			[
+				...Array.from({ length: 1_000 }, (_, i) => `User-agent: bot-${i}`),
+				"User-agent: docsnap",
+				"Disallow: /private",
+			].join("\n"),
+		],
+	])("fails closed above the %s", (_, body) => {
+		const robots = parseRobots(body, origin);
+		expect(robots.allowed(`${origin}/otherwise-public`)).toBe(false);
+	});
 });

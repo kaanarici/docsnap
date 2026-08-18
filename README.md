@@ -1,8 +1,8 @@
 # docsnap
 
-CLI that compiles public sites into a hash-verified local Markdown corpus agents and humans can grep.
+CLI that maps and compiles public sites into a hash-verified local Markdown corpus agents and humans can grep.
 
-docsnap uses static fetches, `llms.txt`, page links, sitemaps, RSS/Atom feeds, `rel=next`, scoped crawl, Markdown alternates, JS asset text mining, and inline-state extraction. It does not launch a browser and has no `--render` mode.
+docsnap discovers pages through `llms.txt`, links, sitemaps, feeds, pagination, and scoped crawl. It captures readable HTML, Markdown, text, office documents, EPUB, CSV, and text-based PDFs locally; client-rendered app shells use an isolated local Chrome renderer with a bounded public-GET relay.
 
 ```bash
 bunx docsnap https://react.dev/reference -m 8 --clean
@@ -17,7 +17,7 @@ docsnap/react-dev-reference/
   ...
 ```
 
-docsnap works on public sites with readable HTML, `llms.txt`, sitemaps, regular links, extractable inline state, or recoverable referenced JS payloads.
+`docsnap map` returns URLs without writing or extracting a corpus. Markdown preserves content links; `manifest.jsonl` adds bounded link/media indexes with explicit counts and truncation flags.
 
 ## Install
 
@@ -29,6 +29,7 @@ bun add -g docsnap
 
 ```text
 docsnap <url> [flags]
+docsnap map <url> [flags]
 docsnap fetch <url> [question] [flags]
 docsnap refresh <corpus-dir> [flags]
 docsnap list [root=./docsnap] [flags]
@@ -40,6 +41,8 @@ Run `docsnap --help` or `docsnap <command> --help` for flags.
 
 ```bash
 docsnap https://react.dev/reference
+docsnap https://example.com/architecture.pdf
+docsnap map https://react.dev -m 100
 docsnap https://react.dev/reference/react/useEffect
 docsnap fetch https://react.dev/reference/react/useEffect "cleanup function"
 docsnap https://react.dev/reference/react/useEffect --site -m 20
@@ -53,7 +56,7 @@ docsnap https://docs.djangoproject.com/en/stable/
 
 ## Notes
 
-Specific page URLs auto-capture as one page unless `--site` or `-m`/`--max` asks for site discovery. Use an absolute `--out` path for output outside the current directory. Successful `--json` results stay data-only; failures report counts, `failureKind`, and `error` fields.
+Specific page and document URLs auto-capture as one Markdown file unless `--site` or `-m`/`--max` asks for site discovery. Document conversion is local and supports Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and text-based PDF files. Scanned, image-only, encrypted, malformed, and oversized documents fail explicitly rather than uploading content or returning empty Markdown. Use an absolute `--out` path for output outside the current directory. Successful `--json` results stay data-only; failures report counts, `failureKind`, and `error` fields.
 
 `docsnap fetch <url> "question"` resolves a reusable local corpus, captures it if missing, and returns cited local Markdown context. Without `--out`, fetch checks `./docsnap` first. The default `--freshness auto` reuses recent corpora and refreshes stale ones; `reuse` never re-fetches an existing corpus, `refresh` re-checks the original seed, and `force` recaptures.
 
@@ -77,7 +80,7 @@ Agent config: run `docsnap` first, then `rg` the output corpus.
 ## Output
 
 - `manifest.jsonl`: one JSON record per retained attempt, including URLs, output paths, hashes, aliases, and failures when present
-- `summary.json`: machine-readable run record for status, URLs, seed state, counts, failures, quality warnings, redirects, hashes, timing, refresh, and cache
+- `summary.json`: machine-readable run record for status, URLs, seed state, counts, failures, quality warnings, redirects, hashes, timing, refresh, and cache. `written` is the number of successful pages retained in the corpus; on refresh, `refresh.pageWrites` and `refresh.skippedWrites` report actual page-file writes and unchanged files skipped.
 - Markdown files: readable page captures with source metadata
 
 Use `rg --files` when you need the file layout.
@@ -87,6 +90,8 @@ Captured page bodies are source content only. Failures and redirects stay in run
 ## Requirements
 
 - [Bun](https://bun.sh) runtime
+- Google Chrome for client-rendered pages. Static capture and mapping work without it; set `DOCSNAP_CHROME_PATH` for a non-default executable.
+- Local document conversion supports macOS x64/arm64, Linux x64/arm64 (glibc or musl), and Windows x64.
 
 ## License
 

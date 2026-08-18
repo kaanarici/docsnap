@@ -1,15 +1,14 @@
 import { createHash } from "node:crypto";
-import { cpus } from "node:os";
 import { validatePublicHttpUrl } from "../security/url.ts";
-import type { PipelineConfig } from "./types.ts";
+import type { PipelineConfig, RunSummary } from "./types.ts";
 import { canonicalUrlSearch, looksLikeSpecificContentUrl } from "./url.ts";
 
-const cpuCount = cpus().length;
-const defaultConcurrency = Math.min(64, Math.max(16, cpuCount * 6));
-const defaultPerOrigin = Math.min(defaultConcurrency, 8);
+const defaultConcurrency = 8;
+const maxUserAgentChars = 1024;
 export const defaultUserAgent =
 	"Mozilla/5.0 (compatible; docsnap; +https://npmjs.com/package/docsnap)";
 export const maxGeneratedCapturePages = 500;
+export const maxGeneratedMediaUrls = 100;
 const maxPathSlugLength = 96;
 
 export type ConfigInput = {
@@ -39,31 +38,93 @@ export function buildPipelineConfig(input: ConfigInput): PipelineConfig {
 	const unsafe = validatePublicHttpUrl(seedUrl);
 	if (unsafe) throw new Error(`Unsafe URL: ${unsafe}`);
 
-	const max = input.max ?? 50;
-	if (max < 1) throw new Error("--max must be at least 1");
-	const concurrency = input.concurrency ?? defaultConcurrency;
-	if (concurrency < 1) throw new Error("--concurrency must be at least 1");
-	const timeoutMs = input.timeoutMs ?? 10_000;
-	if (timeoutMs < 1) throw new Error("timeoutMs must be at least 1");
-	const maxBytes = input.maxBytes ?? 12 * 1024 * 1024;
-	if (maxBytes < 1) throw new Error("maxBytes must be at least 1");
+	const max = positiveInteger(
+		input.max ?? 50,
+		"--max",
+		maxGeneratedCapturePages,
+	);
+	const concurrency = positiveInteger(
+		input.concurrency ?? defaultConcurrency,
+		"--concurrency",
+	);
+	const timeoutMs = positiveInteger(input.timeoutMs ?? 10_000, "timeoutMs");
+	const maxBytes = positiveInteger(
+		input.maxBytes ?? 12 * 1024 * 1024,
+		"maxBytes",
+	);
 
-	return {
+	const userAgent = input.userAgent ?? defaultUserAgent;
+	if (
+		userAgent.length < 1 ||
+		userAgent.length > maxUserAgentChars ||
+		/[^\x20-\x7e\x80-\xff]/.test(userAgent)
+	) {
+		throw new Error(
+			`--user-agent must be 1 to ${maxUserAgentChars} printable characters`,
+		);
+	}
+
+	const config: PipelineConfig = {
 		seedUrl,
 		outDir: input.outDir ?? defaultOutDir(seedUrl),
 		max,
 		maxExplicit: input.maxExplicit ?? input.max !== undefined,
 		concurrency,
-		perOrigin: Math.min(concurrency, defaultPerOrigin),
+		perOrigin: Math.min(concurrency, defaultConcurrency),
 		clean: input.clean ?? false,
 		dryRun: input.dryRun ?? false,
 		pageOnly: autoPageOnly(seedUrl, input),
 		cache: input.dryRun ? false : (input.cache ?? true),
-		userAgent: input.userAgent ?? defaultUserAgent,
+		userAgent,
 		timeoutMs,
 		maxBytes,
-		...(input.topic?.trim() ? { topic: input.topic.trim() } : {}),
 	};
+	if (input.topic?.trim()) config.topic = input.topic.trim();
+	return config;
+}
+
+export function buildRefreshConfig(
+	prior: Pick<
+		RunSummary,
+		"seedUrl" | "max" | "maxAppliesTo" | "captureMode" | "userAgent"
+	>,
+	input: {
+		outDir: string;
+		max: number | undefined;
+		concurrency?: number | undefined;
+		cache: boolean;
+	},
+): PipelineConfig {
+	const config: ConfigInput = {
+		seedUrl: prior.seedUrl,
+		outDir: input.outDir,
+		max: input.max ?? prior.max,
+		maxExplicit: input.max !== undefined || prior.maxAppliesTo === "all",
+		pageOnly: prior.captureMode === "page",
+		userAgent: prior.userAgent,
+		cache: input.cache,
+	};
+	if (input.concurrency !== undefined) config.concurrency = input.concurrency;
+	return buildPipelineConfig(config);
+}
+
+function positiveInteger(
+	value: number,
+	name: string,
+	max = Number.MAX_SAFE_INTEGER,
+) {
+	if (!Number.isSafeInteger(value) || value < 1)
+		throw new Error(`${name} must be a positive integer`);
+	if (value > max) throw new Error(`${name} must be ${max} or fewer`);
+	return value;
+}
+
+export function discoveryAttemptLimit(config: PipelineConfig) {
+	return config.maxExplicit &&
+		!config.pageOnly &&
+		config.max < maxGeneratedCapturePages
+		? Math.min(maxGeneratedCapturePages, config.max * 2)
+		: config.max;
 }
 
 export function captureSelectionTerms(topic?: string) {
@@ -144,6 +205,6 @@ function slug(value: string) {
 }
 
 function parseUrl(value: string) {
-	if (/^https?:\/\//i.test(value)) return new URL(value);
+	if (/^[a-z][a-z0-9+.-]*:/i.test(value)) return new URL(value);
 	return new URL(`https://${value}`);
 }

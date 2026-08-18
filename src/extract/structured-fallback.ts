@@ -10,26 +10,19 @@ import {
 	actsLikeBlock,
 	collapseWhitespace,
 	countTextChars,
-	emptyStats,
 	imageMarkdown,
-	isCandidateRoot,
 	isElement,
 	isHeading,
 	isLinkDominatedContainer,
-	isPreferredRoot,
 	isThemeImageTwin,
-	linkDensity,
 	maxDirectChildScan,
 	maxListDepth,
 	maxListItems,
 	maxOutputChars,
-	maxRootFrames,
 	maxSerializeVisits,
-	type OutputState,
 	pushNodeChildren,
 	sanitizeText,
 	shouldSkipElement,
-	type TextStats,
 	tagName,
 	takeVisit,
 	textNode,
@@ -37,115 +30,56 @@ import {
 	voidTags,
 } from "./structured-fallback-shared.ts";
 
-type Candidate = TextStats & { element: Element; score: number };
-type ScanFrame = { node: Node; inAnchor: boolean; exit: boolean };
+type OutputState = { chars: number; truncated: boolean };
 
 export function structuredFallback(
 	document: Document,
 	baseUrl: string,
+	status?: { truncated: boolean },
 ): string {
 	const root = document.body ?? document.documentElement;
 	if (!root) return "";
 
-	const scan = scanRoot(root);
-	const chosen = scan.preferred?.element ?? scan.best?.element ?? root;
-	const stats = scan.stats.get(chosen) ?? emptyStats();
-	const maxDensity = rootLinkDensityLimit(chosen, stats.textChars);
-	if (stats.textChars < 40 || linkDensity(stats) > maxDensity) return "";
-
-	const markdown = serializeRoot(chosen, baseUrl).trim();
-	return wordCount(markdown) >= 3 ? markdown : "";
-}
-
-function scanRoot(root: Element) {
-	const stats = new WeakMap<Node, TextStats>();
-	const stack: ScanFrame[] = [{ node: root, inAnchor: false, exit: false }];
-	let frames = 1;
-	let best: Candidate | undefined;
-	let preferred: Candidate | undefined;
-
-	while (stack.length > 0 && frames <= maxRootFrames) {
-		const frame = stack.pop()!;
-		const node = frame.node;
-		if (node.nodeType === textNode) {
-			const textChars = countTextChars(node.textContent ?? "");
-			stats.set(node, {
-				textChars,
-				anchorChars: frame.inAnchor ? textChars : 0,
-			});
-			continue;
-		}
-		if (!isElement(node)) continue;
-		if (frame.exit) {
-			const total = sumChildStats(node, stats);
-			stats.set(node, total);
-			const preferredRoot = isPreferredRoot(node);
-			const maxDensity = rootLinkDensityLimit(node, total.textChars);
-			if (
-				total.textChars >= 80 &&
-				linkDensity(total) <= maxDensity &&
-				(isCandidateRoot(node) || preferredRoot)
-			) {
-				const candidate: Candidate = {
-					element: node,
-					score: total.textChars * (1 - linkDensity(total)),
-					...total,
-				};
-				if (preferredRoot) {
-					if (!preferred || candidate.score > preferred.score)
-						preferred = candidate;
-				} else if (!best || candidate.score > best.score) {
-					best = candidate;
-				}
-			}
-			continue;
-		}
-		if (node !== root && shouldSkipElement(node)) {
-			stats.set(node, emptyStats());
-			continue;
-		}
-		stack.push({ node, inAnchor: frame.inAnchor, exit: true });
-		frames++;
-		const children = node.childNodes;
-		const childInAnchor = frame.inAnchor || tagName(node) === "a";
-		for (let index = children.length - 1; index >= 0; index--) {
-			if (frames >= maxRootFrames) break;
-			const child = children[index];
-			if (!child) continue;
-			stack.push({ node: child, inAnchor: childInAnchor, exit: false });
-			frames++;
+	const candidates = Array.from(
+		document.querySelectorAll("main,[role=main],article"),
+	).filter((candidate) => !shouldSkipElement(candidate));
+	let best: { markdown: string; score: number; truncated: boolean } | undefined;
+	for (const candidate of candidates.length > 0 ? candidates : [root]) {
+		const serialized = serializeRoot(candidate, baseUrl);
+		const markdown = serialized.markdown.trim();
+		const stats = markdownStats(markdown);
+		const limit =
+			candidate === root ? 0.5 : markdown.length >= 2_000 ? 0.99 : 0.8;
+		const minText = /^```/m.test(markdown) ? 20 : 40;
+		const score = stats.text - stats.linked;
+		if (
+			stats.text >= minText &&
+			stats.linked / Math.max(1, stats.text) <= limit &&
+			wordCount(markdown) >= 3 &&
+			(!best || score > best.score)
+		) {
+			best = { markdown, score, truncated: serialized.truncated };
 		}
 	}
-
-	return {
-		...(best ? { best } : {}),
-		...(preferred ? { preferred } : {}),
-		stats,
-	};
+	if (status) status.truncated = best?.truncated ?? false;
+	return best?.markdown ?? "";
 }
 
-function rootLinkDensityLimit(element: Element, textChars: number) {
-	if (!isPreferredRoot(element)) return 0.5;
-	return textChars >= 2_000 && element.querySelector("h1") ? 0.99 : 0.8;
-}
-
-function sumChildStats(
-	element: Element,
-	stats: WeakMap<Node, TextStats>,
-): TextStats {
-	const total = emptyStats();
-	for (const child of element.childNodes) {
-		const childStats = stats.get(child);
-		if (!childStats) continue;
-		total.textChars += childStats.textChars;
-		total.anchorChars += childStats.anchorChars;
-	}
-	return total;
+function markdownStats(markdown: string) {
+	let linked = 0;
+	const text = markdown
+		.replace(/!\[[^\]]*]\([^)]+\)/g, "")
+		.replace(/\[([^\]]+)]\([^)]+\)/g, (_match, label) => {
+			linked += countTextChars(label);
+			return label;
+		})
+		.replace(/[#*_`>|~-]/g, "");
+	return { linked, text: countTextChars(text) };
 }
 
 function serializeRoot(root: Element, baseUrl: string) {
 	const blocks: string[] = [];
-	const output: OutputState = { chars: 0 };
+	const output: OutputState = { chars: 0, truncated: false };
 	const budget: VisitBudget = { visits: 0, maxVisits: maxSerializeVisits };
 	const stack: Node[] = [root];
 
@@ -169,62 +103,9 @@ function serializeRoot(root: Element, baseUrl: string) {
 		}
 
 		const tag = tagName(node);
-		if (isHeading(tag)) {
-			const text = inlineMarkdown(node, baseUrl, budget).trim();
-			appendBlock(blocks, `${"#".repeat(Number(tag[1]))} ${text}`, output);
-			continue;
-		}
-		if (tag === "p" || node.getAttribute("data-as") === "p") {
-			appendBlock(blocks, inlineMarkdown(node, baseUrl, budget), output);
-			continue;
-		}
-		if (tag === "pre") {
-			appendBlock(blocks, codeBlock(node), output);
-			continue;
-		}
-		const editorCode = codeEditorBlock(node);
-		if (editorCode) {
-			appendBlock(blocks, editorCode, output);
-			continue;
-		}
-		if (tag === "ul" || tag === "ol") {
-			appendBlock(
-				blocks,
-				renderList(node, tag === "ol", baseUrl, budget),
-				output,
-			);
-			continue;
-		}
-		if (tag === "li") {
-			appendBlock(
-				blocks,
-				inlineMarkdown(node, baseUrl, budget, { skipNestedLists: true }),
-				output,
-			);
-			continue;
-		}
-		if (tag === "table") {
-			appendBlock(blocks, renderTable(node, baseUrl, budget), output);
-			continue;
-		}
-		if (tag === "blockquote") {
-			appendBlock(
-				blocks,
-				quoteBlock(inlineMarkdown(node, baseUrl, budget)),
-				output,
-			);
-			continue;
-		}
-		if (tag === "hr") {
-			appendBlock(blocks, "---", output);
-			continue;
-		}
-		if (tag === "dl") {
-			appendBlock(blocks, renderDefinitionList(node, baseUrl, budget), output);
-			continue;
-		}
-		if (tag === "img") {
-			appendBlock(blocks, imageMarkdown(node, baseUrl), output);
+		const block = renderElement(node, tag, baseUrl, budget);
+		if (block !== undefined) {
+			appendBlock(blocks, block, output);
 			continue;
 		}
 		if (voidTags.has(tag)) continue;
@@ -235,7 +116,53 @@ function serializeRoot(root: Element, baseUrl: string) {
 		}
 	}
 
-	return dropStandaloneChromeBlocks(blocks).join("\n\n");
+	return {
+		markdown: dropStandaloneChromeBlocks(blocks).join("\n\n"),
+		truncated:
+			output.truncated ||
+			budget.truncated === true ||
+			budget.visits >= budget.maxVisits ||
+			stack.length > 0,
+	};
+}
+
+function renderElement(
+	element: Element,
+	tag: string,
+	baseUrl: string,
+	budget: VisitBudget,
+) {
+	if (isHeading(tag)) {
+		return `${"#".repeat(Number(tag[1]))} ${inlineMarkdown(element, baseUrl, budget).trim()}`;
+	}
+	const common = commonBlock(element, tag, baseUrl, budget);
+	if (common !== undefined) return common;
+	const editorCode = codeEditorBlock(element);
+	if (editorCode) return editorCode;
+	if (tag === "ul" || tag === "ol")
+		return renderList(element, tag === "ol", baseUrl, budget);
+	if (tag === "li")
+		return inlineMarkdown(element, baseUrl, budget, { skipNestedLists: true });
+	if (tag === "hr") return "---";
+	if (tag === "img") return imageMarkdown(element, baseUrl);
+	if (element.getAttribute("data-as") === "p")
+		return inlineMarkdown(element, baseUrl, budget);
+	return undefined;
+}
+
+function commonBlock(
+	element: Element,
+	tag: string,
+	baseUrl: string,
+	budget: VisitBudget,
+) {
+	if (tag === "p") return inlineMarkdown(element, baseUrl, budget);
+	if (tag === "pre") return codeBlock(element);
+	if (tag === "table") return renderTable(element, baseUrl, budget);
+	if (tag === "blockquote")
+		return quoteBlock(inlineMarkdown(element, baseUrl, budget));
+	if (tag === "dl") return renderDefinitionList(element, baseUrl, budget);
+	return undefined;
 }
 
 function isCodeEditorChrome(element: Element) {
@@ -399,18 +326,7 @@ function renderListItemContent(
 		}
 		const tag = tagName(child);
 		if (tag === "ul" || tag === "ol" || tag === "li") continue;
-		const block =
-			tag === "pre"
-				? codeBlock(child)
-				: tag === "p"
-					? inlineMarkdown(child, baseUrl, budget)
-					: tag === "table"
-						? renderTable(child, baseUrl, budget)
-						: tag === "blockquote"
-							? quoteBlock(inlineMarkdown(child, baseUrl, budget))
-							: tag === "dl"
-								? renderDefinitionList(child, baseUrl, budget)
-								: undefined;
+		const block = commonBlock(child, tag, baseUrl, budget);
 		if (block !== undefined) {
 			flushInline();
 			pushBlock(block);
@@ -439,8 +355,13 @@ function listItemLines(indent: string, marker: string, text: string) {
 
 function appendBlock(blocks: string[], block: string, output: OutputState) {
 	const clean = block.trim();
-	if (!clean || output.chars >= maxOutputChars) return;
+	if (!clean) return;
+	if (output.chars >= maxOutputChars) {
+		output.truncated = true;
+		return;
+	}
 	const available = maxOutputChars - output.chars;
+	if (clean.length > available) output.truncated = true;
 	if (clean.length > available && /^(?:```|\| )/.test(clean)) return;
 	const value =
 		clean.length > available ? clean.slice(0, available).trimEnd() : clean;

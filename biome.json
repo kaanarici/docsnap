@@ -5,6 +5,9 @@
 		"clientKind": "git",
 		"useIgnoreFile": true
 	},
+	"files": {
+		"includes": ["**", "!!tools/oxlint/anti-slop"]
+	},
 	"formatter": {
 		"enabled": true,
 		"indentStyle": "tab"
@@ -13,6 +16,9 @@
 		"enabled": true,
 		"rules": {
 			"recommended": true,
+			"complexity": {
+				"useLiteralKeys": "off"
+			},
 			"suspicious": {
 				"noConsole": "off"
 			},

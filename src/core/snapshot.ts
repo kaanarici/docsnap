@@ -6,16 +6,19 @@ type SnapshotFile = {
 	body: string;
 };
 
+export type SnapshotLeaf = {
+	hash: string;
+	bytes: number;
+};
+
 export type SnapshotStats = {
 	rootHash: string;
 	files: number;
 	bytes: number;
 };
 
-const encoder = new TextEncoder();
-
 export function byteLength(value: string): number {
-	return encoder.encode(value).byteLength;
+	return Buffer.byteLength(value);
 }
 
 export function hashContent(value: string): string {
@@ -23,13 +26,27 @@ export function hashContent(value: string): string {
 }
 
 export function snapshotStats(files: SnapshotFile[]): SnapshotStats {
-	let bytes = 0;
-	let level = files
-		.map((file) => {
-			bytes += byteLength(file.body);
-			return hashParts("leaf", file.path, hashContent(file.body));
-		})
-		.sort();
+	return snapshotStatsFromLeaves(
+		files.map((file) => snapshotLeaf(file.path, file.body)),
+	);
+}
+
+export function snapshotLeaf(
+	path: string,
+	body: string,
+	contentHash = hashContent(body),
+): SnapshotLeaf {
+	return {
+		hash: hashParts("leaf", path, contentHash),
+		bytes: byteLength(body),
+	};
+}
+
+export function snapshotStatsFromLeaves(
+	leaves: readonly SnapshotLeaf[],
+): SnapshotStats {
+	const bytes = leaves.reduce((total, leaf) => total + leaf.bytes, 0);
+	let level = leaves.map((leaf) => leaf.hash).sort();
 
 	if (level.length === 0)
 		return { rootHash: hashParts("root"), files: 0, bytes: 0 };
@@ -42,7 +59,11 @@ export function snapshotStats(files: SnapshotFile[]): SnapshotStats {
 		level = next;
 	}
 
-	return { rootHash: hashParts("root", level[0]!), files: files.length, bytes };
+	return {
+		rootHash: hashParts("root", level[0]!),
+		files: leaves.length,
+		bytes,
+	};
 }
 
 function hashParts(...parts: string[]): string {

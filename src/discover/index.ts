@@ -1,7 +1,10 @@
+import { discoveryAttemptLimit } from "../core/config.ts";
+import { candidateKey } from "../core/identity.ts";
 import type {
 	ConditionalRequest,
 	DiscoveredUrl,
 	DiscoveryResourceSeed,
+	FetchedUrl,
 	FetchResult,
 	PipelineConfig,
 } from "../core/types.ts";
@@ -11,33 +14,33 @@ import {
 	looksLikeSpecificContentUrl,
 	scopeFromFeedResource,
 } from "../core/url.ts";
-import { isLanguageSelector, looksLikeAppShell } from "../extract/app-shell.ts";
+import {
+	isLanguageSelector,
+	isRecoverableAppShell,
+} from "../extract/app-shell.ts";
 import {
 	type FetchUrlGate,
+	fetchMany,
 	fetchText,
 	preferredMarkdownAccept,
 } from "../fetch/fetcher.ts";
-import { emptyResourceResult, robotsBlockedResult } from "../fetch/result.ts";
-import {
-	canonicalOriginSeed,
-	disallowedSeedDiscovery,
-} from "./blocked-seed.ts";
+import { emptyResourceResult } from "../fetch/result.ts";
+import type { ChromiumRenderer } from "../render/chromium.ts";
 import {
 	discoverLlmsCorpus,
 	type LlmsCorpusOptions,
 	resourceAllowed,
-	robotsForOrigin,
 } from "./corpus.ts";
-import { discoverFeed, discoverFeedLinks, isFeedResponse } from "./feed.ts";
-import { discoverPageLinks } from "./nav.ts";
-import { type DiscoveryProbeInput, runProbes } from "./probes.ts";
-import { loadRobots, type Robots } from "./robots.ts";
+import { discoverFeed, isFeedResponse } from "./feed.ts";
 import {
-	pageOnlyDiscovery,
-	seedFirstCorpus,
-	seedFirstDiscovery,
-	seedInputUrl,
-} from "./seed.ts";
+	createDiscoveryFrontier,
+	type DiscoveryFrontier,
+	type DiscoveryFrontierInput,
+	staticDiscoveryFrontier,
+} from "./frontier.ts";
+import { discoverPageResources } from "./nav.ts";
+import { loadRobots } from "./robots.ts";
+import { pageOnlyDiscovery, seedFirstCorpus, seedInputUrl } from "./seed.ts";
 import {
 	chooseScope,
 	normalizeDiscoveryResourceUrl,
@@ -45,28 +48,262 @@ import {
 	scopeFromSeed,
 } from "./url.ts";
 
-export type DiscoveryRun = {
+type DiscoveryRun = {
 	urls: DiscoveredUrl[];
+	seedResource?: DiscoveryResourceSeed;
+	render?: DiscoveryRenderSummary;
+	complete?: boolean;
+	truncated?: boolean;
+};
+
+type DiscoveryRenderSummary = {
+	attempted: number;
+	rendered: number;
+	failed: number;
+	skipped: number;
+	truncated: boolean;
+	stopReason?: "budget" | "no_new_urls";
+	unavailable?: string;
+	errors?: Array<{
+		url: string;
+		kind: "timeout" | "render";
+		error: string;
+	}>;
+};
+
+export type DiscoverySession = {
+	frontier: DiscoveryFrontier;
+	allowResource?: FetchUrlGate;
 	seedResource?: DiscoveryResourceSeed;
 };
 
-export async function discoverRun(
+type RawDiscovery = DiscoveryRun | DiscoverySession;
+
+export async function discoverMap(
+	config: PipelineConfig,
+): Promise<DiscoveryRun> {
+	const attemptLimit = discoveryAttemptLimit(config);
+	const limit = config.max;
+	const session = await startDiscovery(config, undefined, attemptLimit);
+	const urls: DiscoveredUrl[] = [];
+	const seen = new Set<string>();
+	const scheduled = new Set<string>();
+	const render: DiscoveryRenderSummary = {
+		attempted: 0,
+		rendered: 0,
+		failed: 0,
+		skipped: 0,
+		truncated: false,
+	};
+	let renderer: ChromiumRenderer | undefined;
+	let renderDeadline: number | undefined;
+	const renderQueue: FetchedUrl[] = [];
+	const queuedRender = new Set<string>();
+	let slots = 0;
+	let pulled = 0;
+	let exhausted = false;
+	let renderMisses = 0;
+	try {
+		const pending: DiscoveredUrl[] = [];
+		const known = new Set<string>();
+		while (known.size < limit) {
+			const batch = await session.frontier.take(limit - known.size);
+			if (batch.length === 0) break;
+			pending.push(...batch);
+			for (const item of batch) {
+				if (!item.fetched || item.fetched.ok) {
+					known.add(candidateKey(item.fetched?.finalUrl ?? item.url));
+				}
+			}
+		}
+		const expand = session.allowResource !== undefined && known.size < limit;
+		while (slots < limit) {
+			const batchSize = Math.min(config.perOrigin, limit - slots);
+			const pulledBatch =
+				pending.length > 0
+					? pending.splice(0, batchSize)
+					: await session.frontier.take(batchSize);
+			if (pulledBatch.length === 0) {
+				const page =
+					!render.stopReason && !render.unavailable && renderQueue.shift();
+				if (page) {
+					renderDeadline ??=
+						performance.now() +
+						Math.min(120_000, Math.max(config.timeoutMs, limit * 1_500));
+					const rendered = render.rendered;
+					const queued = session.frontier.queued;
+					renderer = await renderDiscoveryShell(
+						page,
+						config,
+						render,
+						renderer,
+						renderDeadline,
+					);
+					if (render.rendered > rendered) {
+						session.frontier.observe(page.result);
+						renderMisses =
+							session.frontier.queued > queued ? 0 : renderMisses + 1;
+					} else renderMisses++;
+					if (render.unavailable || renderMisses >= 3 || render.stopReason) {
+						if (!render.unavailable) {
+							render.truncated = true;
+							render.stopReason ??= "no_new_urls";
+						}
+						render.skipped += renderQueue.length;
+						renderQueue.length = 0;
+					}
+					continue;
+				}
+				exhausted = true;
+				break;
+			}
+			pulled += pulledBatch.length;
+			const batch = pulledBatch.filter((item) => {
+				const key = candidateKey(item.url);
+				if (scheduled.has(key)) return false;
+				scheduled.add(key);
+				return true;
+			});
+			if (batch.length === 0) continue;
+			const fetched = expand
+				? await fetchMany(batch, config, undefined, session.allowResource)
+				: undefined;
+			if (fetched) {
+				for (const page of fetched) {
+					session.frontier.observe(page.result);
+					if (page.result.ok) {
+						scheduled.add(candidateKey(page.result.finalUrl));
+					}
+					if (
+						!page.result.ok ||
+						page.result.notModified ||
+						!normalizeUrl(page.result.finalUrl) ||
+						!isRecoverableAppShell(page.result.body)
+					)
+						continue;
+					const key = candidateKey(page.result.finalUrl);
+					if (queuedRender.has(key)) continue;
+					queuedRender.add(key);
+					renderQueue.push(page);
+				}
+			}
+			for (const [index, item] of batch.entries()) {
+				const result = fetched?.[index]?.result ?? item.fetched;
+				const keys = [
+					candidateKey(item.url),
+					...(result?.ok ? [candidateKey(result.finalUrl)] : []),
+				];
+				if (keys.some((key) => seen.has(key))) continue;
+				for (const key of keys) seen.add(key);
+				urls.push(
+					result && !result.ok
+						? { ...item, fetched: result }
+						: releaseSuccessfulFetch(item),
+				);
+				if (
+					(!result || result.ok) &&
+					(config.maxExplicit || item.source !== "llms")
+				) {
+					slots++;
+				}
+				if (slots >= limit) break;
+			}
+		}
+	} finally {
+		await renderer?.close();
+	}
+	const result: DiscoveryRun = {
+		urls,
+		truncated: session.frontier.truncated || render.truncated,
+		complete:
+			exhausted &&
+			pulled < attemptLimit &&
+			!session.frontier.truncated &&
+			urls.every((entry) => !entry.fetched || entry.fetched.ok) &&
+			render.failed === 0 &&
+			!render.truncated,
+	};
+	if (session.seedResource) result.seedResource = session.seedResource;
+	if (render.attempted || render.truncated) result.render = render;
+	return result;
+}
+
+async function renderDiscoveryShell(
+	page: FetchedUrl,
+	config: PipelineConfig,
+	summary: DiscoveryRenderSummary,
+	renderer: ChromiumRenderer | undefined,
+	deadline: number,
+) {
+	const remaining = deadline - performance.now();
+	if (remaining <= 0) {
+		summary.truncated = true;
+		summary.stopReason = "budget";
+		return renderer;
+	}
+	summary.attempted++;
+	if (!renderer) {
+		const opened = await import("../render/chromium.ts").then((module) =>
+			module.openChromiumRenderer(config),
+		);
+		if (!opened.ok) {
+			summary.unavailable = opened.error;
+			summary.failed++;
+			return;
+		}
+		renderer = opened.renderer;
+	}
+	const rendered = await renderer.renderPage(page.result, {
+		explicitSeed: page.wasSeed === true,
+		signal: AbortSignal.timeout(
+			Math.max(1, Math.min(config.timeoutMs, Math.ceil(remaining))),
+		),
+	});
+	summary.truncated ||= rendered.metrics.truncated;
+	if (rendered.ok && rendered.result.ok) {
+		page.result = rendered.result;
+		summary.rendered++;
+	} else {
+		const error = rendered.ok ? rendered.result.error : rendered.error;
+		summary.failed++;
+		summary.errors ??= [];
+		if (summary.errors.length < 5) {
+			summary.errors.push({
+				url: rendered.ok ? rendered.result.finalUrl : page.result.finalUrl,
+				kind: rendered.ok ? "render" : rendered.kind,
+				error: (error ?? "Client render failed").slice(0, 300),
+			});
+		}
+	}
+	return renderer;
+}
+
+export async function startDiscovery(
 	config: PipelineConfig,
 	pageConditional?: ConditionalRequest,
-): Promise<DiscoveryRun> {
-	const run = await discoverRawRun(config, pageConditional);
-	return { ...run, urls: seedFirstDiscovery(config, run.urls) };
+	attemptLimit = config.max,
+): Promise<DiscoverySession> {
+	const raw = await discoverRawRun(config, pageConditional, attemptLimit);
+	if ("frontier" in raw) return raw;
+	const session: DiscoverySession = {
+		frontier: staticDiscoveryFrontier(
+			raw.urls,
+			Boolean(raw.truncated) || raw.complete === false,
+		),
+	};
+	if (raw.seedResource) session.seedResource = raw.seedResource;
+	return session;
 }
 
 async function discoverRawRun(
 	config: PipelineConfig,
 	pageConditional?: ConditionalRequest,
-): Promise<DiscoveryRun> {
+	attemptLimit = config.max,
+): Promise<RawDiscovery> {
 	const inputSeed = seedInputUrl(config.seedUrl);
-	const inputUrl = new URL(inputSeed);
-	const seedRobots = await loadRobots(inputUrl.origin, config);
+	const seedRobots = await loadRobots(new URL(inputSeed).origin, config);
 
-	if (config.pageOnly)
+	if (config.pageOnly) {
 		return {
 			urls: await pageOnlyDiscovery(
 				config,
@@ -75,41 +312,44 @@ async function discoverRawRun(
 				pageConditional,
 			),
 		};
+	}
 
-	const robotsByOrigin: LlmsCorpusOptions["robotsByOrigin"] = new Map([
-		[inputUrl.origin, seedRobots],
-	]);
-	const llmsOptions: LlmsCorpusOptions = { cache: new Map(), robotsByOrigin };
-	const allowResource: FetchUrlGate = (url) =>
-		resourceAllowed(url, config, robotsByOrigin);
-
-	const blocked = await resolveBlockedSeed(
-		config,
-		inputSeed,
-		seedRobots,
-		llmsOptions,
-		allowResource,
-	);
-	if (blocked) return { urls: blocked };
+	const llmsOptions: LlmsCorpusOptions = { cache: new Map() };
 
 	const seedIsLlms = classifyDiscoveryResource(inputSeed)?.source === "llms";
+	if (seedIsLlms) {
+		llmsOptions.cache?.set(
+			inputSeed,
+			fetchText(inputSeed, config, preferredMarkdownAccept),
+		);
+	}
 	const overlapSeed =
 		!seedIsLlms && config.concurrency > 1 && config.perOrigin > 1;
 	const seedResponsePromise = overlapSeed
-		? fetchText(inputSeed, config, undefined, undefined, allowResource)
+		? fetchText(inputSeed, config)
 		: undefined;
-	const corpusConfig = overlapSeed
-		? {
-				...config,
-				concurrency: config.concurrency - 1,
-				perOrigin: config.perOrigin - 1,
-			}
-		: config;
-	const corpus = await resolveLlmsCorpus(corpusConfig, inputSeed, llmsOptions);
+	const corpus = await resolveLlmsCorpus(
+		config,
+		inputSeed,
+		overlapSeed
+			? {
+					...llmsOptions,
+					initialFetchLimit: Math.min(config.concurrency, config.perOrigin) - 1,
+				}
+			: llmsOptions,
+		attemptLimit,
+	);
 	if ("done" in corpus && seedIsLlms) {
 		const done = corpus.done.map((item) =>
 			item.url === inputSeed ? { ...item, wasSeed: true as const } : item,
 		);
+		if (done.length === 0) {
+			const response = await llmsOptions.cache?.get(inputSeed);
+			return {
+				urls: [await explicitLlmsSeedFailure(config, inputSeed, response)],
+				truncated: Boolean(llmsOptions.truncated),
+			};
+		}
 		const response = await llmsOptions.cache?.get(inputSeed);
 		const seedResource: DiscoveryResourceSeed = {
 			url: inputSeed,
@@ -119,51 +359,70 @@ async function discoverRawRun(
 			source: "llms",
 		};
 		return {
-			urls:
-				done.length > 0
-					? done
-					: [await explicitLlmsSeedFailure(config, inputSeed, allowResource)],
-			...(done.length > 0 ? { seedResource } : {}),
+			urls: done,
+			seedResource,
+			truncated: Boolean(llmsOptions.truncated),
 		};
 	}
 
 	const seedResponse = await (seedResponsePromise ??
-		fetchText(inputSeed, config, undefined, undefined, allowResource));
+		fetchText(inputSeed, config));
 	if ("done" in corpus) {
 		return {
 			urls: seedFirstCorpus(
-				{
-					url: inputSeed,
-					source: "seed",
-					wasSeed: true,
-					fetched: seedResponse,
-				},
+				seedEntry(
+					normalizeUrl(seedResponse.finalUrl) ?? inputSeed,
+					"seed",
+					seedResponse,
+				),
 				corpus.done,
 				config,
+				attemptLimit,
 			),
+			truncated: Boolean(llmsOptions.truncated),
 		};
 	}
 	if (!seedResponse.ok) {
-		return {
-			urls: [
-				{
-					url: inputSeed,
-					source: "seed",
-					wasSeed: true,
-					fetched: seedResponse,
-				},
-			],
-		};
+		return { urls: [seedEntry(inputSeed, "seed", seedResponse)] };
 	}
 
-	const feed = await resolveFeedSeed(
-		config,
-		inputSeed,
-		seedResponse,
-		robotsByOrigin,
-		allowResource,
-	);
-	if (feed) return feed;
+	if (isFeedResponse(seedResponse)) {
+		const feedSeed =
+			normalizeDiscoveryResourceUrl(seedResponse.finalUrl) ?? inputSeed;
+		const seedResource: DiscoveryResourceSeed = {
+			url: inputSeed,
+			finalUrl: feedSeed,
+			source: "feed",
+		};
+		const robots = await loadRobots(new URL(feedSeed).origin, config);
+		const feed = await discoverFeed(
+			feedSeed,
+			feedSeed,
+			scopeFromFeedResource(feedSeed),
+			config,
+			{
+				limit: attemptLimit,
+				response: seedResponse,
+				accept: robots.allowed,
+			},
+		);
+		if (feed.pages.length > 0) {
+			return { urls: feed.pages, seedResource, truncated: feed.truncated };
+		}
+		return {
+			urls: [
+				seedEntry(
+					feedSeed,
+					"feed",
+					emptyResourceResult(
+						seedResponse,
+						"feed resource did not list any in-scope pages",
+					),
+				),
+			],
+			seedResource,
+		};
+	}
 
 	const resolved = await resolveHtmlSeed(
 		config,
@@ -171,68 +430,31 @@ async function discoverRawRun(
 		seedResponse,
 		corpus.llmsOut,
 		llmsOptions,
-		robotsByOrigin,
+		attemptLimit,
 	);
-	if ("done" in resolved) return { urls: resolved.done };
-
-	return { urls: await runProbes(resolved.context) };
+	if ("done" in resolved) {
+		return { urls: resolved.done, truncated: Boolean(llmsOptions.truncated) };
+	}
+	return resolved;
 }
 
 async function explicitLlmsSeedFailure(
 	config: PipelineConfig,
 	inputSeed: string,
-	allowResource: FetchUrlGate | undefined,
+	seedResponse?: FetchResult,
 ): Promise<DiscoveredUrl> {
-	const response = await fetchText(
+	const response =
+		seedResponse ??
+		(await fetchText(inputSeed, config, preferredMarkdownAccept));
+	return seedEntry(
 		inputSeed,
-		config,
-		preferredMarkdownAccept,
-		undefined,
-		allowResource,
-	);
-	return {
-		url: inputSeed,
-		source: "llms",
-		wasSeed: true,
-		fetched: response.ok
+		"llms",
+		response.ok
 			? emptyResourceResult(
 					response,
 					"llms resource did not list any in-scope pages",
 				)
 			: response,
-	};
-}
-
-async function resolveBlockedSeed(
-	config: PipelineConfig,
-	inputSeed: string,
-	seedRobots: Robots,
-	llmsOptions: LlmsCorpusOptions,
-	allowResource: FetchUrlGate | undefined,
-): Promise<DiscoveredUrl[] | undefined> {
-	if (seedRobots.allowed(inputSeed)) return undefined;
-	if (seedRobots.unreachable) {
-		const { moved, failure } = await canonicalOriginSeed(
-			inputSeed,
-			config,
-			allowResource,
-		);
-		if (moved) return (await discoverRun({ ...config, seedUrl: moved })).urls;
-		return [
-			{
-				url: inputSeed,
-				source: "seed",
-				wasSeed: true,
-				fetched: failure ?? robotsBlockedResult(inputSeed),
-			},
-		];
-	}
-	return disallowedSeedDiscovery(
-		inputSeed,
-		seedRobots,
-		config,
-		llmsOptions,
-		async (nextConfig) => (await discoverRun(nextConfig)).urls,
 	);
 }
 
@@ -240,6 +462,7 @@ async function resolveLlmsCorpus(
 	config: PipelineConfig,
 	inputSeed: string,
 	llmsOptions: LlmsCorpusOptions,
+	attemptLimit: number,
 ): Promise<{ done: DiscoveredUrl[] } | { llmsOut: DiscoveredUrl[] }> {
 	const inputUrl = new URL(inputSeed);
 	if (classifyDiscoveryResource(inputSeed)?.source === "llms") {
@@ -250,6 +473,7 @@ async function resolveLlmsCorpus(
 				"/",
 				config,
 				llmsOptions,
+				attemptLimit,
 			),
 		};
 	}
@@ -262,6 +486,7 @@ async function resolveLlmsCorpus(
 		inputScope,
 		config,
 		llmsOptions,
+		attemptLimit,
 	);
 	const substantivePageCount = llmsOut.filter((item) => {
 		const path = new URL(item.url).pathname;
@@ -279,6 +504,7 @@ async function resolveLlmsCorpus(
 			inputScope,
 			config,
 			llmsOptions,
+			attemptLimit,
 		);
 		if (rootLlmsOut.length > llmsOut.length) return { done: rootLlmsOut };
 	}
@@ -288,186 +514,92 @@ async function resolveLlmsCorpus(
 	return { llmsOut };
 }
 
-async function resolveFeedSeed(
-	config: PipelineConfig,
-	inputSeed: string,
-	seedResponse: FetchResult,
-	robotsByOrigin: Map<string, Robots>,
-	allowResource: FetchUrlGate | undefined,
-): Promise<DiscoveryRun | undefined> {
-	if (!isFeedResponse(seedResponse)) return undefined;
-	const feedSeed =
-		normalizeDiscoveryResourceUrl(seedResponse.finalUrl) ?? inputSeed;
-	const seedResource: DiscoveryResourceSeed = {
-		url: inputSeed,
-		finalUrl: feedSeed,
-		source: "feed",
-	};
-	const robots = await robotsForOrigin(
-		new URL(feedSeed).origin,
-		config,
-		robotsByOrigin,
-	);
-	const allowed = (url: string) => robots.allowed(url);
-	if (!allowed(feedSeed)) {
-		return {
-			urls: [
-				{
-					url: feedSeed,
-					source: "feed",
-					wasSeed: true,
-					fetched: robotsBlockedResult(seedResponse),
-				},
-			],
-			seedResource,
-		};
-	}
-	const pages = await discoverFeed(
-		feedSeed,
-		feedSeed,
-		scopeFromFeedResource(feedSeed),
-		config,
-		{
-			limit: config.max,
-			response: seedResponse,
-			accept: allowed,
-			allowResource,
-		},
-	);
-	if (pages.length > 0) return { urls: pages, seedResource };
-	return {
-		urls: [
-			{
-				url: feedSeed,
-				source: "feed",
-				wasSeed: true,
-				fetched: emptyResourceResult(
-					seedResponse,
-					"feed resource did not list any in-scope pages",
-				),
-			},
-		],
-		seedResource,
-	};
-}
-
 async function resolveHtmlSeed(
 	config: PipelineConfig,
 	inputSeed: string,
 	seedResponse: FetchResult,
 	llmsOut: DiscoveredUrl[],
 	llmsOptions: LlmsCorpusOptions,
-	robotsByOrigin: Map<string, Robots>,
-): Promise<{ done: DiscoveredUrl[] } | { context: DiscoveryProbeInput }> {
+	attemptLimit: number,
+): Promise<{ done: DiscoveredUrl[] } | DiscoverySession> {
 	const inputScope = scopeFromSeed(inputSeed);
 	const finalSeed = normalizeUrl(seedResponse.finalUrl);
 	const seed = finalSeed ?? inputSeed;
-	const seedLinks = discoverPageLinks(seedResponse.body, seedResponse.finalUrl);
-	const feedLinks = discoverFeedLinks(seedResponse.body, seedResponse.finalUrl);
+	const seedResources = discoverPageResources(
+		seedResponse.body,
+		seedResponse.finalUrl,
+		true,
+	);
 	const seedIsLanguageSelector = isLanguageSelector(
 		seedResponse.finalUrl,
 		seedResponse.body,
 	);
 	const scope = seedIsLanguageSelector
 		? "/"
-		: chooseScope(inputScope, seed, seedLinks);
-	const robots = await robotsForOrigin(
-		new URL(seed).origin,
-		config,
-		robotsByOrigin,
-	);
-	const allowed = (url: string) => robots.allowed(url);
-	if (!allowed(seed)) {
-		return {
-			done: [
-				{
-					url: seed,
-					source: "seed",
-					wasSeed: true,
-					fetched: robotsBlockedResult(seedResponse),
-				},
-			],
-		};
-	}
+		: chooseScope(inputScope, seed, seedResources.links);
+	const robots = await loadRobots(new URL(seed).origin, config);
 
-	const redirected = deferInitialLlms(config, inputSeed)
-		? undefined
-		: await resolveRedirectAdjustedLlms(
-				config,
-				inputSeed,
-				inputScope,
+	let redirected: DiscoveredUrl[] | undefined;
+	if (!deferInitialLlms(config, inputSeed)) {
+		if (seed !== inputSeed || scope !== inputScope) {
+			const adjusted = await discoverLlmsCorpus(
+				seed,
 				seed,
 				scope,
-				llmsOut,
+				config,
 				llmsOptions,
+				attemptLimit,
 			);
+			if (hasCorpus(adjusted, config)) redirected = adjusted;
+		}
+		const seedUrl = new URL(seed);
+		const inputUrl = new URL(inputSeed);
+		if (
+			!redirected &&
+			!seedUrl.pathname.endsWith("/") &&
+			inputUrl.pathname.split("/").filter(Boolean).length === 1
+		) {
+			const sameOrigin = seedUrl.origin === inputUrl.origin;
+			const root = await discoverLlmsCorpus(
+				seed,
+				sameOrigin ? inputSeed : seed,
+				sameOrigin ? inputScope : "/",
+				config,
+				llmsOptions,
+				attemptLimit,
+			);
+			if (root.length > llmsOut.length) redirected = root;
+		}
+	}
 	if (redirected) {
 		return {
 			done: seedFirstCorpus(
-				{ url: seed, source: "seed", wasSeed: true, fetched: seedResponse },
+				seedEntry(seed, "seed", seedResponse),
 				redirected,
 				config,
+				attemptLimit,
 			),
 		};
 	}
 
-	const seedIsShell =
-		seedIsLanguageSelector || looksLikeAppShell(seedResponse.body);
-	const context: DiscoveryProbeInput = {
+	const context: DiscoveryFrontierInput = {
 		config,
+		attemptLimit,
 		seed,
 		scope,
 		robots,
-		allowed,
-		allowResource: (url) => resourceAllowed(url, config, robotsByOrigin),
+		allowResource: (url) => resourceAllowed(url, config),
 		llmsOptions,
 		seedResponse,
-		seedLinks,
-		feedLinks,
-		seedIsShell,
+		seedResources,
 		seedIsLanguageSelector,
 		finalSeed,
 		inputSeed,
 	};
-	return { context };
-}
-
-async function resolveRedirectAdjustedLlms(
-	config: PipelineConfig,
-	inputSeed: string,
-	inputScope: string,
-	seed: string,
-	scope: string,
-	llmsOut: DiscoveredUrl[],
-	llmsOptions: LlmsCorpusOptions,
-): Promise<DiscoveredUrl[] | undefined> {
-	if (seed !== inputSeed || scope !== inputScope) {
-		const redirectedLlmsOut = await discoverLlmsCorpus(
-			seed,
-			seed,
-			scope,
-			config,
-			llmsOptions,
-		);
-		if (hasCorpus(redirectedLlmsOut, config)) return redirectedLlmsOut;
-	}
-	const seedUrl = new URL(seed);
-	const inputUrl = new URL(inputSeed);
-	if (
-		!seedUrl.pathname.endsWith("/") &&
-		inputUrl.pathname.split("/").filter(Boolean).length === 1
-	) {
-		const sameOrigin = seedUrl.origin === inputUrl.origin;
-		const rootLlmsOut = await discoverLlmsCorpus(
-			seed,
-			sameOrigin ? inputSeed : seed,
-			sameOrigin ? inputScope : "/",
-			config,
-			llmsOptions,
-		);
-		if (rootLlmsOut.length > llmsOut.length) return rootLlmsOut;
-	}
-	return undefined;
+	return {
+		frontier: createDiscoveryFrontier(context),
+		allowResource: context.allowResource,
+	};
 }
 
 function hasCorpus(out: DiscoveredUrl[], config: PipelineConfig) {
@@ -476,4 +608,18 @@ function hasCorpus(out: DiscoveredUrl[], config: PipelineConfig) {
 
 function deferInitialLlms(config: PipelineConfig, seed: string) {
 	return config.maxExplicit && looksLikeSpecificContentUrl(seed);
+}
+
+function seedEntry(
+	url: string,
+	source: DiscoveredUrl["source"],
+	fetched: FetchResult,
+): DiscoveredUrl {
+	return { url, source, wasSeed: true, fetched };
+}
+
+function releaseSuccessfulFetch(item: DiscoveredUrl): DiscoveredUrl {
+	if (!item.fetched?.ok) return item;
+	const { fetched: _fetched, ...released } = item;
+	return released;
 }

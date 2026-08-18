@@ -1,4 +1,8 @@
-import { markdownLinkHrefs } from "../core/markdown.ts";
+import {
+	maxGeneratedCapturePages,
+	maxGeneratedMediaUrls,
+} from "../core/config.ts";
+import { markdownImageHrefs, markdownLinkHrefs } from "../core/markdown.ts";
 import { hashContent } from "../core/snapshot.ts";
 import { wordCount } from "../core/text.ts";
 import type {
@@ -10,18 +14,14 @@ import type {
 	PageExtractor,
 	PageRecord,
 } from "../core/types.ts";
-import {
-	scanMarkdownForInjectionSignals,
-	scanRawHtmlForInjectionSignals,
-} from "../security/injection.ts";
+import { scanMarkdownForInjectionSignals } from "../security/injection.ts";
+import { validatePublicHttpUrl } from "../security/url.ts";
 import {
 	blockedAccessError,
-	emptyContentError,
 	isLanguageSelector,
 	isLoadingShellPlaceholder,
 	reportedNotFoundError,
 } from "./app-shell.ts";
-import { isMarkdownLike } from "./content.ts";
 import { cleanMarkdown } from "./markdown.ts";
 import { scoreMarkdown } from "./quality.ts";
 import { titleFromContent } from "./title.ts";
@@ -32,6 +32,8 @@ export type ExtractedBody = {
 	inlineStateSource?: InlineStateSource;
 	title?: string;
 	canonicalUrl?: string;
+	truncated?: boolean;
+	injectionSource?: string;
 };
 
 export function recordFromExtracted(
@@ -39,76 +41,64 @@ export function recordFromExtracted(
 	extracted: ExtractedBody,
 	started: number,
 	rawSignals: PageRecord["injectionSignals"],
+	shell: boolean,
 ): PageRecord {
 	const { metadata, result, source, wasSeed } = input;
 	const markdown = cleanMarkdown(extracted.markdown);
 	const title = titleFromContent(markdown, extracted.title);
-	if (!markdown)
-		return failedRecord(
+	const emptyError = shell ? shellError : "empty content";
+	const fail = (
+		error: string,
+		failureKind: FailureKind,
+		injectionSignals = rawSignals,
+	) =>
+		failedRecord(
 			result,
 			source,
 			metadata,
-			emptyContentError(result.body),
-			"empty",
-			rawSignals,
+			error,
+			failureKind,
+			injectionSignals,
 			wasSeed,
 		);
-	if (isLoadingShellPlaceholder(markdown, result.body)) {
-		return failedRecord(
-			result,
-			source,
-			metadata,
-			"app shell without static text",
-			"empty",
-			rawSignals,
-			wasSeed,
-		);
+	if (!markdown) return fail(emptyError, "empty");
+	if (isLoadingShellPlaceholder(markdown, shell)) {
+		return fail(shellError, "empty");
 	}
 	const reportedNotFound = reportedNotFoundError(markdown, title);
 	if (reportedNotFound) {
-		return failedRecord(
-			result,
-			source,
-			metadata,
-			reportedNotFound,
-			"not_found",
-			rawSignals,
-			wasSeed,
-		);
+		return fail(reportedNotFound, "not_found");
 	}
 	const blocked = blockedAccessError(markdown, title, result.body);
 	if (blocked) {
-		return failedRecord(
-			result,
-			source,
-			metadata,
-			blocked,
-			"blocked",
-			rawSignals,
-			wasSeed,
-		);
+		return fail(blocked, "blocked");
 	}
 	if (isLanguageSelector(result.finalUrl, result.body)) {
-		return failedRecord(
-			result,
-			source,
-			metadata,
-			"language selector without article content",
-			"empty",
-			rawSignals,
-			wasSeed,
-		);
+		return fail("language selector without article content", "empty");
 	}
 	const injectionSignals = uniqueSignals([
 		...rawSignals,
-		...(title ? scanMarkdownForInjectionSignals(title) : []),
-		...scanMarkdownForInjectionSignals(extracted.markdown),
-		...scanMarkdownForInjectionSignals(markdown),
+		...[...new Set([title, extracted.injectionSource ?? markdown])].flatMap(
+			(input) => (input ? scanMarkdownForInjectionSignals(input) : []),
+		),
 	]);
 	const quality = scoreMarkdown(markdown, title);
-	const links = markdownLinkHrefs(markdown);
+	if (extracted.truncated) {
+		quality.confidence = Math.min(quality.confidence, 0.55);
+		quality.reasons.push("truncated extraction");
+	}
+	const links = publicHrefs(
+		markdownLinkHrefs(markdown, maxGeneratedCapturePages),
+		result.finalUrl,
+		maxGeneratedCapturePages,
+	);
+	const media = publicHrefs(
+		markdownImageHrefs(markdown, maxGeneratedMediaUrls),
+		result.finalUrl,
+		maxGeneratedMediaUrls,
+	);
 	if (
-		isChromeOnlyHtml(
+		isChromeOnlyContent(
 			markdown,
 			title,
 			extracted.extractor,
@@ -116,14 +106,10 @@ export function recordFromExtracted(
 			links.length,
 		)
 	) {
-		return failedRecord(
-			result,
-			source,
-			metadata,
+		return fail(
 			"page chrome without article content",
 			"empty",
 			injectionSignals,
-			wasSeed,
 		);
 	}
 	if (
@@ -134,27 +120,18 @@ export function recordFromExtracted(
 	) {
 		quality.confidence = Math.min(quality.confidence, 0.55);
 	}
-	return {
+	const page: Extract<PageRecord, { ok: true }> = {
 		ok: true,
 		url: result.url,
 		finalUrl: result.finalUrl,
 		redirects: result.redirects ?? [],
-		...(result.etag ? { etag: result.etag } : {}),
-		...(result.lastModified ? { lastModified: result.lastModified } : {}),
 		fetchedAt: result.fetchedAt ?? new Date().toISOString(),
 		injectionSignals,
-		...(metadata ?? {}),
-		...(extracted.canonicalUrl ? { canonicalUrl: extracted.canonicalUrl } : {}),
-		...(title ? { title } : {}),
 		markdown,
 		links,
 		status: result.status,
-		...(wasSeed ? { wasSeed: true as const } : {}),
 		contentHash: hashContent(markdown),
 		extractor: extracted.extractor,
-		...(extracted.inlineStateSource
-			? { inlineStateSource: extracted.inlineStateSource }
-			: {}),
 		confidence: quality.confidence,
 		qualityReasons: quality.reasons,
 		source,
@@ -164,18 +141,43 @@ export function recordFromExtracted(
 			writeMs: 0,
 		},
 	};
+	if (result.etag) page.etag = result.etag;
+	if (result.lastModified) page.lastModified = result.lastModified;
+	if (metadata?.publishedAt) page.publishedAt = metadata.publishedAt;
+	if (metadata?.updatedAt) page.updatedAt = metadata.updatedAt;
+	if (extracted.canonicalUrl) page.canonicalUrl = extracted.canonicalUrl;
+	if (title) page.title = title;
+	if (media.length) page.media = media;
+	if (wasSeed) page.wasSeed = true;
+	if (extracted.inlineStateSource) {
+		page.inlineStateSource = extracted.inlineStateSource;
+	}
+	return page;
 }
+
+const shellError = "app shell without static text";
 
 const titleStopTerms = new Set(["and", "the", "with", "from", "your"]);
 
-function isChromeOnlyHtml(
+function isChromeOnlyContent(
 	markdown: string,
 	title: string | undefined,
 	extractor: PageExtractor,
 	quality: { reasons: string[] },
 	links: number,
 ) {
+	if (title && markdown.replace(/^#{1,6}\s*/, "").trim() === title.trim()) {
+		return true;
+	}
 	if (extractor !== "html") return false;
+	if (
+		quality.reasons.includes("thin content") &&
+		wordCount(markdown) <= 6 &&
+		/!\[[^\]]*\]\(|\[[^\]]+\]\(/.test(markdown) &&
+		!/[.!?](?:\s|$)/.test(markdown)
+	) {
+		return true;
+	}
 	if (!quality.reasons.includes("high link density")) return false;
 	if (links < 20 || /^#{1,6}\s+/m.test(markdown)) return false;
 	const terms = (title ?? "")
@@ -196,20 +198,16 @@ export function failedRecord(
 	injectionSignals: PageRecord["injectionSignals"] = [],
 	wasSeed?: true,
 ): PageRecord {
-	return {
+	const page: Extract<PageRecord, { ok: false }> = {
 		ok: false,
 		url: result.url,
 		finalUrl: result.finalUrl,
 		redirects: result.redirects ?? [],
-		...(result.etag ? { etag: result.etag } : {}),
-		...(result.lastModified ? { lastModified: result.lastModified } : {}),
 		fetchedAt: result.fetchedAt ?? new Date().toISOString(),
 		injectionSignals,
-		...(metadata ?? {}),
 		markdown: "",
 		links: [],
 		status: result.status,
-		...(wasSeed ? { wasSeed: true as const } : {}),
 		contentHash: "",
 		extractor: "none",
 		confidence: 0,
@@ -219,14 +217,28 @@ export function failedRecord(
 		failureKind,
 		timings: { fetchMs: result.fetchMs, extractMs: 0, writeMs: 0 },
 	};
-}
-
-export function rawInjectionSignals(result: FetchResult) {
-	return isMarkdownLike(result)
-		? []
-		: scanRawHtmlForInjectionSignals(result.body);
+	if (result.etag) page.etag = result.etag;
+	if (result.lastModified) page.lastModified = result.lastModified;
+	if (metadata?.publishedAt) page.publishedAt = metadata.publishedAt;
+	if (metadata?.updatedAt) page.updatedAt = metadata.updatedAt;
+	if (wasSeed) page.wasSeed = true;
+	return page;
 }
 
 function uniqueSignals(signals: PageRecord["injectionSignals"]) {
 	return [...new Set(signals)];
+}
+
+function publicHrefs(hrefs: string[], base: string, limit: number) {
+	const links = new Set<string>();
+	for (const href of hrefs) {
+		try {
+			const url = new URL(href, base);
+			if (!validatePublicHttpUrl(url.href)) links.add(url.href);
+		} catch {
+			// Ignore malformed extracted links.
+		}
+		if (links.size >= limit) break;
+	}
+	return [...links];
 }

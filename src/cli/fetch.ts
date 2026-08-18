@@ -1,15 +1,19 @@
 import { join } from "node:path";
-import { citationId } from "../core/citation.ts";
-import { buildPipelineConfig } from "../core/config.ts";
+import {
+	buildPipelineConfig,
+	buildRefreshConfig,
+	type ConfigInput,
+} from "../core/config.ts";
 import {
 	corpusFreshness,
 	corpusIsStale,
 	type FreshnessDecision,
 } from "../core/freshness.ts";
+import { identityKeys } from "../core/identity.ts";
+import { citationId, terminalText } from "../core/text.ts";
 import type { FailureKind, PipelineConfig, RunSummary } from "../core/types.ts";
 import { runSucceeded } from "../core/types.ts";
 import {
-	canonicalUrlSearch,
 	classifyDiscoveryResource,
 	looksLikeSpecificContentUrl,
 } from "../core/url.ts";
@@ -79,6 +83,8 @@ type FetchPage = {
 
 type FetchPagesResult = FetchBaseResult & { pages: FetchPage[] };
 type FetchResult = FetchQuestionResult | FetchPagesResult;
+type VerifiedCorpus = { summary: RunSummary; records: CorpusPage[] };
+type LocatedCorpus = VerifiedCorpus & { outputDir: string };
 
 const topPagesLimit = 10;
 const autoSiteCap = 25;
@@ -125,40 +131,79 @@ async function fetchResult(input: FetchInput): Promise<FetchResult> {
 	const requested =
 		input.freshness === "reuse" ? { ...base, maxExplicit: false } : base;
 	const requestedOutputDir = input.outputDir ?? base.outDir;
-	const outputDir = await cliOutputDir(input, requestedOutputDir, base);
-	const existing = await existingCorpus(
-		outputDir,
-		requested,
-		input.freshness === "force",
-	);
-	const action = decideAction(input.freshness, existing);
+	const reusable =
+		!input.outputDir && input.freshness !== "force"
+			? await reusableLibraryCorpus(requested)
+			: null;
+	const outputDir = reusable?.outputDir ?? requestedOutputDir;
+	const existing =
+		reusable ??
+		(await existingCorpus(outputDir, requested, input.freshness === "force"));
+	const prior = existing?.summary ?? null;
+	const action: FreshnessDecision = !prior
+		? "captured"
+		: input.freshness === "auto"
+			? corpusIsStale(prior)
+				? "refreshed"
+				: "reused"
+			: input.freshness === "reuse"
+				? "reused"
+				: input.freshness === "refresh"
+					? "refreshed"
+					: "captured";
 	const progress = input.quiet || input.json ? undefined : logLine;
-	const summary =
-		action === "reused" && existing
-			? existing
-			: await capture(input, base, outputDir, action, existing, progress);
-	const baseResult = resultBase(
-		summary,
-		action,
-		outputDir,
-		existing,
-		input.freshness,
-	);
-	if (!input.question) {
-		return { ...baseResult, pages: await topPages(outputDir, input.url) };
+	let corpus = existing;
+	if (action !== "reused" || !corpus) {
+		const config =
+			action === "refreshed" && prior
+				? buildRefreshConfig(prior, {
+						outDir: outputDir,
+						max: input.maxPages,
+						cache: input.cache,
+					})
+				: { ...base, outDir: outputDir };
+		if (action === "captured" && input.freshness === "force") {
+			config.clean = true;
+		}
+		const { runPipeline } = await import("../core/pipeline.ts");
+		const captured = await runPipeline(config, progress);
+		corpus = {
+			summary: captured.summary,
+			records: captured.records.filter((record) => record.ok),
+		};
 	}
-	const verified = await readVerifiedManifest(outputDir);
+	const { summary, records } = corpus;
+	const baseResult: FetchBaseResult = {
+		ok: runSucceeded(summary),
+		action,
+		status: summary.status,
+		outputDir,
+		seedUrl: summary.seedUrl,
+		scope: summary.captureMode,
+		counts: summaryCounts(summary),
+		memory: corpusFreshness(input.freshness, action, summary, prior),
+		maxPages: summary.max,
+		maxReached: summary.maxReached,
+		summaryPath: join(outputDir, runFiles.summary),
+		manifestPath: join(outputDir, runFiles.manifest),
+	};
+	if (summary.seed.failureKind)
+		baseResult.failureKind = summary.seed.failureKind;
+	if (summary.seed.error) baseResult.error = summary.seed.error;
+	if (!input.question) {
+		return { ...baseResult, pages: topPages(records, input.url) };
+	}
 	const ranked = await searchCorpus(outputDir, {
 		query: input.question,
 		maxResults: defaultSnippets,
 		snippetChars: input.contextChars,
 		excludeInjection: !input.includeInjection,
-		preferredOutputPaths: matchingOutputPaths(verified.records, input.url),
-		records: verified.records,
+		preferredOutputPaths: matchingOutputPaths(records, input.url),
+		records,
 	});
 	const injectionFiltered = input.includeInjection
 		? 0
-		: verified.records.filter(
+		: records.filter(
 				(record) =>
 					record.ok &&
 					Boolean(record.outputPath) &&
@@ -167,87 +212,29 @@ async function fetchResult(input: FetchInput): Promise<FetchResult> {
 	return {
 		...baseResult,
 		question: input.question,
-		citations: ranked.matches.map((match) => ({
-			citationId: citationId(
-				match.record.outputPath,
-				match.lineStart,
-				match.lineEnd,
-				match.contentHash,
-			),
-			path: match.record.outputPath,
-			lineStart: match.lineStart,
-			lineEnd: match.lineEnd,
-			url: match.record.url,
-			snippet: match.text,
-			...(match.record.injectionSignals.length
-				? { injectionSignals: match.record.injectionSignals }
-				: {}),
-		})),
+		citations: ranked.matches.map((match) => {
+			const citation: FetchCitation = {
+				citationId: citationId(
+					match.record.outputPath,
+					match.lineStart,
+					match.lineEnd,
+					match.contentHash,
+				),
+				path: match.record.outputPath,
+				lineStart: match.lineStart,
+				lineEnd: match.lineEnd,
+				url: match.record.url,
+				snippet: match.text,
+			};
+			if (match.record.injectionSignals.length) {
+				citation.injectionSignals = match.record.injectionSignals;
+			}
+			return citation;
+		}),
 		limited: ranked.limited,
 		truncated: ranked.truncated,
 		pagesSkipped: ranked.skipped,
 		injectionFiltered,
-	};
-}
-
-async function capture(
-	input: FetchInput,
-	base: PipelineConfig,
-	outputDir: string,
-	action: FreshnessDecision,
-	existing: RunSummary | null,
-	progress: ((message: string) => void) | undefined,
-): Promise<RunSummary> {
-	const config =
-		action === "refreshed" && existing
-			? refreshConfig(input, existing, outputDir)
-			: { ...base, outDir: outputDir };
-	if (action === "captured" && input.freshness === "force") config.clean = true;
-	const { runPipeline } = await import("../core/pipeline.ts");
-	return (await runPipeline(config, progress)).summary;
-}
-
-function refreshConfig(
-	input: FetchInput,
-	prior: RunSummary,
-	outputDir: string,
-): PipelineConfig {
-	return buildPipelineConfig({
-		seedUrl: prior.seedUrl,
-		outDir: outputDir,
-		max: input.maxPages ?? prior.max,
-		maxExplicit:
-			input.maxPages !== undefined ? true : prior.maxAppliesTo === "all",
-		pageOnly: prior.captureMode === "page",
-		userAgent: prior.userAgent,
-		cache: input.cache,
-	});
-}
-
-function resultBase(
-	summary: RunSummary,
-	action: FreshnessDecision,
-	outputDir: string,
-	existing: RunSummary | null,
-	freshness: FetchInput["freshness"],
-): FetchBaseResult {
-	return {
-		ok: runSucceeded(summary),
-		action,
-		status: summary.status,
-		outputDir,
-		seedUrl: summary.seedUrl,
-		scope: summary.captureMode,
-		counts: summaryCounts(summary),
-		memory: corpusFreshness(freshness, action, summary, existing),
-		maxPages: summary.max,
-		maxReached: summary.maxReached,
-		summaryPath: join(outputDir, runFiles.summary),
-		manifestPath: join(outputDir, runFiles.manifest),
-		...(summary.seed.failureKind
-			? { failureKind: summary.seed.failureKind }
-			: {}),
-		...(summary.seed.error ? { error: summary.seed.error } : {}),
 	};
 }
 
@@ -299,7 +286,7 @@ function textFetchResult(result: FetchResult): string {
 		}
 	}
 	lines.push(`docsnap: summary ${result.summaryPath}`);
-	return `${lines.join("\n")}\n`;
+	return terminalText(`${lines.join("\n")}\n`);
 }
 
 function writeMismatch(error: CorpusMismatchError, json: boolean): void {
@@ -317,27 +304,18 @@ function writeMismatch(error: CorpusMismatchError, json: boolean): void {
 		process.stdout.write(`${JSON.stringify(result)}\n`);
 	} else {
 		process.stderr.write(
-			`docsnap: ${result.failureKind}: ${result.error}\ndocsnap: counts written=${result.counts.written} failed=${result.counts.failed}\n`,
+			terminalText(
+				`docsnap: ${result.failureKind}: ${result.error}\ndocsnap: counts written=${result.counts.written} failed=${result.counts.failed}\n`,
+			),
 		);
 	}
 	process.exitCode = 1;
 }
 
-async function cliOutputDir(
-	input: FetchInput,
-	outputDir: string,
-	requested: PipelineConfig,
-): Promise<string> {
-	if (input.outputDir || input.question || input.freshness === "force") {
-		return outputDir;
-	}
-	return (await reusableLibraryCorpus(requested)) ?? outputDir;
-}
-
 async function reusableLibraryCorpus(
 	requested: PipelineConfig,
-): Promise<string | null> {
-	let latest: { outputDir: string; generatedAt: string } | null = null;
+): Promise<LocatedCorpus | null> {
+	let latest: LocatedCorpus | null = null;
 	let listed: Awaited<ReturnType<typeof listAllCorpora>>;
 	try {
 		listed = await listAllCorpora("docsnap");
@@ -346,56 +324,58 @@ async function reusableLibraryCorpus(
 	}
 	for (const { output_dir } of listed.corpora) {
 		try {
-			const summary = await readSummary(output_dir);
-			const records = (await readVerifiedManifest(output_dir, summary)).records;
-			if (canReuseCorpus(summary, requested, records)) {
-				latest = newerCorpus(latest, output_dir, summary.generatedAt);
+			const verified = await readVerifiedManifest(output_dir);
+			const { summary } = verified;
+			if (canReuseCorpus(summary, requested, verified.records)) {
+				const candidate = { outputDir: output_dir, ...verified };
+				if (
+					!latest ||
+					summary.generatedAt > latest.summary.generatedAt ||
+					(summary.generatedAt === latest.summary.generatedAt &&
+						output_dir < latest.outputDir)
+				) {
+					latest = candidate;
+				}
 			}
 		} catch {}
 	}
-	return latest?.outputDir ?? null;
-}
-
-function newerCorpus(
-	current: { outputDir: string; generatedAt: string } | null,
-	outputDir: string,
-	generatedAt: string,
-) {
-	if (
-		!current ||
-		generatedAt > current.generatedAt ||
-		(generatedAt === current.generatedAt && outputDir < current.outputDir)
-	) {
-		return { outputDir, generatedAt };
-	}
-	return current;
+	return latest;
 }
 
 async function existingCorpus(
 	outputDir: string,
 	requested: PipelineConfig,
 	allowReplace: boolean,
-): Promise<RunSummary | null> {
+): Promise<VerifiedCorpus | null> {
 	let summary: RunSummary;
 	try {
 		summary = await readSummary(outputDir);
 	} catch {
 		return null;
 	}
-	let records: CorpusPage[];
+	const replaceable =
+		allowReplace ||
+		!runSucceeded(summary) ||
+		(summary.seedUrl === requested.seedUrl &&
+			summary.captureMode === (requested.pageOnly ? "page" : "site"));
+	let verified: VerifiedCorpus;
 	try {
-		records = (await readVerifiedManifest(outputDir, summary)).records;
+		verified = await readVerifiedManifest(outputDir, summary);
 	} catch {
-		if (canReplaceCorpus(summary, requested, allowReplace)) return null;
+		if (replaceable) return null;
 		throw new Error(`Invalid manifest in existing corpus: ${outputDir}`);
 	}
-	if (canReuseCorpus(summary, requested, records)) return summary;
-	return canReplaceCorpus(summary, requested, allowReplace)
-		? null
-		: throwCorpusMismatch(outputDir, summary, requested);
+	if (canReuseCorpus(summary, requested, verified.records)) return verified;
+	if (replaceable) return null;
+	throw new CorpusMismatchError(
+		outputDir,
+		summary.seedUrl,
+		requested.seedUrl,
+		summaryCounts(summary),
+	);
 }
 
-export function canReuseCorpus(
+function canReuseCorpus(
 	summary: RunSummary,
 	requested: PipelineConfig,
 	records: CorpusPage[],
@@ -422,88 +402,30 @@ export function canReuseCorpus(
 	if (
 		!requested.pageOnly &&
 		summary.captureMode === "site" &&
-		normalizeUrl(summary.seedUrl) === normalizeUrl(requested.seedUrl)
+		matchesIdentity(
+			{ url: summary.seedUrl },
+			new Set(identityKeys({ url: requested.seedUrl })),
+		)
 	) {
 		return true;
 	}
-	return corpusContainsUrl(records, requested.seedUrl);
-}
-
-function corpusContainsUrl(
-	records: CorpusPage[],
-	requestedUrl: string,
-): boolean {
-	const candidates = normalizedUrlVariants(requestedUrl);
-	return records.some(
-		(record) =>
-			record.ok && record.outputPath && pageMatchesUrl(record, candidates),
-	);
-}
-
-export function canReplaceCorpus(
-	summary: RunSummary,
-	requested: PipelineConfig,
-	allowReplace: boolean,
-): boolean {
-	return (
-		allowReplace ||
-		!runSucceeded(summary) ||
-		(summary.seedUrl === requested.seedUrl &&
-			summary.captureMode === (requested.pageOnly ? "page" : "site"))
-	);
-}
-
-export function throwCorpusMismatch(
-	outputDir: string,
-	summary: RunSummary,
-	requested: PipelineConfig,
-): never {
-	throw mismatchError(outputDir, summary, requested.seedUrl);
-}
-
-function mismatchError(
-	outputDir: string,
-	summary: RunSummary,
-	requestedUrl: string,
-) {
-	return new CorpusMismatchError(
-		outputDir,
-		summary.seedUrl,
-		requestedUrl,
-		summaryCounts(summary),
-	);
-}
-
-function decideAction(
-	freshness: FetchInput["freshness"],
-	existing: RunSummary | null,
-): FreshnessDecision {
-	if (!existing) return "captured";
-	if (freshness === "auto") {
-		return corpusIsStale(existing) ? "refreshed" : "reused";
-	}
-	if (freshness === "reuse") return "reused";
-	if (freshness === "refresh") return "refreshed";
-	return "captured";
+	return matchingOutputPaths(records, requested.seedUrl).length > 0;
 }
 
 function buildBaseConfig(input: FetchInput, scope: FetchScope): PipelineConfig {
-	const max = captureMax(input, scope);
-	return buildPipelineConfig({
+	const max =
+		scope === "page"
+			? 1
+			: (input.maxPages ?? (input.scope === "auto" ? autoSiteCap : undefined));
+	const configInput: ConfigInput = {
 		seedUrl: input.url,
 		pageOnly: scope === "page",
 		site: scope === "site",
-		...(max !== undefined ? { max } : {}),
 		maxExplicit: max !== undefined,
 		cache: input.cache,
-	});
-}
-
-function captureMax(input: FetchInput, scope: FetchScope): number | undefined {
-	if (scope === "page") return 1;
-	if (input.maxPages !== undefined) return input.maxPages;
-	if (input.scope === "auto") return autoSiteCap;
-	return undefined;
+	};
+	if (max !== undefined) configInput.max = max;
+	return buildPipelineConfig(configInput);
 }
 
 function resolveScope(input: FetchInput): FetchScope {
@@ -517,88 +439,42 @@ function matchingOutputPaths(
 	records: CorpusPage[],
 	requestedUrl: string,
 ): string[] {
-	const candidates = normalizedUrlVariants(requestedUrl);
+	const candidates = new Set(identityKeys({ url: requestedUrl }));
 	return records.flatMap((record) =>
-		record.ok && record.outputPath && pageMatchesUrl(record, candidates)
+		record.ok && record.outputPath && matchesIdentity(record, candidates)
 			? [record.outputPath]
 			: [],
 	);
 }
 
-async function topPages(
-	outputDir: string,
-	requestedUrl: string,
-): Promise<FetchPage[]> {
-	const records = (await readVerifiedManifest(outputDir)).records.filter(
+function topPages(records: CorpusPage[], requestedUrl: string): FetchPage[] {
+	const pages = records.filter(
 		(record): record is CorpusPage & { outputPath: string } =>
 			record.ok && Boolean(record.outputPath),
 	);
-	const candidates = normalizedUrlVariants(requestedUrl);
-	const requested = records.find((record) =>
-		pageMatchesUrl(record, candidates),
-	);
+	const candidates = new Set(identityKeys({ url: requestedUrl }));
+	const requested = pages.find((record) => matchesIdentity(record, candidates));
 	return [
 		...(requested ? [requested] : []),
-		...records.filter((record) => record !== requested),
+		...pages.filter((record) => record !== requested),
 	]
 		.slice(0, topPagesLimit)
-		.map((page) => ({
-			path: page.outputPath,
-			url: page.url,
-			...(page.title ? { title: page.title } : {}),
-			...(page.injectionSignals.length
-				? { injectionSignals: page.injectionSignals }
-				: {}),
-		}));
+		.map((page) => {
+			const result: FetchPage = {
+				path: page.outputPath,
+				url: page.url,
+			};
+			if (page.title) result.title = page.title;
+			if (page.injectionSignals.length) {
+				result.injectionSignals = page.injectionSignals;
+			}
+			return result;
+		});
 }
 
-function normalizedUrlVariants(raw: string): Set<string> {
-	const base = normalizeUrl(raw);
-	const variants = new Set([base]);
-	try {
-		const url = new URL(base);
-		const path = url.pathname;
-		if (!hasExtension(path)) {
-			addPathVariant(variants, url, `${path}.md`);
-			addPathVariant(variants, url, `${path}.html`);
-		} else if (/\.(?:html?|mdx?)$/i.test(path)) {
-			addPathVariant(variants, url, path.replace(/\.(?:html?|mdx?)$/i, ""));
-		}
-	} catch {}
-	return variants;
-}
-
-function addPathVariant(
-	variants: Set<string>,
-	base: URL,
-	pathname: string,
-): void {
-	const url = new URL(base.href);
-	url.pathname = pathname || "/";
-	variants.add(normalizeUrl(url.href));
-}
-
-function normalizeUrl(raw: string): string {
-	try {
-		const url = new URL(raw);
-		url.hash = "";
-		url.pathname = url.pathname.replace(/\/{2,}/g, "/");
-		if (url.pathname.length > 1) {
-			url.pathname = url.pathname.replace(/\/+$/g, "");
-		}
-		url.search = canonicalUrlSearch(url);
-		return url.href;
-	} catch {
-		return raw;
-	}
-}
-
-function hasExtension(pathname: string): boolean {
-	return /\.[a-z0-9]+$/i.test(pathname.split("/").at(-1) ?? "");
-}
-
-function pageMatchesUrl(record: CorpusPage, candidates: Set<string>) {
-	return [record.url, record.finalUrl, ...(record.aliases ?? [])].some((url) =>
-		candidates.has(normalizeUrl(url)),
-	);
+function matchesIdentity(
+	input: Parameters<typeof identityKeys>[0],
+	candidates: Set<string>,
+) {
+	return identityKeys(input).some((key) => candidates.has(key));
 }

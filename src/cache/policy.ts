@@ -41,6 +41,7 @@ function parseCacheControl(value: string): Map<string, string> {
 
 function cacheableResponse(result: FetchResult): boolean {
 	if (!result.ok || isNotModifiedResult(result)) return false;
+	if (result.document) return false;
 	if (result.status < 200 || result.status > 299) return false;
 	if (result.setCookie) return false;
 	if (hasAnyDirective(result.cacheControl, ["no-store", "no-cache", "private"]))
@@ -52,13 +53,13 @@ function hasAnyDirective(
 	value: string | undefined,
 	blocked: readonly string[],
 ): boolean {
-	if (!value) return false;
-	const directives: string[] = [];
-	for (const part of value.split(",")) {
-		const directive = part.trim().split("=", 1)[0]?.toLowerCase();
-		if (directive) directives.push(directive);
-	}
-	return directives.some((directive) => blocked.includes(directive));
+	return Boolean(
+		value
+			?.split(",")
+			.some((part) =>
+				blocked.includes(part.trim().split("=", 1)[0]?.toLowerCase() ?? ""),
+			),
+	);
 }
 
 export function isNotModifiedResult(

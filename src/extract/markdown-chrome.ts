@@ -1,6 +1,6 @@
 import { whitespaceKey } from "../core/text.ts";
 
-const pipeSet = (value: string) => new Set(value.split("|"));
+export const pipeSet = (value: string) => new Set(value.split("|"));
 
 const boilerplateLines = pipeSet(
 	"advertisement|advertisements|accept all cookies|accept cookies|ask about this page|back to top|cookie policy|copy markdown|copy page|follow us|got it|install tools|manage cookies|menu|most popular|most read|newsletter|next example|open in chatgpt|open in claude|open in cursor|previous example|print this page|read more|related articles|related stories|share|share this|show less|show more|sign up|skip to content|skip to main content|sponsored|sponsored content|sponsored links|subscribe|tweet|view as markdown|we use cookies",
@@ -67,7 +67,7 @@ function isChromeLinkListLine(trimmed: string) {
 
 function isDocControlChromeLine(trimmed: string) {
 	const key = chromeKey(trimmed.replace(/\[([^\]]+)]\([^)]+\)/g, " $1 "));
-	if (isDocActionLinkLine(key)) return true;
+	if (docActionLinkLinePattern.test(key)) return true;
 	if (key === "skip to content") return true;
 	if (key === "copy pagecopy" || key === "copy as markdown copied!")
 		return true;
@@ -78,10 +78,6 @@ function isDocControlChromeLine(trimmed: string) {
 	if (key.includes("features available in") && key.includes("latest version"))
 		return true;
 	return ["reloadclear", "reloadclearfork"].includes(key.replace(/\s+/g, ""));
-}
-
-function isDocActionLinkLine(key: string) {
-	return docActionLinkLinePattern.test(key);
 }
 
 function isDemoControlChromeLine(trimmed: string) {

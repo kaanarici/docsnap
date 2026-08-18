@@ -1,6 +1,6 @@
 import type { RunSummary } from "./types.ts";
 
-export const autoFreshnessDays = 7;
+const autoFreshnessDays = 7;
 
 const dayMs = 24 * 60 * 60 * 1000;
 const autoFreshnessMs = autoFreshnessDays * dayMs;
@@ -8,11 +8,22 @@ const autoFreshnessMs = autoFreshnessDays * dayMs;
 export type FreshnessMode = "auto" | "reuse" | "refresh" | "force";
 export type FreshnessDecision = "captured" | "refreshed" | "reused";
 
+type CorpusFreshness = {
+	requestedFreshness: FreshnessMode;
+	decision: FreshnessDecision;
+	generatedAt: string;
+	ageSeconds: number;
+	stale: boolean;
+	staleAfterDays: number;
+	priorGeneratedAt?: string;
+	priorAgeSeconds?: number;
+};
+
 export function corpusIsStale(summary: RunSummary) {
 	return corpusAgeMs(summary) >= autoFreshnessMs;
 }
 
-export function corpusAgeSeconds(summary: RunSummary) {
+function corpusAgeSeconds(summary: RunSummary) {
 	return Math.round(corpusAgeMs(summary) / 1000);
 }
 
@@ -23,20 +34,19 @@ export function corpusFreshness(
 	prior: RunSummary | null,
 ) {
 	const basis = prior ?? summary;
-	return {
+	const freshness: CorpusFreshness = {
 		requestedFreshness: mode,
 		decision,
 		generatedAt: summary.generatedAt,
 		ageSeconds: corpusAgeSeconds(summary),
 		stale: corpusIsStale(basis),
 		staleAfterDays: autoFreshnessDays,
-		...(prior && decision === "refreshed"
-			? {
-					priorGeneratedAt: prior.generatedAt,
-					priorAgeSeconds: corpusAgeSeconds(prior),
-				}
-			: {}),
 	};
+	if (prior && decision === "refreshed") {
+		freshness.priorGeneratedAt = prior.generatedAt;
+		freshness.priorAgeSeconds = corpusAgeSeconds(prior);
+	}
+	return freshness;
 }
 
 function corpusAgeMs(summary: RunSummary) {

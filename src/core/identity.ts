@@ -1,7 +1,6 @@
-import { safeDecode } from "./text.ts";
 import { canonicalUrlSearch } from "./url.ts";
 
-export type IdentityInput = {
+type IdentityInput = {
 	url?: string;
 	finalUrl?: string;
 	canonicalUrl?: string;
@@ -13,10 +12,7 @@ export function identityKeys(input: IdentityInput): string[] {
 	return unique([...keys.exact, ...keys.route]);
 }
 
-export function identityKeyGroups(input: IdentityInput): {
-	exact: string[];
-	route: string[];
-} {
+export function identityKeyGroups(input: IdentityInput) {
 	const exact: string[] = [];
 	const route: string[] = [];
 	for (const raw of identityUrls(input)) {
@@ -36,6 +32,10 @@ export function identityUrls(input: IdentityInput): string[] {
 	return unique([...primary, ...(canonical ? [canonical] : [])]);
 }
 
+export function candidateKey(raw: string) {
+	return routeKey(raw) ?? raw;
+}
+
 function urlKey(raw: string) {
 	const url = cleanUrl(raw);
 	if (!url) return undefined;
@@ -48,7 +48,9 @@ function urlKey(raw: string) {
 function routeKey(raw: string) {
 	const url = cleanUrl(raw);
 	if (!url) return undefined;
-	let path = safeDecode(url.pathname).replace(/\/+$/, "");
+	let path = url.pathname
+		.replace(/%[0-9a-f]{2}/gi, (value) => value.toUpperCase())
+		.replace(/\/+$/, "");
 	path = path.replace(/\/index(?:\.(?:html?|mdx?|txt))?$/i, "");
 	path = path.replace(/\.(?:html?|mdx?|md|txt)$/i, "");
 	return `route:${url.origin}${path || "/"}${canonicalUrlSearch(url)}`;

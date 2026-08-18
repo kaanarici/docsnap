@@ -9,23 +9,37 @@ const shellFrameworkMarkers = [
 	"__meteor_runtime_config__",
 ];
 const rawGithubMarker = String.raw`raw\.githubusercontent\.com`;
-const emptyAppIdMarker = `id=["']app["']`;
+const appMountIds = [
+	"app",
+	"root",
+	"__next",
+	"__nuxt",
+	"__docusaurus",
+	"___gatsby",
+];
+const appMountIdSource = `(?:${appMountIds.join("|")})`;
+const appMountIdMarker = `id=["']${appMountIdSource}["']`;
+const appMountSelector = appMountIds.map((id) => `#${id}`).join(",");
+export const appShellDom = {
+	mount: appMountSelector,
+	primary: "app-root,main,[role=main],article",
+	meaningful: "h1,h2,h3,article,pre,table,[role=main]",
+	loading: String.raw`\b(?:enable javascript|initializing|just a moment|loading|please wait|prepar(?:ed|ing))\b`,
+} as const;
+const emptyAppMountMarker = new RegExp(
+	String.raw`<([a-z][\w:-]*)\b[^>]*\b${appMountIdMarker}[^>]*>\s*<\/\1\s*>`,
+	"i",
+);
 const shellPlaceholderMarkers = markerPattern([
 	...shellFrameworkMarkers,
 	rawGithubMarker,
 ]);
 const emptyShellMarkers = markerPattern([
-	"__docusaurus",
 	"v-app-loading",
 	"enable javascript in your browser",
 	"zdWebClientConfig",
 	...shellFrameworkMarkers,
-	emptyAppIdMarker,
 	rawGithubMarker,
-]);
-const discoveryShellMarkers = markerPattern([
-	"zdWebClientConfig",
-	...shellFrameworkMarkers,
 ]);
 
 export function isShellPlaceholder(
@@ -33,29 +47,34 @@ export function isShellPlaceholder(
 	title: string | undefined,
 	html: string,
 ) {
+	const sameAsTitle =
+		title !== undefined &&
+		markdown.replace(/^#+\s*/, "").trim() === title.trim();
 	return (
-		(((Boolean(title) &&
-			markdown.replace(/^#+\s*/, "").trim() === title?.trim()) ||
-			(wordCount(markdown) <= 2 && rawGithubOrXhr(html))) &&
+		(((Boolean(title) && sameAsTitle) ||
+			(wordCount(markdown) <= 2 &&
+				/raw\.githubusercontent\.com|xhrPromise/i.test(html))) &&
 			shellPlaceholderMarkers.test(html)) ||
 		(/^\s*search\s*$/i.test(markdown) &&
 			/<input[^>]+type=["']search["']|placeholder=["']search["']|class=["'][^"']*search/i.test(
 				html,
 			) &&
 			/__docusaurus/i.test(html)) ||
-		(title !== undefined &&
-			markdown.replace(/^#+\s*/, "").trim() === title.trim() &&
-			/<div[^>]+id=["']app["'][^>]*>\s*<\/div>/i.test(html))
+		(sameAsTitle && emptyAppMountMarker.test(html))
 	);
 }
 
-export function isLoadingShellPlaceholder(markdown: string, html: string) {
-	if (!looksLikeAppShell(html)) return false;
+export function isLoadingShellPlaceholder(markdown: string, shell: boolean) {
+	if (!shell) return false;
 	const compact = placeholderText(markdown);
 	if (!compact || wordCount(compact) > 16 || compact.length > 180) {
 		return false;
 	}
-	if (/\byou need to enable javascript to run this app\b/i.test(compact)) {
+	if (
+		/\b(?:you need to enable javascript to run this app|initializing|just a moment|please wait|prepar(?:ed|ing))\b/i.test(
+			compact,
+		)
+	) {
 		return true;
 	}
 	const tokens = compact
@@ -71,46 +90,65 @@ export function isLoadingShellPlaceholder(markdown: string, html: string) {
 	);
 }
 
-export function emptyContentError(html: string) {
-	return emptyShellMarkers.test(html) || looksLikeAppShell(html)
-		? "app shell without static text"
-		: "empty content";
-}
-
 export function reportedNotFoundError(
 	markdown: string,
 	title: string | undefined,
 ) {
 	const titleText = title?.trim();
-	const lines = markdown
-		.split(/\n+/)
-		.map((line) => line.replace(/^#{1,6}\s*/, "").trim())
-		.filter(Boolean)
-		.slice(0, 4);
-	const content = titleText && lines[0] === titleText ? lines.slice(1) : lines;
-	return /^404:?\s*this page could not be found\.?$/i.test(content[0] ?? "") &&
-		/^this page could not be found\.?$/i.test(content[1] ?? "")
+	if (
+		/^(?:(?:article|page|post) not found|404)$/i.test(titleText ?? "") &&
+		wordCount(markdown) < 80 &&
+		/(?:could not|couldn't|cannot|can't|unable to) (?:be found|find)\b/i.test(
+			markdown,
+		)
+	) {
+		return "page reported not found";
+	}
+	const lines = contentLines(markdown, titleText, 4);
+	return /^404:?\s*this page could not be found\.?$/i.test(lines[0] ?? "") &&
+		/^this page could not be found\.?$/i.test(lines[1] ?? "")
 		? "page reported not found"
 		: undefined;
 }
 
-export function looksLikeAppShell(html: string): boolean {
-	if (discoveryShellMarkers.test(html)) return true;
+export function isRecoverableAppShell(html: string, dom?: Document): boolean {
+	if (emptyAppMountMarker.test(html) || emptyShellMarkers.test(html))
+		return true;
 	try {
-		const { document } = parseHTML(html);
+		const document = dom ?? parseHTML(html).document;
 		const scriptCount = document.querySelectorAll(
-			"script[src],link[href]",
+			"script,link[rel~='modulepreload'],link[rel~='preload'][as='script']",
 		).length;
 		if (scriptCount === 0) return false;
-		document.querySelectorAll("script,style,noscript").forEach((node) => {
-			node.remove();
-		});
-		const bodyText = whitespaceKey(document.body?.textContent ?? "");
-		const anchorCount = document.querySelectorAll("a[href]").length;
-		return bodyText.length < 500 && anchorCount < 5;
+		const primary =
+			document.querySelector(appShellDom.mount) ??
+			document.querySelector(appShellDom.primary) ??
+			document.body;
+		const text = shellText(primary);
+		const meaningful = Array.from(
+			primary?.querySelectorAll(appShellDom.meaningful) ?? [],
+		).some((node) => shellText(node).length > 0);
+		return text.length < 500 && !meaningful;
 	} catch {
 		return false;
 	}
+}
+
+function shellText(root: Node | undefined | null) {
+	if (!root) return "";
+	const chunks: string[] = [];
+	const stack: Node[] = [root];
+	while (stack.length > 0) {
+		const node = stack.pop()!;
+		if (node.nodeType === 3) chunks.push(node.textContent ?? "");
+		else if (!/^(?:script|style|noscript)$/i.test(node.nodeName)) {
+			for (let index = node.childNodes.length - 1; index >= 0; index--) {
+				const child = node.childNodes[index];
+				if (child) stack.push(child);
+			}
+		}
+	}
+	return whitespaceKey(chunks.join(""));
 }
 
 export function chromeHeading(text: string) {
@@ -139,10 +177,6 @@ export function isLanguageSelector(finalUrl: string, html: string) {
 	);
 }
 
-function rawGithubOrXhr(html: string) {
-	return /raw\.githubusercontent\.com|xhrPromise/i.test(html);
-}
-
 function clientChallengeError(
 	markdown: string,
 	title: string | undefined,
@@ -150,6 +184,8 @@ function clientChallengeError(
 ) {
 	return /client challenge/i.test(title ?? "") ||
 		/required part of this site couldn.t load/i.test(markdown) ||
+		(/(?:\/|\b)anubis(?:\/|\b)/i.test(`${markdown}\n${html}`) &&
+			/ensure the security of your connection/i.test(markdown)) ||
 		isCloudflareChallenge(markdown, title, html)
 		? "blocked by client challenge"
 		: undefined;
@@ -175,8 +211,16 @@ function isCloudflareChallenge(
 function accessGate(markdown: string, title: string | undefined, html: string) {
 	const compact = whitespaceKey([title ?? "", markdown].join(" "));
 	const words = wordCount(markdown);
+	const ambiguous = ambiguousGatePattern.test(compact);
+	if (ambiguous && (gateTitle(title) || formLikeGate(html))) return true;
 	if (words > 160) return false;
-	if (strongGateLanguage(compact)) return true;
+	if (
+		/\b(?:complete the security check|paywall|verif(?:y|ying) (?:you are (?:a )?human|your identity))\b/i.test(
+			compact,
+		)
+	)
+		return true;
+	if (ambiguous && standaloneGateCopy(markdown, title)) return true;
 	return (
 		words <= 60 &&
 		gateTitle(title) &&
@@ -184,11 +228,29 @@ function accessGate(markdown: string, title: string | undefined, html: string) {
 	);
 }
 
-function strongGateLanguage(text: string) {
-	return /\b(?:complete the security check|paywall|please log in|please sign in|sign in to continue|subscribe to continue|verify (?:you are human|your identity))\b/i.test(
-		text,
-	);
+function standaloneGateCopy(markdown: string, title: string | undefined) {
+	const lines = contentLines(markdown, title);
+	return lines.length === 1 && standaloneGatePattern.test(lines[0]!);
 }
+
+function contentLines(
+	markdown: string,
+	title: string | undefined,
+	limit = Number.POSITIVE_INFINITY,
+) {
+	const lines = markdown
+		.split(/\n+/)
+		.map((line) => line.replace(/^#{1,6}\s*/, "").trim())
+		.filter(Boolean)
+		.slice(0, limit);
+	if (lines[0]?.toLowerCase() === title?.trim().toLowerCase()) lines.shift();
+	return lines;
+}
+
+const ambiguousGateSource =
+	"(?:please log in(?: to continue)?|please sign in(?: to continue)?|sign in to continue|subscribe to continue)";
+const ambiguousGatePattern = new RegExp(`\\b${ambiguousGateSource}\\b`, "i");
+const standaloneGatePattern = new RegExp(`^${ambiguousGateSource}[.!]?$`, "i");
 
 function gateTitle(title: string | undefined) {
 	return /^(?:access denied|log in|login|sign in|subscribe|verify you are human)$/i.test(

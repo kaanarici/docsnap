@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { chmod, mkdir, readdir, symlink } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertSafeRoot } from "../src/core/fs-safety.ts";
+import { scanCorpora } from "../src/corpus/scan.ts";
 import { prepareOutput } from "../src/output/writer.ts";
 import { tempDir, testConfig } from "./fixtures.ts";
 
@@ -26,5 +28,40 @@ describe("output root guards", () => {
 		await expect(
 			prepareOutput(testConfig(process.cwd(), { clean: true })),
 		).rejects.toThrow("clean unsafe output directory");
+	});
+
+	test("rejects output beneath a directory writable by other users", async () => {
+		const root = await tempDir("shared-output-parent");
+		await expect(
+			prepareOutput(testConfig(join(root, "private"))),
+		).resolves.toBeUndefined();
+		const shared = join(root, "shared");
+		await mkdir(shared, { mode: 0o777 });
+		await chmod(shared, 0o777);
+		await expect(
+			prepareOutput(testConfig(join(shared, "capture"))),
+		).rejects.toThrow("externally writable output path");
+		expect(await readdir(shared)).toEqual([]);
+		const openRoot = join(root, "open-root");
+		await mkdir(openRoot, { mode: 0o777 });
+		await chmod(openRoot, 0o777);
+		await expect(prepareOutput(testConfig(openRoot))).rejects.toThrow(
+			"externally writable output path",
+		);
+	});
+
+	test("does not scan through a relative symlink outside cwd", async () => {
+		const cwd = await tempDir("scan-cwd");
+		const outside = await tempDir("scan-outside");
+		await symlink(outside, join(cwd, "linked"));
+		const previous = process.cwd();
+		try {
+			process.chdir(cwd);
+			await expect(scanCorpora("linked")).rejects.toThrow(
+				"root_dir must stay under cwd",
+			);
+		} finally {
+			process.chdir(previous);
+		}
 	});
 });

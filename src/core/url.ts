@@ -27,7 +27,9 @@ export function classifyDiscoveryResource(
 		if (!url.pathname) url.pathname = "/";
 		if (isLlmsResourcePath(url.pathname))
 			return { url: url.href, source: "llms" };
-		if (isFeedResourceUrl(url)) return { url: url.href, source: "feed" };
+		const feedPath = feedResourceStart(url.pathname.split("/").filter(Boolean));
+		if (feedPath >= 0 || url.searchParams.has("feed"))
+			return { url: url.href, source: "feed" };
 		return undefined;
 	} catch {
 		return undefined;
@@ -46,8 +48,15 @@ export function looksLikeSpecificContentUrl(raw: string): boolean {
 	const last = segments[segments.length - 1] ?? "";
 	return (
 		/\.(?:html?|mdx?|txt|json|rst)$/i.test(last) ||
+		isDocumentPath(last) ||
 		segments.length >= 3 ||
 		(segments.length >= 2 && !url.pathname.endsWith("/"))
+	);
+}
+
+export function isDocumentPath(path: string) {
+	return /\.(?:doc|docx|docm|ppt|pps|pot|pptx|pptm|ppsx|ppsm|xls|xlsx|xlsm|xlsb|odt|ods|odp|rtf|epub|csv|pdf)$/i.test(
+		path,
 	);
 }
 
@@ -59,17 +68,13 @@ export function scopeFromFeedResource(seed: string): string {
 		if (!/\.[a-z0-9]+$/i.test(url.pathname)) return url.pathname;
 	}
 	const parts = url.pathname.split("/").filter(Boolean);
-	if (isFeedResourceUrl(url)) {
-		const last = parts.at(-1)?.toLowerCase() ?? "";
-		if (/^(?:feed|rss|atom)$/.test(last)) parts.pop();
-		else if (/^(?:feed|rss|atom)\.xml$/.test(last)) parts.pop();
-		else if (/\.(?:rss|atom)$/.test(last)) parts.pop();
-	}
+	const resourceStart = feedResourceStart(parts);
+	if (resourceStart >= 0) parts.length = resourceStart;
 	return parts.length > 0 ? `/${parts.join("/")}/` : "/";
 }
 
 export function isLlmsResourcePath(pathname: string): boolean {
-	return /\/llms(?:-[^/]+)?\.(?:md|txt)$/i.test(pathname);
+	return /\/llms(?:-(?:full|ctx(?:-full)?))?\.(?:md|txt)$/i.test(pathname);
 }
 
 export function relatedHost(left: string, right: string): boolean {
@@ -88,33 +93,14 @@ export function sameSharedHostPlatform(left: string, right: string): boolean {
 	);
 }
 
-export function sameSiteLabel(left: string, right: string): boolean {
-	const a = siteLabel(withoutWww(left));
-	const b = siteLabel(withoutWww(right));
-	return a !== "" && a === b;
-}
-
 function withoutWww(hostname: string): string {
 	return hostname.toLowerCase().replace(/^www\./, "");
 }
 
-const sharedHostSuffixes = [
-	"appspot.com",
-	"cloudflarepages.com",
-	"firebaseapp.com",
-	"fly.dev",
-	"github.io",
-	"gitlab.io",
-	"glitch.me",
-	"herokuapp.com",
-	"netlify.app",
-	"pages.dev",
-	"readthedocs.io",
-	"replit.app",
-	"surge.sh",
-	"vercel.app",
-	"web.app",
-];
+const sharedHostSuffixes =
+	"appspot.com cloudflarepages.com firebaseapp.com fly.dev github.io gitlab.io glitch.me herokuapp.com netlify.app pages.dev readthedocs.io replit.app surge.sh vercel.app web.app".split(
+		" ",
+	);
 
 function isSharedHostTenant(hostname: string): boolean {
 	return sharedHostSuffixes.some(
@@ -122,40 +108,14 @@ function isSharedHostTenant(hostname: string): boolean {
 	);
 }
 
-function siteLabel(hostname: string): string {
-	const parts = hostname.split(".").filter(Boolean);
-	if (parts.length < 2) return "";
-	const suffix = publicSuffixes.find(
-		(item) => hostname === item || hostname.endsWith(`.${item}`),
+function feedResourceStart(parts: string[]): number {
+	const marker = parts.findIndex((part) =>
+		/^(?:feed|feeds|rss|atom)$/i.test(part),
 	);
-	if (suffix) {
-		if (hostname === suffix) return "";
-		return parts.at(-(suffix.split(".").length + 1)) ?? "";
-	}
-	return parts.at(-2) ?? "";
+	if (marker >= 0) return marker;
+	const last = parts.at(-1) ?? "";
+	return /^(?:feed|rss|atom)\d*(?:\.xml)?$/i.test(last) ||
+		/\.(?:rss|atom)$/i.test(last)
+		? parts.length - 1
+		: -1;
 }
-
-function isFeedResourceUrl(url: URL): boolean {
-	const pathname = url.pathname.toLowerCase();
-	return (
-		/(?:^|\/)(?:feed|rss|atom)(?:\/|$)/i.test(pathname) ||
-		/(?:^|\/)(?:rss|feed|atom)\.xml$/i.test(pathname) ||
-		/\.(?:rss|atom)$/i.test(pathname) ||
-		url.searchParams.has("feed")
-	);
-}
-
-const publicSuffixes = [
-	"ac.uk",
-	"co.in",
-	"co.jp",
-	"co.nz",
-	"co.uk",
-	"com.au",
-	"com.br",
-	"com.mx",
-	"gov.uk",
-	"net.au",
-	"org.au",
-	"org.uk",
-];

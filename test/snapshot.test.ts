@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { snapshotStats } from "../src/core/snapshot.ts";
+import {
+	hashContent,
+	snapshotLeaf,
+	snapshotStats,
+	snapshotStatsFromLeaves,
+} from "../src/core/snapshot.ts";
 
 describe("snapshot roots", () => {
 	test("is deterministic across input order", () => {
@@ -19,5 +24,22 @@ describe("snapshot roots", () => {
 		expect(snapshotStats([{ path: "a.md", body: "beta" }]).rootHash).not.toBe(
 			baseline.rootHash,
 		);
+	});
+
+	test("compact and prehashed leaves preserve snapshot stats", () => {
+		const files = [
+			{ path: "a.md", body: "alpha" },
+			{ path: "unicode.md", body: "café 😀 \ud800" },
+		];
+		for (const prehashed of [false, true]) {
+			const leaves = files.map((file) =>
+				snapshotLeaf(
+					file.path,
+					file.body,
+					prehashed ? hashContent(file.body) : undefined,
+				),
+			);
+			expect(snapshotStatsFromLeaves(leaves)).toEqual(snapshotStats(files));
+		}
 	});
 });
