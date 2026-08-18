@@ -1,3 +1,5 @@
+import type { FailureKind } from "../core/types.ts";
+
 const refusedErrorPattern = /ECONNREFUSED/i;
 const unsafeUrlErrorPattern =
 	/private|internal|localhost|single-label|credentials|unsafe|scheme|resolve/i;
@@ -36,6 +38,14 @@ export function isTooLargeError(error: string): boolean {
 
 export function isUnsafeUrlError(error: string): boolean {
 	return unsafeUrlErrorPattern.test(error);
+}
+
+export function thrownFetchKind(cause: unknown): FailureKind {
+	if (isTimeoutError(cause)) return "timeout";
+	const error = cause instanceof Error ? cause.message : String(cause);
+	if (isTooLargeError(error)) return "too_large";
+	if (isUnsafeUrlError(error)) return "unsafe_url";
+	return "fetch";
 }
 
 function isTimeoutError(cause: unknown) {

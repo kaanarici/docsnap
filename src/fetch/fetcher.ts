@@ -4,6 +4,7 @@ import { hasMarkdownBody } from "../core/text.ts";
 import type {
 	ConditionalRequest,
 	DiscoveredUrl,
+	FailureKind,
 	FetchedUrl,
 	FetchResult,
 	HeaderMap,
@@ -15,7 +16,12 @@ import { decodeResponseBody, documentPayload } from "./body.ts";
 import { type Cookie, cookieHeader, storeCookies } from "./cookies.ts";
 import { refreshUrl } from "./refresh.ts";
 import { failed, failureKind } from "./result.ts";
-import { isRetryableFetchError, retryDelayMs, shouldRetry } from "./retry.ts";
+import {
+	isRetryableFetchError,
+	retryDelayMs,
+	shouldRetry,
+	thrownFetchKind,
+} from "./retry.ts";
 import { type HttpResponse, requestPublicHttp } from "./transport.ts";
 import { withWritersideTopic } from "./writerside.ts";
 export type FetchUrlGate = (url: string) => boolean | Promise<boolean>;
@@ -79,7 +85,7 @@ export async function fetchText(
 		);
 	} catch (error) {
 		if (signal.aborted) {
-			return fail(url, url, 0, started, "request timed out", []);
+			return fail(url, url, 0, started, "request timed out", "timeout", []);
 		}
 		throw error;
 	}
@@ -123,12 +129,14 @@ export async function fetchTextUncached(
 		if (fallback && !triedRouteFallbacks.has(fallback)) {
 			redirects = result.redirects ?? redirects;
 			if (!(await urlAllowed(fallback, allowUrl, signal))) {
+				const [error, kind] = deniedUrl(fallback, signal);
 				return fail(
 					url,
 					fallback,
 					result.status,
 					started,
-					deniedUrlError(fallback, signal),
+					error,
+					kind,
 					redirects,
 				);
 			}
@@ -142,14 +150,8 @@ export async function fetchTextUncached(
 		const hop = redirectHop(result.finalUrl, next, "refresh", result.status);
 		if (hop) redirects.push(hop);
 		if (!(await urlAllowed(next, allowUrl, signal))) {
-			return fail(
-				url,
-				next,
-				result.status,
-				started,
-				deniedUrlError(next, signal),
-				redirects,
-			);
+			const [error, kind] = deniedUrl(next, signal);
+			return fail(url, next, result.status, started, error, kind, redirects);
 		}
 		seenRefreshes.add(next);
 		currentUrl = next;
@@ -160,6 +162,7 @@ export async function fetchTextUncached(
 		0,
 		started,
 		"too many meta refresh redirects",
+		"fetch",
 		redirects,
 	);
 }
@@ -183,8 +186,12 @@ async function fetchOnce(
 ): Promise<FetchResult> {
 	let requestUrl = currentUrl;
 	const redirects = [...redirectsSoFar];
-	const failure = (finalUrl: string, status: number, error: string) =>
-		fail(url, finalUrl, status, started, error, redirects);
+	const failure = (
+		finalUrl: string,
+		status: number,
+		error: string,
+		kind: FailureKind,
+	) => fail(url, finalUrl, status, started, error, kind, redirects);
 	const seenRedirects = new Set<string>();
 	const cookies: Cookie[] = [];
 	let cookieTainted = false;
@@ -215,19 +222,26 @@ async function fetchOnce(
 			const redirect = redirectUrl(response, requestUrl);
 			if (redirect) {
 				if (redirect instanceof Error) {
-					return failure(requestUrl, response.status, redirect.message);
+					return failure(
+						requestUrl,
+						response.status,
+						redirect.message,
+						"unsafe_url",
+					);
 				}
 				if (seenRedirects.has(redirect) || seenRedirects.size >= 8) {
-					return failure(requestUrl, response.status, "too many redirects");
+					return failure(
+						requestUrl,
+						response.status,
+						"too many redirects",
+						"http",
+					);
 				}
 				const hop = redirectHop(requestUrl, redirect, "http", response.status);
 				if (hop) redirects.push(hop);
 				if (!(await urlAllowed(redirect, allowUrl, signal))) {
-					return failure(
-						redirect,
-						response.status,
-						deniedUrlError(redirect, signal),
-					);
+					const [error, kind] = deniedUrl(redirect, signal);
+					return failure(redirect, response.status, error, kind);
 				}
 				seenRedirects.add(redirect);
 				requestUrl = redirect;
@@ -240,6 +254,7 @@ async function fetchOnce(
 					response.url,
 					response.status,
 					`response exceeds ${maxBytes} bytes`,
+					"too_large",
 				);
 			}
 			if (shouldRetry(response.status, attempt)) {
@@ -254,6 +269,7 @@ async function fetchOnce(
 					requestUrl,
 					response.status,
 					"blocked by client challenge",
+					"blocked",
 				);
 			const fetchedAt = new Date().toISOString();
 			const base = {
@@ -306,7 +322,7 @@ async function fetchOnce(
 			return result;
 		} catch (error) {
 			if (signal?.aborted) {
-				return failure(requestUrl, 0, "request timed out");
+				return failure(requestUrl, 0, "request timed out", "timeout");
 			}
 			if (attempt < 2 && isRetryableFetchError(error)) {
 				await awaitWithSignal(Bun.sleep(retryDelayMs(attempt)), signal);
@@ -316,10 +332,11 @@ async function fetchOnce(
 				requestUrl,
 				0,
 				error instanceof Error ? error.message : String(error),
+				thrownFetchKind(error),
 			);
 		}
 	}
-	return fail(url, currentUrl, 0, started, "fetch failed", redirects);
+	return fail(url, currentUrl, 0, started, "fetch failed", "fetch", redirects);
 }
 
 async function urlAllowed(
@@ -342,10 +359,12 @@ async function urlAllowed(
 	}
 }
 
-function deniedUrlError(url: string, signal?: AbortSignal) {
-	if (signal?.aborted) return "request timed out";
+function deniedUrl(url: string, signal?: AbortSignal): [string, FailureKind] {
+	if (signal?.aborted) return ["request timed out", "timeout"];
 	const unsafe = validatePublicHttpUrl(url);
-	return unsafe ? `unsafe URL: ${unsafe}` : "blocked by robots.txt";
+	return unsafe
+		? [`unsafe URL: ${unsafe}`, "unsafe_url"]
+		: ["blocked by robots.txt", "blocked"];
 }
 function redirectUrl(
 	response: HttpResponse,
@@ -467,6 +486,7 @@ function fail(
 	status: number,
 	started: number,
 	error: string,
+	kind: FailureKind,
 	redirects: RedirectHop[],
 ): FetchResult {
 	return failed(
@@ -475,6 +495,7 @@ function fail(
 		status,
 		started,
 		error,
+		kind,
 		redirects,
 	);
 }
