@@ -27,6 +27,7 @@ function frontier(links: string[], attemptLimit = 4, truncated = false) {
 		seedResources: { links, nav: [], media: [], truncated },
 		seedIsLanguageSelector: false,
 		finalSeed: seed,
+		indexUrls: [],
 	});
 }
 

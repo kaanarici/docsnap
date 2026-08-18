@@ -31,9 +31,12 @@ import {
 	staticDiscoveryFrontier,
 } from "./frontier.ts";
 import { discoverPageResources } from "./nav.ts";
-import { loadRobots } from "./robots.ts";
+import { loadRobots, type Robots } from "./robots.ts";
 import { pageOnlyDiscovery, seedFirstCorpus, seedInputUrl } from "./seed.ts";
+import { discoverSitemaps } from "./sitemap.ts";
+import { candidateWindow, orderByTopic } from "./topic.ts";
 import {
+	addDiscovered,
 	chooseScope,
 	normalizeDiscoveryResourceUrl,
 	normalizeUrl,
@@ -210,7 +213,10 @@ async function discoverRawRun(
 		attemptLimit,
 	);
 	if ("done" in resolved) {
-		return { urls: resolved.done, truncated: Boolean(llmsOptions.truncated) };
+		return {
+			urls: resolved.done,
+			truncated: Boolean(llmsOptions.truncated) || Boolean(resolved.truncated),
+		};
 	}
 	return resolved;
 }
@@ -235,12 +241,14 @@ async function explicitLlmsSeedFailure(
 	);
 }
 
+type IndexHit = { done: DiscoveredUrl[]; truncated?: boolean };
+
 async function resolveLlmsCorpus(
 	config: PipelineConfig,
 	inputSeed: string,
 	llmsOptions: LlmsCorpusOptions,
 	attemptLimit: number,
-): Promise<{ done: DiscoveredUrl[] } | { llmsOut: DiscoveredUrl[] }> {
+): Promise<IndexHit | { llmsOut: DiscoveredUrl[] }> {
 	const inputUrl = new URL(inputSeed);
 	if (classifyDiscoveryResource(inputSeed)?.source === "llms") {
 		return {
@@ -257,7 +265,7 @@ async function resolveLlmsCorpus(
 	if (deferInitialLlms(config, inputSeed)) return { llmsOut: [] };
 
 	const inputScope = scopeFromSeed(inputSeed);
-	const llmsOut = await discoverLlmsCorpus(
+	let llmsOut = await discoverLlmsCorpus(
 		inputSeed,
 		inputSeed,
 		inputScope,
@@ -274,20 +282,17 @@ async function resolveLlmsCorpus(
 		llmsOut.length <= Math.min(config.max, 3) &&
 		substantivePageCount < 2
 	) {
-		const root = `${inputUrl.origin}/`;
 		const rootLlmsOut = await discoverLlmsCorpus(
-			root,
+			`${inputUrl.origin}/`,
 			inputSeed,
 			inputScope,
 			config,
 			llmsOptions,
 			attemptLimit,
 		);
-		if (rootLlmsOut.length > llmsOut.length) return { done: rootLlmsOut };
+		if (rootLlmsOut.length > llmsOut.length) llmsOut = rootLlmsOut;
 	}
-	if (inputScope === "/" ? llmsOut.length > 0 : hasCorpus(llmsOut, config)) {
-		return { done: llmsOut };
-	}
+	if (llmsIsCorpus(llmsOut, config, inputScope)) return { done: llmsOut };
 	return { llmsOut };
 }
 
@@ -298,7 +303,7 @@ async function resolveHtmlSeed(
 	llmsOut: DiscoveredUrl[],
 	llmsOptions: LlmsCorpusOptions,
 	attemptLimit: number,
-): Promise<{ done: DiscoveredUrl[] } | DiscoverySession> {
+): Promise<IndexHit | DiscoverySession> {
 	const inputScope = scopeFromSeed(inputSeed);
 	const finalSeed = normalizeUrl(seedResponse.finalUrl);
 	const seed = finalSeed ?? inputSeed;
@@ -315,47 +320,39 @@ async function resolveHtmlSeed(
 		? "/"
 		: chooseScope(inputScope, seed, seedResources.links);
 	const robots = await loadRobots(new URL(seed).origin, config);
+	const allowResource: FetchUrlGate = (url) => resourceAllowed(url, config);
+	const seedPage = seedEntry(seed, "seed", seedResponse);
 
-	let redirected: DiscoveredUrl[] | undefined;
 	if (!deferInitialLlms(config, inputSeed)) {
-		if (seed !== inputSeed || scope !== inputScope) {
-			const adjusted = await discoverLlmsCorpus(
-				seed,
-				seed,
-				scope,
-				config,
-				llmsOptions,
-				attemptLimit,
-			);
-			if (hasCorpus(adjusted, config)) redirected = adjusted;
-		}
-		const seedUrl = new URL(seed);
-		const inputUrl = new URL(inputSeed);
-		if (
-			!redirected &&
-			!seedUrl.pathname.endsWith("/") &&
-			inputUrl.pathname.split("/").filter(Boolean).length === 1
-		) {
-			const sameOrigin = seedUrl.origin === inputUrl.origin;
-			const root = await discoverLlmsCorpus(
-				seed,
-				sameOrigin ? inputSeed : seed,
-				sameOrigin ? inputScope : "/",
-				config,
-				llmsOptions,
-				attemptLimit,
-			);
-			if (root.length > llmsOut.length) redirected = root;
+		const redirected = await redirectedLlmsCorpus(
+			config,
+			inputSeed,
+			seed,
+			inputScope,
+			scope,
+			llmsOut,
+			llmsOptions,
+			attemptLimit,
+		);
+		if (redirected) {
+			return {
+				done: seedFirstCorpus(seedPage, redirected, config, attemptLimit),
+			};
 		}
 	}
-	if (redirected) {
+
+	const sitemap = await discoverSitemapIndex(
+		seed,
+		scope,
+		robots,
+		config,
+		attemptLimit,
+		allowResource,
+	);
+	if (hasCorpus(sitemap.pages, config)) {
 		return {
-			done: seedFirstCorpus(
-				seedEntry(seed, "seed", seedResponse),
-				redirected,
-				config,
-				attemptLimit,
-			),
+			done: seedFirstCorpus(seedPage, sitemap.pages, config, attemptLimit),
+			truncated: sitemap.truncated,
 		};
 	}
 
@@ -365,18 +362,100 @@ async function resolveHtmlSeed(
 		seed,
 		scope,
 		robots,
-		allowResource: (url) => resourceAllowed(url, config),
+		allowResource,
 		llmsOptions,
 		seedResponse,
 		seedResources,
 		seedIsLanguageSelector,
 		finalSeed,
 		inputSeed,
+		indexUrls: [...llmsOut, ...sitemap.pages],
 	};
 	return {
 		frontier: createDiscoveryFrontier(context),
-		allowResource: context.allowResource,
+		allowResource,
 	};
+}
+
+async function redirectedLlmsCorpus(
+	config: PipelineConfig,
+	inputSeed: string,
+	seed: string,
+	inputScope: string,
+	scope: string,
+	llmsOut: DiscoveredUrl[],
+	llmsOptions: LlmsCorpusOptions,
+	attemptLimit: number,
+): Promise<DiscoveredUrl[] | undefined> {
+	if (seed !== inputSeed || scope !== inputScope) {
+		const adjusted = await discoverLlmsCorpus(
+			seed,
+			seed,
+			scope,
+			config,
+			llmsOptions,
+			attemptLimit,
+		);
+		if (llmsIsCorpus(adjusted, config, scope)) return adjusted;
+	}
+	const seedUrl = new URL(seed);
+	const inputUrl = new URL(inputSeed);
+	if (
+		seedUrl.pathname.endsWith("/") ||
+		inputUrl.pathname.split("/").filter(Boolean).length !== 1
+	) {
+		return;
+	}
+	const sameOrigin = seedUrl.origin === inputUrl.origin;
+	const root = await discoverLlmsCorpus(
+		seed,
+		sameOrigin ? inputSeed : seed,
+		sameOrigin ? inputScope : "/",
+		config,
+		llmsOptions,
+		attemptLimit,
+	);
+	if (
+		root.length > llmsOut.length &&
+		llmsIsCorpus(root, config, sameOrigin ? inputScope : "/")
+	) {
+		return root;
+	}
+	return undefined;
+}
+
+async function discoverSitemapIndex(
+	seed: string,
+	scope: string,
+	robots: Robots,
+	config: PipelineConfig,
+	attemptLimit: number,
+	allowResource: FetchUrlGate,
+): Promise<{ pages: DiscoveredUrl[]; truncated: boolean }> {
+	const sitemap = await discoverSitemaps(seed, robots.sitemaps, config, {
+		limit: candidateWindow(config, attemptLimit),
+		scope,
+		accept: (url) => robots.allowed(url),
+		allowResource,
+	});
+	const ranked = config.maxExplicit
+		? orderByTopic(sitemap.urls, seed, scope, config.topic)
+		: sitemap.urls;
+	const pages: DiscoveredUrl[] = [];
+	const seen = new Set<string>();
+	for (const url of ranked) {
+		addDiscovered(pages, seen, url, "sitemap", seed, scope);
+		if (config.maxExplicit && pages.length >= attemptLimit) break;
+	}
+	return { pages, truncated: sitemap.truncated };
+}
+
+function llmsIsCorpus(
+	out: DiscoveredUrl[],
+	config: PipelineConfig,
+	scope: string,
+) {
+	return scope === "/" ? out.length > 0 : hasCorpus(out, config);
 }
 
 function hasCorpus(out: DiscoveredUrl[], config: PipelineConfig) {
