@@ -202,6 +202,45 @@ test("bypasses final-document robots only for an explicit seed", async () => {
 	}
 });
 
+test("stores the rendered final URL without userinfo or hash", async () => {
+	const cdp = new FakeCdp("https://user:secret@docs.example.com/guide#section");
+	const renderer = new ChromiumRenderer(cdp, testConfig("unused"));
+	try {
+		const result = await renderer.renderPage(
+			okFetch(
+				"https://docs.example.com/guide",
+				"<html><body><main>Loading documentation</main></body></html>",
+			),
+			{ explicitSeed: true },
+		);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.result.finalUrl).toBe("https://docs.example.com/guide");
+	} finally {
+		await renderer.close();
+	}
+});
+
+test("rejects a rendered final URL that is not public HTTP", async () => {
+	const cdp = new FakeCdp("http://127.0.0.1/guide");
+	const renderer = new ChromiumRenderer(cdp, testConfig("unused"));
+	try {
+		const result = await renderer.renderPage(
+			okFetch(
+				"https://docs.example.com/guide",
+				"<html><body><main>Loading documentation</main></body></html>",
+			),
+			{ explicitSeed: true },
+		);
+		expect(result).toMatchObject({
+			ok: false,
+			error: "Rendered page ended at an unsafe URL",
+		});
+	} finally {
+		await renderer.close();
+	}
+});
+
 test("labels rendered HTTP error documents with an explicit FailureKind", async () => {
 	const cdp = new FakeCdp("https://docs.example.com/missing");
 	const renderer = new ChromiumRenderer(cdp, testConfig("unused"));

@@ -1,4 +1,5 @@
 import { maxGeneratedMediaUrls } from "../core/config.ts";
+import { artifactUrl } from "../core/identity.ts";
 import {
 	isJsonBoolean,
 	isJsonNumber,
@@ -206,7 +207,8 @@ export class ChromiumRenderer {
 			}
 			if (!page?.[0]) throw new Error("Rendered page was empty");
 			const finalUrl = artifactUrl(page[1]);
-			if (!finalUrl) throw new Error("Rendered page ended at an unsafe URL");
+			if (!finalUrl || validatePublicHttpUrl(finalUrl))
+				throw new Error("Rendered page ended at an unsafe URL");
 			if (!options.explicitSeed) {
 				const robots = await this.robotsFor(run, new URL(finalUrl).origin);
 				if (!robots?.allowed(finalUrl))
@@ -731,7 +733,7 @@ export class ChromiumRenderer {
 
 	private addMedia(run: Run, raw: string) {
 		const url = artifactUrl(raw);
-		if (!url || run.media.has(url)) return;
+		if (!url || validatePublicHttpUrl(url) || run.media.has(url)) return;
 		if (run.media.size >= maxGeneratedMediaUrls) {
 			run.truncated = true;
 			return;
@@ -870,13 +872,6 @@ function httpDocumentKind(status: number): FailureKind {
 	if (status === 404 || status === 410) return "not_found";
 	if (status === 401 || status === 403 || status === 429) return "blocked";
 	return status > 0 ? "http" : "fetch";
-}
-
-function artifactUrl(raw: string) {
-	if (validatePublicHttpUrl(raw)) return;
-	const url = new URL(raw);
-	url.hash = "";
-	return url.href;
 }
 
 function requestKey(sessionId: string | undefined, requestId: string) {

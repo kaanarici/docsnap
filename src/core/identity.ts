@@ -36,6 +36,19 @@ export function candidateKey(raw: string) {
 	return routeKey(raw) ?? raw;
 }
 
+export function artifactUrl(raw: string): string | undefined {
+	try {
+		const url = new URL(raw);
+		if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+		url.username = "";
+		url.password = "";
+		url.hash = "";
+		return url.href;
+	} catch {
+		return undefined;
+	}
+}
+
 function urlKey(raw: string) {
 	const url = cleanUrl(raw);
 	if (!url) return undefined;

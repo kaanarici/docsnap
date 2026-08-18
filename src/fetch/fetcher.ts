@@ -1,4 +1,5 @@
 import { fetchWithCache, type UncachedFetch } from "../cache/cached-fetch.ts";
+import { artifactUrl } from "../core/identity.ts";
 import { awaitWithSignal, runBounded } from "../core/parallel.ts";
 import { hasMarkdownBody } from "../core/text.ts";
 import type {
@@ -465,19 +466,6 @@ function redirectHop(
 
 function artifactFinalUrl(raw: string, fallback: string) {
 	return artifactUrl(raw) ?? artifactUrl(fallback) ?? fallback;
-}
-
-function artifactUrl(raw: string): string | undefined {
-	try {
-		const url = new URL(raw);
-		if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
-		url.username = "";
-		url.password = "";
-		url.hash = "";
-		return url.href;
-	} catch {
-		return undefined;
-	}
 }
 
 function fail(
