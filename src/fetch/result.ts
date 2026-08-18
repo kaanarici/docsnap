@@ -25,7 +25,6 @@ export function failed(
 	};
 }
 
-// Chromium still classifies HTTP status through this helper until wave 2.
 export function failureKind(status: number, _error: string): FailureKind {
 	if (status === 404 || status === 410) return "not_found";
 	if (status === 401 || status === 403 || status === 429) return "blocked";

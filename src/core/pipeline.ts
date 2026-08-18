@@ -35,7 +35,18 @@ import {
 	stagePages,
 	stageStalePages,
 } from "../output/writer.ts";
-import type { ChromiumRenderer } from "../render/chromium.ts";
+import {
+	type ChromeSession,
+	chromeBudgetMs,
+	chromeRunSummary,
+	chromeStopped,
+	closeChromeSession,
+	createChromeSession,
+	maxConsecutiveRenderMisses,
+	needsChrome,
+	renderChromePage,
+	skipChrome,
+} from "../render/session.ts";
 import { buildSummary } from "../report/summary.ts";
 import {
 	discoveryAttemptLimit,
@@ -68,12 +79,7 @@ import type {
 import { lowQualityConfidence } from "./types.ts";
 
 type Progress = (message: string) => void;
-type RenderContext = NonNullable<PipelineResult["summary"]["render"]> & {
-	browser?: ChromiumRenderer;
-	misses: number;
-};
 type PriorRecoveryUpdates = Parameters<typeof recoverPriorPage>[2];
-const maxConsecutiveRenderMisses = 3;
 const extractModule = import("../extract/pool.ts");
 export async function runPipeline(
 	config: PipelineConfig,
@@ -81,26 +87,12 @@ export async function runPipeline(
 ): Promise<PipelineResult> {
 	assertOutputRootSafe(config);
 	const lock = await acquireOutputLock(config);
-	const render: RenderContext = {
-		renderer: "chrome-cdp",
-		attempted: 0,
-		rendered: 0,
-		recovered: 0,
-		failed: 0,
-		launchMs: 0,
-		renderMs: 0,
-		blockedRequests: 0,
-		fulfilledRequests: 0,
-		relayedBytes: 0,
-		skipped: 0,
-		truncated: false,
-		misses: 0,
-	};
+	const render = createChromeSession();
 	try {
 		return await runPipelineLocked(config, render, progress);
 	} finally {
 		try {
-			await render.browser?.close();
+			await closeChromeSession(render);
 		} finally {
 			await releaseOutputLock(lock);
 		}
@@ -108,7 +100,7 @@ export async function runPipeline(
 }
 async function runPipelineLocked(
 	config: PipelineConfig,
-	render: RenderContext,
+	render: ChromeSession,
 	progress?: Progress,
 ): Promise<PipelineResult> {
 	const started = performance.now();
@@ -178,8 +170,7 @@ async function runPipelineLocked(
 			(record) => record.ok && (config.maxExplicit || record.source !== "llms"),
 		).length;
 	}
-	await render.browser?.close();
-	delete render.browser;
+	await closeChromeSession(render);
 
 	const successfulPages = pageRecords
 		.filter((record): record is PageSuccess => record.ok)
@@ -273,7 +264,6 @@ async function runPipelineLocked(
 			const output = record.ok ? rendered.get(record) : record;
 			return output ? [output] : [];
 		});
-		const { browser: _browser, misses: _misses, ...renderStats } = render;
 		const summary = buildSummary(
 			pageRecords,
 			staged.outputs,
@@ -287,13 +277,7 @@ async function runPipelineLocked(
 			cacheSummary(config),
 			discovery.seedResource,
 			discovery.frontier.truncated,
-			render.attempted === 0
-				? undefined
-				: {
-						...renderStats,
-						launchMs: Number(renderStats.launchMs.toFixed(1)),
-						renderMs: Number(renderStats.renderMs.toFixed(1)),
-					},
+			chromeRunSummary(render),
 		);
 		await commitStagedOutput(staged, runRecords, summary, config);
 		return { records: runRecords, summary };
@@ -354,7 +338,7 @@ async function fetchAndExtract(
 	prior: PriorState,
 	refresh: RefreshCounters,
 	frontier: DiscoveryFrontier,
-	render: RenderContext,
+	render: ChromeSession,
 	onContent: () => void,
 	progress?: Progress,
 ): Promise<PageRecord[]> {
@@ -412,76 +396,45 @@ async function renderAppShells(
 	shells: boolean[],
 	config: PipelineConfig,
 	frontier: DiscoveryFrontier,
-	context: RenderContext,
+	session: ChromeSession,
 	progress?: Progress,
 ): Promise<PageRecord[]> {
 	const indexes = inputs.flatMap((input, index) => {
 		const record = records[index];
-		const result = input.result;
-		const shell =
-			record &&
-			shells[index] &&
-			(record.ok
-				? record.confidence < lowQualityConfidence
-				: record.failureKind === "empty");
-		return result.ok && !result.notModified && shell ? [index] : [];
+		return record &&
+			input.result.ok &&
+			!input.result.notModified &&
+			needsChrome(record, shells[index] === true)
+			? [index]
+			: [];
 	});
 	if (indexes.length === 0) return records;
-	if (context.stopReason || context.unavailable) {
-		context.skipped += indexes.length;
+	if (chromeStopped(session)) {
+		skipChrome(session, indexes.length);
 		return records;
 	}
-	const budget = Math.min(
-		120_000,
-		Math.max(config.timeoutMs, config.max * 1_500),
-	);
-	if (!context.browser) {
-		const { openChromiumRenderer } = await import("../render/chromium.ts");
-		const opened = await openChromiumRenderer(config);
-		if (!opened.ok) {
-			context.attempted++;
-			context.failed++;
-			context.launchMs = opened.launchMs;
-			context.unavailable = opened.error;
-			context.skipped += indexes.length;
-			return records;
-		}
-		context.browser = opened.renderer;
-	}
-
+	const budget = chromeBudgetMs(config);
 	progress?.("docsnap: rendering app shells");
 	const output = [...records];
 	for (const [offset, index] of indexes.entries()) {
-		if (context.misses >= maxConsecutiveRenderMisses) {
-			context.skipped += indexes.length - offset;
-			context.truncated = true;
-			context.stopReason = "no_recovery";
+		if (session.misses >= maxConsecutiveRenderMisses) {
+			skipChrome(session, indexes.length - offset, "no_recovery");
 			break;
 		}
-		const remaining = budget - context.renderMs;
+		const remaining = budget - session.renderMs;
 		if (remaining <= 0) {
-			context.skipped += indexes.length - offset;
-			context.truncated = true;
-			context.stopReason = "budget";
+			skipChrome(session, indexes.length - offset, "budget");
 			break;
 		}
 		const input = inputs[index]!;
-		context.attempted++;
-		const result = await context.browser.renderPage(input.result, {
-			explicitSeed: input.wasSeed === true,
-			signal: AbortSignal.timeout(
-				Math.max(1, Math.min(config.timeoutMs, Math.ceil(remaining))),
-			),
-		});
-		context.launchMs ||= result.metrics.launchMs;
-		context.renderMs += result.metrics.renderMs;
-		context.blockedRequests += result.metrics.blockedRequests;
-		context.fulfilledRequests += result.metrics.fulfilledRequests;
-		context.relayedBytes += result.metrics.relayedBytes;
-		context.truncated ||= result.metrics.truncated;
+		const result = await renderChromePage(session, input, config, remaining);
+		if (!result) {
+			skipChrome(session, indexes.length - offset);
+			break;
+		}
 		if (!result.ok) {
-			context.failed++;
-			context.misses++;
+			session.failed++;
+			session.misses++;
 			const record = output[index];
 			if (record && !record.ok) {
 				record.error = `client render: ${result.error.slice(0, 300)}`;
@@ -489,11 +442,11 @@ async function renderAppShells(
 			}
 			continue;
 		}
-		context.rendered++;
+		session.rendered++;
 		const page = { ...input, result: result.result };
 		const [extracted] = await (await extractModule).extractMany([page]);
 		if (!extracted) {
-			context.misses++;
+			session.misses++;
 			continue;
 		}
 		const [record, resources] = extracted;
@@ -513,7 +466,7 @@ async function renderAppShells(
 			...new Set([...original.injectionSignals, ...record.injectionSignals]),
 		];
 		if (!record.ok) {
-			context.misses++;
+			session.misses++;
 			if (!page.result.ok) output[index] = record;
 			continue;
 		}
@@ -522,11 +475,12 @@ async function renderAppShells(
 			record.confidence < lowQualityConfidence &&
 			record.confidence <= original.confidence
 		) {
-			context.misses++;
+			session.misses++;
 			continue;
 		}
-		context.recovered++;
-		context.misses = 0;
+		session.recovered++;
+		session.misses = 0;
+		record.byteSource = "chrome";
 		mergeResources(record, {
 			links: resources.links,
 			media: [...resources.media, ...metrics.mediaUrls],

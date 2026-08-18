@@ -201,3 +201,29 @@ test("bypasses final-document robots only for an explicit seed", async () => {
 		server.stop(true);
 	}
 });
+
+test("labels rendered HTTP error documents with an explicit FailureKind", async () => {
+	const cdp = new FakeCdp("https://docs.example.com/missing");
+	const renderer = new ChromiumRenderer(cdp, testConfig("unused"));
+	try {
+		const result = await renderer.renderPage(
+			okFetch(
+				"https://docs.example.com/missing",
+				"<html><body><main>Missing</main></body></html>",
+				{ status: 404 },
+			),
+			{ explicitSeed: true },
+		);
+		expect(result).toMatchObject({
+			ok: true,
+			result: {
+				ok: false,
+				status: 404,
+				failureKind: "not_found",
+				error: "HTTP 404",
+			},
+		});
+	} finally {
+		await renderer.close();
+	}
+});

@@ -6,9 +6,17 @@ import type {
 	FetchedUrl,
 	PipelineConfig,
 } from "../core/types.ts";
-import { isRecoverableAppShell } from "../extract/app-shell.ts";
 import { fetchMany } from "../fetch/fetcher.ts";
-import type { ChromiumRenderer } from "../render/chromium.ts";
+import {
+	type ChromeSession,
+	chromeBudgetMs,
+	chromeStopped,
+	closeChromeSession,
+	createChromeSession,
+	needsChromeFetch,
+	renderChromePage,
+	skipChrome,
+} from "../render/session.ts";
 import { startDiscovery } from "./index.ts";
 import { normalizeUrl } from "./url.ts";
 
@@ -44,21 +52,14 @@ export async function discoverMap(
 	const urls: DiscoveredUrl[] = [];
 	const seen = new Set<string>();
 	const scheduled = new Set<string>();
-	const render: DiscoveryRenderSummary = {
-		attempted: 0,
-		rendered: 0,
-		failed: 0,
-		skipped: 0,
-		truncated: false,
-	};
-	let renderer: ChromiumRenderer | undefined;
+	const chrome = createChromeSession();
+	const errors: NonNullable<DiscoveryRenderSummary["errors"]> = [];
 	let renderDeadline: number | undefined;
 	const renderQueue: FetchedUrl[] = [];
 	const queuedRender = new Set<string>();
 	let slots = 0;
 	let pulled = 0;
 	let exhausted = false;
-	let renderMisses = 0;
 	try {
 		const pending: DiscoveredUrl[] = [];
 		const known = new Set<string>();
@@ -80,32 +81,31 @@ export async function discoverMap(
 					? pending.splice(0, batchSize)
 					: await session.frontier.take(batchSize);
 			if (pulledBatch.length === 0) {
-				const page =
-					!render.stopReason && !render.unavailable && renderQueue.shift();
+				const page = !chromeStopped(chrome) && renderQueue.shift();
 				if (page) {
-					renderDeadline ??=
-						performance.now() +
-						Math.min(120_000, Math.max(config.timeoutMs, limit * 1_500));
-					const rendered = render.rendered;
+					renderDeadline ??= performance.now() + chromeBudgetMs(config, limit);
+					const rendered = chrome.rendered;
 					const queued = session.frontier.queued;
-					renderer = await renderDiscoveryShell(
+					await renderDiscoveryShell(
 						page,
 						config,
-						render,
-						renderer,
+						chrome,
+						errors,
 						renderDeadline,
 					);
-					if (render.rendered > rendered) {
+					if (chrome.rendered > rendered) {
 						session.frontier.observe(page.result);
-						renderMisses =
-							session.frontier.queued > queued ? 0 : renderMisses + 1;
-					} else renderMisses++;
-					if (render.unavailable || renderMisses >= 3 || render.stopReason) {
-						if (!render.unavailable) {
-							render.truncated = true;
-							render.stopReason ??= "no_new_urls";
-						}
-						render.skipped += renderQueue.length;
+						chrome.misses =
+							session.frontier.queued > queued ? 0 : chrome.misses + 1;
+					} else chrome.misses++;
+					if (chromeStopped(chrome)) {
+						if (!chrome.unavailable) {
+							skipChrome(
+								chrome,
+								renderQueue.length,
+								chrome.stopReason ?? "no_new_urls",
+							);
+						} else skipChrome(chrome, renderQueue.length);
 						renderQueue.length = 0;
 					}
 					continue;
@@ -131,10 +131,8 @@ export async function discoverMap(
 						scheduled.add(candidateKey(page.result.finalUrl));
 					}
 					if (
-						!page.result.ok ||
-						page.result.notModified ||
 						!normalizeUrl(page.result.finalUrl) ||
-						!isRecoverableAppShell(page.result.body)
+						!needsChromeFetch(page.result)
 					)
 						continue;
 					const key = candidateKey(page.result.finalUrl);
@@ -166,8 +164,9 @@ export async function discoverMap(
 			}
 		}
 	} finally {
-		await renderer?.close();
+		await closeChromeSession(chrome);
 	}
+	const render = mapRenderSummary(chrome, errors);
 	const result: DiscoveryRun = {
 		urls,
 		truncated: session.frontier.truncated || render.truncated,
@@ -187,51 +186,48 @@ export async function discoverMap(
 async function renderDiscoveryShell(
 	page: FetchedUrl,
 	config: PipelineConfig,
-	summary: DiscoveryRenderSummary,
-	renderer: ChromiumRenderer | undefined,
+	chrome: ChromeSession,
+	errors: NonNullable<DiscoveryRenderSummary["errors"]>,
 	deadline: number,
 ) {
 	const remaining = deadline - performance.now();
-	if (remaining <= 0) {
-		summary.truncated = true;
-		summary.stopReason = "budget";
-		return renderer;
-	}
-	summary.attempted++;
-	if (!renderer) {
-		const opened = await import("../render/chromium.ts").then((module) =>
-			module.openChromiumRenderer(config),
-		);
-		if (!opened.ok) {
-			summary.unavailable = opened.error;
-			summary.failed++;
-			return;
-		}
-		renderer = opened.renderer;
-	}
-	const rendered = await renderer.renderPage(page.result, {
-		explicitSeed: page.wasSeed === true,
-		signal: AbortSignal.timeout(
-			Math.max(1, Math.min(config.timeoutMs, Math.ceil(remaining))),
-		),
-	});
-	summary.truncated ||= rendered.metrics.truncated;
+	const rendered = await renderChromePage(chrome, page, config, remaining);
+	if (!rendered) return;
 	if (rendered.ok && rendered.result.ok) {
 		page.result = rendered.result;
-		summary.rendered++;
-	} else {
-		const error = rendered.ok ? rendered.result.error : rendered.error;
-		summary.failed++;
-		summary.errors ??= [];
-		if (summary.errors.length < 5) {
-			summary.errors.push({
-				url: rendered.ok ? rendered.result.finalUrl : page.result.finalUrl,
-				kind: rendered.ok ? "render" : rendered.kind,
-				error: (error ?? "Client render failed").slice(0, 300),
-			});
-		}
+		chrome.rendered++;
+		return;
 	}
-	return renderer;
+	chrome.failed++;
+	const error = rendered.ok ? rendered.result.error : rendered.error;
+	if (errors.length < 5) {
+		errors.push({
+			url: rendered.ok ? rendered.result.finalUrl : page.result.finalUrl,
+			kind: rendered.ok ? "render" : rendered.kind,
+			error: (error ?? "Client render failed").slice(0, 300),
+		});
+	}
+}
+
+function mapRenderSummary(
+	chrome: ChromeSession,
+	errors: NonNullable<DiscoveryRenderSummary["errors"]>,
+): DiscoveryRenderSummary {
+	const stopReason =
+		chrome.stopReason === "budget" || chrome.stopReason === "no_new_urls"
+			? chrome.stopReason
+			: undefined;
+	const summary: DiscoveryRenderSummary = {
+		attempted: chrome.attempted,
+		rendered: chrome.rendered,
+		failed: chrome.failed,
+		skipped: chrome.skipped,
+		truncated: chrome.truncated,
+	};
+	if (stopReason) summary.stopReason = stopReason;
+	if (chrome.unavailable) summary.unavailable = chrome.unavailable;
+	if (errors.length) summary.errors = errors;
+	return summary;
 }
 
 function releaseSuccessfulFetch(item: DiscoveredUrl): DiscoveredUrl {

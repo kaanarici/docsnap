@@ -1,0 +1,171 @@
+import type {
+	FetchedUrl,
+	FetchResult,
+	PageRecord,
+	PipelineConfig,
+	PipelineResult,
+} from "../core/types.ts";
+import { isRecoverableAppShell } from "../extract/app-shell.ts";
+import {
+	type ChromiumRenderer,
+	type ChromiumRenderResult,
+	openChromiumRenderer,
+} from "./chromium.ts";
+
+export const maxConsecutiveRenderMisses = 3;
+
+export type ChromeStopReason = "budget" | "no_recovery" | "no_new_urls";
+
+export type ChromeSession = {
+	renderer: "chrome-cdp";
+	attempted: number;
+	rendered: number;
+	recovered: number;
+	failed: number;
+	launchMs: number;
+	renderMs: number;
+	blockedRequests: number;
+	fulfilledRequests: number;
+	relayedBytes: number;
+	skipped: number;
+	truncated: boolean;
+	stopReason?: ChromeStopReason;
+	unavailable?: string;
+	misses: number;
+	browser?: ChromiumRenderer;
+};
+
+export function createChromeSession(): ChromeSession {
+	return {
+		renderer: "chrome-cdp",
+		attempted: 0,
+		rendered: 0,
+		recovered: 0,
+		failed: 0,
+		launchMs: 0,
+		renderMs: 0,
+		blockedRequests: 0,
+		fulfilledRequests: 0,
+		relayedBytes: 0,
+		skipped: 0,
+		truncated: false,
+		misses: 0,
+	};
+}
+
+export function chromeBudgetMs(config: PipelineConfig, pages = config.max) {
+	return Math.min(120_000, Math.max(config.timeoutMs, pages * 1_500));
+}
+
+export function chromeStopped(session: ChromeSession) {
+	return Boolean(
+		session.stopReason ||
+			session.unavailable ||
+			session.misses >= maxConsecutiveRenderMisses,
+	);
+}
+
+export function skipChrome(
+	session: ChromeSession,
+	count: number,
+	reason?: ChromeStopReason,
+) {
+	session.skipped += count;
+	if (!reason) return;
+	session.truncated = true;
+	session.stopReason = reason;
+}
+
+export function needsChrome(record: PageRecord, shell: boolean) {
+	const appShell = record.ok
+		? record.kind
+			? record.kind === "app-shell"
+			: shell
+		: shell;
+	return appShell && (record.ok || record.failureKind === "empty");
+}
+
+export function needsChromeFetch(result: FetchResult) {
+	return (
+		result.ok &&
+		!result.notModified &&
+		Boolean(result.body) &&
+		isRecoverableAppShell(result.body)
+	);
+}
+
+export async function closeChromeSession(session: ChromeSession) {
+	const browser = session.browser;
+	delete session.browser;
+	await browser?.close();
+}
+
+export async function renderChromePage(
+	session: ChromeSession,
+	input: FetchedUrl,
+	config: PipelineConfig,
+	remainingMs: number,
+): Promise<ChromiumRenderResult | undefined> {
+	if (remainingMs <= 0) {
+		session.truncated = true;
+		session.stopReason = "budget";
+		return;
+	}
+	if (!(await ensureChrome(session, config)) || !session.browser) return;
+	session.attempted++;
+	const rendered = await session.browser.renderPage(input.result, {
+		explicitSeed: input.wasSeed === true,
+		signal: AbortSignal.timeout(
+			Math.max(1, Math.min(config.timeoutMs, Math.ceil(remainingMs))),
+		),
+	});
+	session.launchMs ||= rendered.metrics.launchMs;
+	session.renderMs += rendered.metrics.renderMs;
+	session.blockedRequests += rendered.metrics.blockedRequests;
+	session.fulfilledRequests += rendered.metrics.fulfilledRequests;
+	session.relayedBytes += rendered.metrics.relayedBytes;
+	session.truncated ||= rendered.metrics.truncated;
+	return rendered;
+}
+
+export function chromeRunSummary(
+	session: ChromeSession,
+): PipelineResult["summary"]["render"] {
+	if (session.attempted === 0) return;
+	const stopReason =
+		session.stopReason === "budget" || session.stopReason === "no_recovery"
+			? session.stopReason
+			: undefined;
+	const summary: NonNullable<PipelineResult["summary"]["render"]> = {
+		renderer: "chrome-cdp",
+		attempted: session.attempted,
+		rendered: session.rendered,
+		recovered: session.recovered,
+		failed: session.failed,
+		launchMs: Number(session.launchMs.toFixed(1)),
+		renderMs: Number(session.renderMs.toFixed(1)),
+		blockedRequests: session.blockedRequests,
+		fulfilledRequests: session.fulfilledRequests,
+		relayedBytes: session.relayedBytes,
+		skipped: session.skipped,
+		truncated: session.truncated,
+	};
+	if (stopReason) summary.stopReason = stopReason;
+	if (session.unavailable) summary.unavailable = session.unavailable;
+	return summary;
+}
+
+async function ensureChrome(session: ChromeSession, config: PipelineConfig) {
+	if (session.unavailable || session.stopReason) return false;
+	if (session.browser) return true;
+	const opened = await openChromiumRenderer(config);
+	if (!opened.ok) {
+		session.attempted++;
+		session.failed++;
+		session.launchMs = opened.launchMs;
+		session.unavailable = opened.error;
+		return false;
+	}
+	session.browser = opened.renderer;
+	return true;
+}

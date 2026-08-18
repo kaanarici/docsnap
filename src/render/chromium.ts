@@ -7,11 +7,15 @@ import {
 	type JsonValue,
 } from "../core/json.ts";
 import { awaitWithSignal } from "../core/parallel.ts";
-import type { FetchResult, HeaderMap, PipelineConfig } from "../core/types.ts";
+import type {
+	FailureKind,
+	FetchResult,
+	HeaderMap,
+	PipelineConfig,
+} from "../core/types.ts";
 import { loadRobots, maxRobotsBytes, type Robots } from "../discover/robots.ts";
 import { declaredCharset } from "../fetch/body.ts";
 import { responseHeadersFor } from "../fetch/fetcher.ts";
-import { failureKind } from "../fetch/result.ts";
 import { requestPublicHttp } from "../fetch/transport.ts";
 import { validatePublicHttpUrl } from "../security/url.ts";
 import {
@@ -59,7 +63,7 @@ export type ChromiumRenderMetrics = {
 	truncated: boolean;
 };
 
-type ChromiumRenderResult =
+export type ChromiumRenderResult =
 	| { ok: true; result: FetchResult; metrics: ChromiumRenderMetrics }
 	| {
 			ok: false;
@@ -232,10 +236,7 @@ export class ChromiumRenderer {
 							...rendered,
 							ok: false,
 							error: `HTTP ${document.status}`,
-							failureKind: failureKind(
-								document.status,
-								`HTTP ${document.status}`,
-							),
+							failureKind: httpDocumentKind(document.status),
 						};
 			return {
 				ok: true,
@@ -863,6 +864,12 @@ function shellFulfillment(
 	if (shell.body.includes("\uFFFD")) return;
 	const contentType = shell.contentType.split(";")[0]?.trim() || "text/html";
 	return { contentType: `${contentType}; charset=utf-8` };
+}
+
+function httpDocumentKind(status: number): FailureKind {
+	if (status === 404 || status === 410) return "not_found";
+	if (status === 401 || status === 403 || status === 429) return "blocked";
+	return status > 0 ? "http" : "fetch";
 }
 
 function artifactUrl(raw: string) {
