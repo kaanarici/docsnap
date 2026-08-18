@@ -1,5 +1,5 @@
 import type { FailureKind, FetchResult, RedirectHop } from "../core/types.ts";
-import { isTooLargeError, isUnsafeUrlError } from "./retry.ts";
+import { isTooLargeError } from "./retry.ts";
 
 export function failed(
 	url: string,
@@ -7,9 +7,9 @@ export function failed(
 	status: number,
 	started: number,
 	error: string,
+	kind: FailureKind,
 	redirects: RedirectHop[] = [],
 ): FetchResult {
-	const normalizedError = normalizeFailureError(error);
 	return {
 		url,
 		finalUrl,
@@ -20,21 +20,15 @@ export function failed(
 		fetchMs: performance.now() - started,
 		redirects,
 		fetchedAt: new Date().toISOString(),
-		error: normalizedError,
-		failureKind: failureKind(status, normalizedError),
+		error: normalizeFailureError(error),
+		failureKind: kind,
 	};
 }
 
-export function failureKind(status: number, error: string): FailureKind {
-	// an explicit robots/challenge block wins over the upstream status: a route
-	// fallback denied by robots can carry the original 404, but the real cause is
-	// "do not fetch", not "stale URL"
-	if (/blocked|challenge/i.test(error)) return "blocked";
+// Chromium still classifies HTTP status through this helper until wave 2.
+export function failureKind(status: number, _error: string): FailureKind {
 	if (status === 404 || status === 410) return "not_found";
-	if ([401, 403, 429].includes(status)) return "blocked";
-	if (/exceeds/i.test(error)) return "too_large";
-	if (isUnsafeUrlError(error)) return "unsafe_url";
-	if (/timeout|timed out|abort/i.test(error)) return "timeout";
+	if (status === 401 || status === 403 || status === 429) return "blocked";
 	if (status > 0) return "http";
 	return "fetch";
 }
