@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { candidateKey, identityKeys } from "../src/core/identity.ts";
+import {
+	artifactUrl,
+	candidateKey,
+	identityKeys,
+} from "../src/core/identity.ts";
 import {
 	classifyDiscoveryResource,
 	relatedHost,
@@ -129,6 +133,26 @@ describe("URL identity", () => {
 		expect(normalizeUrl("https://docs.example.com/guide?redirect=/next")).toBe(
 			"https://docs.example.com/guide?redirect=%2Fnext",
 		);
+	});
+
+	test("strips userinfo and hash from artifact URLs without applying the SSRF gate", () => {
+		expect(artifactUrl("https://user:secret@example.com/guide#section")).toBe(
+			"https://example.com/guide",
+		);
+		expect(artifactUrl("https://example.com/guide?version=1#top")).toBe(
+			"https://example.com/guide?version=1",
+		);
+		expect(artifactUrl("https://example.com/guide?utm_source=x")).toBe(
+			"https://example.com/guide?utm_source=x",
+		);
+		expect(artifactUrl("http://127.0.0.1/guide")).toBe(
+			"http://127.0.0.1/guide",
+		);
+		expect(validatePublicHttpUrl("http://127.0.0.1/guide")).toContain(
+			"private",
+		);
+		expect(artifactUrl("file:///etc/passwd")).toBeUndefined();
+		expect(artifactUrl("not a url")).toBeUndefined();
 	});
 });
 
