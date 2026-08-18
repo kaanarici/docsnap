@@ -12,6 +12,7 @@ import type {
 	FetchResult,
 	InlineStateSource,
 	PageExtractor,
+	PageKind,
 	PageRecord,
 } from "../core/types.ts";
 import { scanMarkdownForInjectionSignals } from "../security/injection.ts";
@@ -41,11 +42,12 @@ export function recordFromExtracted(
 	extracted: ExtractedBody,
 	started: number,
 	rawSignals: PageRecord["injectionSignals"],
-	shell: boolean,
+	kind: PageKind,
 ): PageRecord {
 	const { metadata, result, source, wasSeed } = input;
 	const markdown = cleanMarkdown(extracted.markdown);
 	const title = titleFromContent(markdown, extracted.title);
+	const shell = kind === "app-shell";
 	const emptyError = shell ? shellError : "empty content";
 	const fail = (
 		error: string,
@@ -152,6 +154,7 @@ export function recordFromExtracted(
 	if (extracted.inlineStateSource) {
 		page.inlineStateSource = extracted.inlineStateSource;
 	}
+	page.kind = kind;
 	return page;
 }
 

@@ -1,12 +1,12 @@
 import { parseHTML } from "linkedom";
 import { markdownLinkHrefs } from "../core/markdown.ts";
 import { uniqueByWhitespace, wordCount } from "../core/text.ts";
-import {
-	type FetchedUrl,
-	type FetchResult,
-	lowQualityConfidence,
-	type PageExtractor,
-	type PageRecord,
+import type {
+	FetchedUrl,
+	FetchResult,
+	PageExtractor,
+	PageKind,
+	PageRecord,
 } from "../core/types.ts";
 import { urlWithoutFragment } from "../core/url.ts";
 import { isFeedResponse } from "../discover/feed.ts";
@@ -16,7 +16,9 @@ import {
 } from "../discover/nav.ts";
 import { scanRawHtmlForInjectionSignals } from "../security/injection.ts";
 import {
+	blockedAccessError,
 	chromeHeading,
+	isLanguageSelector,
 	isRecoverableAppShell,
 	isShellPlaceholder,
 } from "./app-shell.ts";
@@ -25,6 +27,7 @@ import {
 	isStructuredTextAsset,
 	languageFromUrl,
 } from "./content.ts";
+import { parseWithDefuddle } from "./defuddle.ts";
 import { extractDocument } from "./document.ts";
 import { extractInlineState } from "./inline-state.ts";
 import { scriptBlocks } from "./inline-state-scan.ts";
@@ -33,7 +36,6 @@ import {
 	failedRecord,
 	recordFromExtracted,
 } from "./page-record.ts";
-import { scoreMarkdown } from "./quality.ts";
 import { structuredFallback } from "./structured-fallback.ts";
 import {
 	countTextChars,
@@ -48,15 +50,25 @@ import { titleFromMarkdown } from "./title.ts";
 
 export type ExtractedPage = [PageRecord, PageResources, boolean];
 
+type HtmlExtractKind = Extract<
+	PageKind,
+	"docs-html" | "article-html" | "app-shell"
+>;
+
+type HtmlClass =
+	| { kind: HtmlExtractKind }
+	| { kind: "empty"; error: string }
+	| { kind: "blocked"; error: string };
+
 export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 	const { metadata, result, source, wasSeed } = input;
 	const started = performance.now();
 	let resources: PageResources = { links: [], media: [] };
-	let shell = false;
+	let kind: PageKind | undefined;
 	const page = (record: PageRecord): ExtractedPage => [
 		record,
 		resources,
-		shell,
+		kind === "app-shell",
 	];
 	if (!result.ok)
 		return page(
@@ -71,6 +83,7 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 			),
 		);
 	if (result.document) {
+		kind = "binary";
 		const record = await extractDocument(input, started);
 		resources = {
 			links: record.links,
@@ -78,9 +91,8 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 		};
 		return page(record);
 	}
-	// rss/atom feeds are discovery sources, not content pages; exclude them from
-	// the corpus instead of capturing the raw feed XML as a page
-	if (shouldCheckFeedResponse(result) && isFeedResponse(result))
+	if (shouldCheckFeedResponse(result) && isFeedResponse(result)) {
+		kind = "feed";
 		return page(
 			failedRecord(
 				result,
@@ -92,28 +104,84 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 				wasSeed,
 			),
 		);
+	}
 	let signals: PageRecord["injectionSignals"] = [];
 
 	try {
+		const textAsset = isStructuredTextAsset(result);
+		const markdownLike = isMarkdownLike(result);
 		const document =
-			isStructuredTextAsset(result) || isMarkdownLike(result)
-				? undefined
-				: parseHTML(result.body).document;
+			textAsset || markdownLike ? undefined : parseHTML(result.body).document;
 		resources = discoverFetchedResources(result, document);
-		signals = isMarkdownLike(result)
+		signals = markdownLike
 			? []
 			: scanRawHtmlForInjectionSignals(result.body, document);
-		const scripts = document ? scriptBlocks(document) : undefined;
-		shell = document ? isRecoverableAppShell(result.body, document) : false;
-		const extracted = await extractBody(result, document, shell);
+		if (textAsset || markdownLike) {
+			kind = "markdown";
+			return page(
+				recordFromExtracted(
+					input,
+					textAsset ? textAssetBody(result) : markdownAssetBody(result),
+					started,
+					signals,
+					kind,
+				),
+			);
+		}
+		if (!document) {
+			kind = "empty";
+			return page(
+				failedRecord(
+					result,
+					source,
+					metadata,
+					"empty content",
+					"empty",
+					signals,
+					wasSeed,
+				),
+			);
+		}
+
+		const classified = classifyHtml(result, document);
+		kind = classified.kind;
+		if (classified.kind === "blocked") {
+			return page(
+				failedRecord(
+					result,
+					source,
+					metadata,
+					classified.error,
+					"blocked",
+					signals,
+					wasSeed,
+				),
+			);
+		}
+		if (classified.kind === "empty") {
+			return page(
+				failedRecord(
+					result,
+					source,
+					metadata,
+					classified.error,
+					"empty",
+					signals,
+					wasSeed,
+				),
+			);
+		}
+
+		const scripts = scriptBlocks(document);
+		const extracted = await extractBody(result, document, classified.kind);
 		const staticRecord = recordFromExtracted(
 			input,
 			extracted,
 			started,
 			signals,
-			shell,
+			classified.kind,
 		);
-		if (!scripts || !shouldRecoverInlineState(shell, staticRecord)) {
+		if (classified.kind !== "app-shell" || scripts.length === 0) {
 			return page(staticRecord);
 		}
 		try {
@@ -136,13 +204,12 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 				},
 				inlineStarted,
 				signals,
-				shell,
+				classified.kind,
 			);
 			return page(
-				(!inlineRecord.ok &&
-					(inlineRecord.failureKind === "not_found" ||
-						inlineRecord.failureKind === "blocked")) ||
-					(inlineRecord.ok && inlineRecord.confidence >= lowQualityConfidence)
+				inlineRecord.ok ||
+					inlineRecord.failureKind === "not_found" ||
+					inlineRecord.failureKind === "blocked"
 					? inlineRecord
 					: staticRecord,
 			);
@@ -164,25 +231,60 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 	}
 }
 
-function shouldRecoverInlineState(shell: boolean, record: PageRecord) {
-	if (
-		record.ok &&
-		record.confidence >= 0.9 &&
-		(record.extractor === "html" ||
-			(record.extractor === "structured" && wordCount(record.markdown) >= 200))
-	) {
-		return false;
+function classifyHtml(result: FetchResult, document: Document): HtmlClass {
+	if (!result.body.trim()) {
+		return { kind: "empty", error: "empty content" };
 	}
-	if (!shell) return false;
-	return record.ok
-		? record.confidence < lowQualityConfidence ||
-				record.extractor === "fallback" ||
-				record.extractor === "structured"
-		: record.failureKind === "empty" || record.failureKind === "extract";
+	if (isLanguageSelector(result.finalUrl, result.body)) {
+		return {
+			kind: "empty",
+			error: "language selector without article content",
+		};
+	}
+	const title = documentTitle(document);
+	const blocked = blockedAccessError(
+		document.body?.textContent?.slice(0, 4_000) ?? "",
+		title,
+		result.body,
+	);
+	if (blocked) return { kind: "blocked", error: blocked };
+	if (isRecoverableAppShell(result.body, document)) {
+		return { kind: "app-shell" };
+	}
+	if (isDocsHtml(document, result)) return { kind: "docs-html" };
+	return { kind: "article-html" };
 }
 
-// Fast precheck so the feed-root DOM parse only runs for XML-ish responses
-// or text/plain bodies that start like feed XML
+function isDocsHtml(document: Document, result: FetchResult) {
+	if (document.querySelector("[data-docsnap-root]")) return true;
+	if (docsHtmlMarker.test(result.body)) return true;
+	const generator = meta(document, "generator") ?? "";
+	if (docsGenerator.test(generator)) return true;
+	const main =
+		document.querySelector("main,[role=main],article") ?? document.body;
+	const headings = main?.querySelectorAll("h1,h2,h3").length ?? 0;
+	const code = main?.querySelectorAll("pre,table,dl").length ?? 0;
+	const navLinks = document.querySelectorAll(
+		"nav a, aside a, [class*='sidebar' i] a, [role='navigation'] a",
+	).length;
+	if (headings >= 3 && (code >= 2 || navLinks >= 20)) return true;
+	try {
+		const path = new URL(result.finalUrl).pathname;
+		return (
+			/\/(?:docs|documentation|reference)(?:\/|$)/i.test(path) &&
+			headings >= 2 &&
+			navLinks >= 8
+		);
+	} catch {
+		return false;
+	}
+}
+
+const docsHtmlMarker =
+	/data-docsnap-root|data-docsnap-writerside|\b__docusaurus\b|\bdocusaurus\b|\brst-content\b|\bwy-nav|\bsphinxsidebar\b|\bmkdocs\b|\bmd-content\b|\bvitepress\b|\bVPContent\b|\bVPDoc\b|\bnextra-|\bstarlight\b|\bfumadocs\b|\bmintlify\b|\bgitbook\b|\bwriterside\b|\bmdn-main-content\b|\bmain-page-content\b|\breadthedocs\b|\bantora\b|\bswagger-ui\b/i;
+const docsGenerator =
+	/docusaurus|sphinx|mkdocs|vitepress|starlight|gitbook|antora|jsdoc|typedoc|docfx|writerside/i;
+
 function shouldCheckFeedResponse(result: FetchResult): boolean {
 	if (/(?:rss|atom)\+xml|\bxml\b/i.test(result.contentType)) return true;
 	const prefix = result.body
@@ -199,143 +301,145 @@ function shouldCheckFeedResponse(result: FetchResult): boolean {
 
 async function extractBody(
 	result: FetchResult,
-	parsedDocument?: Document,
-	shell = false,
+	document: Document,
+	kind: HtmlExtractKind,
 ): Promise<ExtractedBody> {
-	if (isStructuredTextAsset(result)) {
-		const title = titleFromMarkdown("", new URL(result.finalUrl).pathname);
-		return extractedBody(
-			renderTextAsset(title, result.body, result.finalUrl),
-			"text",
-			title,
-		);
-	}
-	if (isMarkdownLike(result)) {
-		const body = result.body.trim();
-		const truncated = body.length > maxOutputChars;
-		const markdown = truncated ? body.slice(0, maxOutputChars) : body;
-		const title = titleFromMarkdown(
-			markdown,
-			new URL(result.finalUrl).pathname,
-		);
-		return extractedBody(
-			markdown,
-			"markdown",
-			title,
-			undefined,
-			truncated,
-			truncated ? body : undefined,
-		);
-	}
-
-	const document = parsedDocument ?? parseHTML(result.body).document;
 	removeScriptsAndStyles(document);
 	const canonical = resolveCanonical(
 		document.querySelector('link[rel="canonical"]')?.getAttribute("href"),
 		result.finalUrl,
 	);
-	const documentTitleText = documentTitle(document);
-	const outline = largePageOutline(document, result.body, documentTitleText);
-	if (outline) {
-		return extractedBody(outline, "fallback", documentTitleText, canonical);
+	const title = documentTitle(document);
+	switch (kind) {
+		case "app-shell":
+			return extractAppShell(document, title, canonical);
+		case "docs-html":
+			return extractDocsHtml(document, result, title, canonical);
+		case "article-html":
+			return extractArticleHtml(document, result, title, canonical);
+		default: {
+			const unexpected: never = kind;
+			throw new Error(`unhandled extract kind: ${unexpected}`);
+		}
 	}
+}
 
-	if (document.querySelectorAll("*").length > maxDefuddleElements) {
-		const fallback = structuredOrFlat(document, result.finalUrl);
-		return extractedBody(
-			fallback.markdown,
-			fallback.extractor,
-			documentTitleText,
-			canonical,
-			fallback.truncated,
-		);
-	}
-	// Skip Defuddle only when the structured pass is already substantial,
-	// high-confidence, and not a shell.
-	const structuredStatus = { truncated: false };
-	const structured = {
-		markdown: structuredFallback(document, result.finalUrl, structuredStatus),
-		...structuredStatus,
-	};
-	if (
-		isStrongStructuredFastPath(
-			structured.markdown,
-			document,
-			documentTitleText,
-			result.body,
-		)
-	) {
-		return extractedBody(
-			structured.markdown,
-			"structured",
-			documentTitleText,
-			canonical,
-			structured.truncated,
-		);
-	}
-	const declared = shell ? declaredMarkdown(document) : undefined;
-	if (declared && wordCount(structured.markdown) < 20) {
+function extractAppShell(
+	document: Document,
+	title: string | undefined,
+	canonical: string | undefined,
+) {
+	const declared = declaredMarkdown(document);
+	if (declared && wordCount(declared.markdown) >= 20) {
 		return extractedBody(
 			declared.markdown,
 			"markdown",
-			documentTitleText,
+			title,
 			canonical,
 			declared.truncated,
 			declared.injectionSource,
 		);
 	}
+	return extractedBody("", "fallback", title, canonical);
+}
 
-	const parsed = await parseWithDefuddle(document, result.finalUrl);
-	if (parsed?.content?.trim()) {
-		const title = parsed.title || documentTitleText;
-		const markdown = parsed.content.trim();
-		if (isShellPlaceholder(markdown, title, result.body)) {
-			return extractedBody("", "fallback", title, canonical);
-		}
-		const fallback = chromeOnlyExtractedMarkdown(markdown)
-			? structuredOrFlat(
-					freshDocument(result.body),
-					result.finalUrl,
-					structured,
-				)
-			: undefined;
-		if (fallback && wordCount(fallback.markdown) > 20) {
-			return extractedBody(
-				fallback.markdown,
-				fallback.extractor,
-				title,
-				canonical,
-				fallback.truncated,
-			);
-		}
-		return extractedBody(markdown, "html", title, canonical);
+function extractDocsHtml(
+	document: Document,
+	result: FetchResult,
+	title: string | undefined,
+	canonical: string | undefined,
+) {
+	const outline = largePageOutline(document, result.body, title);
+	if (outline) return extractedBody(outline, "fallback", title, canonical);
+	return htmlFallback(document, result, title, canonical);
+}
+
+async function extractArticleHtml(
+	document: Document,
+	result: FetchResult,
+	title: string | undefined,
+	canonical: string | undefined,
+) {
+	const outline = largePageOutline(document, result.body, title);
+	if (outline) return extractedBody(outline, "fallback", title, canonical);
+	if (document.querySelectorAll("*").length > maxDefuddleElements) {
+		return htmlFallback(document, result, title, canonical);
 	}
+	const parsed = await parseWithDefuddle(document, result.finalUrl);
+	if (parsed?.content.trim()) {
+		const parsedTitle = parsed.title || title;
+		const markdown = parsed.content.trim();
+		if (isShellPlaceholder(markdown, parsedTitle, result.body)) {
+			return extractedBody("", "fallback", parsedTitle, canonical);
+		}
+		if (chromeOnlyExtractedMarkdown(markdown)) {
+			const fallback = structuredOrFlat(
+				freshDocument(result.body),
+				result.finalUrl,
+			);
+			if (wordCount(fallback.markdown) > 20) {
+				return extractedBody(
+					fallback.markdown,
+					fallback.extractor,
+					parsedTitle,
+					canonical,
+					fallback.truncated,
+				);
+			}
+		}
+		return extractedBody(markdown, "html", parsedTitle, canonical);
+	}
+	return htmlFallback(freshDocument(result.body), result, title, canonical);
+}
 
-	const title = documentTitleText;
-	const fallbackDocument = freshDocument(result.body);
-	const fallback = structuredOrFlat(
-		fallbackDocument,
-		result.finalUrl,
-		structured,
-	);
+function htmlFallback(
+	document: Document,
+	result: FetchResult,
+	title: string | undefined,
+	canonical: string | undefined,
+) {
+	const fallback = structuredOrFlat(document, result.finalUrl);
 	const metadata = fallback.markdown
 		? undefined
-		: metadataMarkdown(fallbackDocument, title);
+		: metadataMarkdown(document, title);
 	const markdown = fallback.markdown || metadata || "";
 	const extractor = fallback.markdown
 		? fallback.extractor
 		: ("fallback" as const);
-	// Meta-tag-only output is marketing copy, not captured page content.
 	const metadataOnly = !fallback.markdown && Boolean(metadata);
-	const isShell =
+	const shell =
 		isShellPlaceholder(markdown, title, result.body) ||
 		(metadataOnly && Boolean(markdown));
 	return extractedBody(
-		isShell ? "" : markdown,
+		shell ? "" : markdown,
 		extractor,
 		title,
 		canonical,
 		fallback.truncated,
+	);
+}
+
+function textAssetBody(result: FetchResult): ExtractedBody {
+	const title = titleFromMarkdown("", new URL(result.finalUrl).pathname);
+	return extractedBody(
+		renderTextAsset(title, result.body, result.finalUrl),
+		"text",
+		title,
+	);
+}
+
+function markdownAssetBody(result: FetchResult): ExtractedBody {
+	const body = result.body.trim();
+	const truncated = body.length > maxOutputChars;
+	const markdown = truncated ? body.slice(0, maxOutputChars) : body;
+	const title = titleFromMarkdown(markdown, new URL(result.finalUrl).pathname);
+	return extractedBody(
+		markdown,
+		"markdown",
+		title,
+		undefined,
+		truncated,
+		truncated ? body : undefined,
 	);
 }
 
@@ -395,8 +499,6 @@ function removeScriptsAndStyles(document: Document) {
 	});
 }
 
-const fastPathMinWords = 200;
-const fastPathMinConfidence = 0.9;
 const maxDefuddleElements = 10_000;
 
 type DeclaredMarkdown = {
@@ -405,38 +507,9 @@ type DeclaredMarkdown = {
 	injectionSource?: string;
 };
 
-function isStrongStructuredFastPath(
-	markdown: string,
-	document: Document,
-	title: string | undefined,
-	html: string,
-): boolean {
-	const minWords = document.querySelector("[data-docsnap-root]")
-		? 20
-		: fastPathMinWords;
-	if (
-		!markdown ||
-		wordCount(markdown) < minWords ||
-		!/^#{1,6}\s+/m.test(markdown)
-	)
-		return false;
-	if (isShellPlaceholder(markdown, title, html)) return false;
-	if (minWords < fastPathMinWords) return true;
-	const referenceLinkCount =
-		markdown.match(/^[ \t]*- \[[^\]]+\]\([^)]+\)$/gm)?.length ?? 0;
-	return (
-		scoreMarkdown(markdown, title).confidence >= fastPathMinConfidence ||
-		referenceLinkCount >= 50
-	);
-}
-
-function structuredOrFlat(
-	document: Document,
-	baseUrl: string,
-	structured?: { markdown: string; truncated: boolean },
-) {
+function structuredOrFlat(document: Document, baseUrl: string) {
 	const status = { truncated: false };
-	const result = structured ?? {
+	const result = {
 		markdown: structuredFallback(document, baseUrl, status),
 		...status,
 	};
@@ -568,47 +641,8 @@ function readableText(node: Node) {
 
 function renderTextAsset(title: string, body: string, url: string) {
 	const language = languageFromUrl(url);
-	// Fence must be longer than the longest backtick run in the body, or it
-	// closes early and splits the rendered block.
 	const fence = "`".repeat(Math.max(3, maxBacktickRun(body) + 1));
 	return `# ${title}\n\n${fence}${language}\n${body.trim()}\n${fence}`;
-}
-
-// Defuddle can write parse warnings to stderr; silence only during active parses.
-let activeDefuddleParses = 0;
-let restoreConsole: (() => void) | undefined;
-
-function silenceConsoleDuringParse() {
-	if (activeDefuddleParses++ > 0) return;
-	const error = console.error;
-	const warn = console.warn;
-	console.error = () => {};
-	console.warn = () => {};
-	restoreConsole = () => {
-		console.error = error;
-		console.warn = warn;
-	};
-}
-
-function endDefuddleParse() {
-	if (--activeDefuddleParses > 0) return;
-	restoreConsole?.();
-	restoreConsole = undefined;
-}
-
-async function parseWithDefuddle(document: Document, url: string) {
-	silenceConsoleDuringParse();
-	try {
-		const { Defuddle } = await import("defuddle/node");
-		return await Defuddle(document, url, {
-			markdown: true,
-			useAsync: false,
-		});
-	} catch {
-		return undefined;
-	} finally {
-		endDefuddleParse();
-	}
 }
 
 function resolveCanonical(href: string | null | undefined, base: string) {

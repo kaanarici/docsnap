@@ -12,12 +12,13 @@ test("rejects repeated marketing variants as page content", async () => {
 		"Search, enrich, and reason over 3B people in real time.",
 	];
 	expect(extractRsc(repeated)).toBeUndefined();
-	const [record] = await extractPage({
+	const [record, , shell] = await extractPage({
 		source: "seed",
 		wasSeed: true,
 		result: okFetch("https://docs.example.com/pricing", rscHtml(repeated)),
 	});
 	expect(record).toMatchObject({ ok: false, failureKind: "empty" });
+	expect(shell).toBe(true);
 });
 
 test("keeps distinct inline documentation prose", () => {

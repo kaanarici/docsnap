@@ -25,7 +25,7 @@ export async function extractDocument(input: FetchedUrl, started: number) {
 			},
 			started,
 			[],
-			false,
+			"binary",
 		);
 		return record;
 	} catch (error) {

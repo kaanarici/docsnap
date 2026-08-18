@@ -40,6 +40,7 @@ test("captures a document URL through the normal corpus contract", async () => {
 		ok: true,
 		title: "Download",
 		extractor: "markdown",
+		kind: "binary",
 		injectionSignals: ["instruction-override"],
 	});
 	if (!page?.ok) throw new Error("document capture failed");
