@@ -1,4 +1,3 @@
-import { maxGeneratedCapturePages } from "../core/config.ts";
 import type {
 	DiscoveredUrl,
 	DiscoverySource,
@@ -7,7 +6,7 @@ import type {
 } from "../core/types.ts";
 import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
 import { filteredNonPageResult } from "../fetch/result.ts";
-import { discoverLlmsUrls, type LlmsCorpusOptions } from "./corpus.ts";
+import type { LlmsCorpusOptions } from "./corpus.ts";
 import { discoverFeed } from "./feed.ts";
 import {
 	discoverFetchedResources,
@@ -15,8 +14,7 @@ import {
 	type PageResources,
 } from "./nav.ts";
 import type { Robots } from "./robots.ts";
-import { discoverSitemaps } from "./sitemap.ts";
-import { candidateWindow, orderByTopic } from "./topic.ts";
+import { orderByTopic } from "./topic.ts";
 import { addDiscovered, inScope, normalizeUrl } from "./url.ts";
 
 export type DiscoveryFrontierInput = {
@@ -32,6 +30,7 @@ export type DiscoveryFrontierInput = {
 	seedResources: PageResources;
 	seedIsLanguageSelector: boolean;
 	finalSeed: string | undefined;
+	indexUrls: DiscoveredUrl[];
 };
 
 export type DiscoveryFrontier = {
@@ -164,55 +163,13 @@ export function createDiscoveryFrontier(
 		for (const link of diversityFirst(links)) queue(link, base);
 	};
 
-	const addLlms = async (bounded: boolean) => {
-		const urls = await discoverLlmsUrls(
-			input.seed,
-			config,
-			input.llmsOptions,
-			candidateWindow(config, attemptLimit),
-		);
-		const limit = bounded ? attemptLimit : maxGeneratedCapturePages;
-		for (const url of diversityFirst(
-			orderByTopic(urls, input.seed, input.scope, config.topic),
-		)) {
-			add(url, "llms", limit);
-		}
-	};
-
 	const prepare = async () => {
-		if (!config.maxExplicit) {
-			const before = out.length;
-			await addLlms(false);
-			if (out.length > before) return;
-		}
 		pump(attemptLimit);
 		if (!config.maxExplicit && out.length < Math.min(attemptLimit, 3)) {
 			streams.push({ urls: seedUrls, source: "crawl", index: 0 });
 			pump(attemptLimit);
 		}
-		const sitemapRemaining = attemptLimit - out.length;
-		const beforeSitemap = out.length;
-		if (sitemapRemaining > 0) {
-			const sitemap = await discoverSitemaps(
-				input.seed,
-				input.robots.sitemaps,
-				config,
-				{
-					limit: sitemapRemaining,
-					scope: input.scope,
-					accept: (url) => !seen.has(url) && accepted(url),
-					allowResource: input.allowResource,
-				},
-			);
-			truncated ||= sitemap.truncated;
-			for (const url of diversityFirst(sitemap.urls)) {
-				add(url, "sitemap", attemptLimit);
-			}
-		}
-		const sitemapAdded = out.length - beforeSitemap;
-		const richSitemap =
-			sitemapRemaining > 0 && sitemapAdded >= Math.min(sitemapRemaining, 5);
-		if (!richSitemap && out.length < Math.min(attemptLimit, 3)) {
+		if (out.length < Math.min(attemptLimit, 3)) {
 			const feeds = input.seedResources.feeds ?? [];
 			truncated ||= feeds.length > 2;
 			for (const feedUrl of feeds.slice(0, 2)) {
@@ -234,7 +191,6 @@ export function createDiscoveryFrontier(
 				if (out.length >= attemptLimit) break;
 			}
 		}
-		if (config.maxExplicit && out.length < attemptLimit) await addLlms(true);
 		if (!config.maxExplicit && streams.length === 1) {
 			streams.push({ urls: seedUrls, source: "crawl", index: 0 });
 		}
@@ -258,6 +214,9 @@ export function createDiscoveryFrontier(
 			wasSeed: true,
 			fetched: filteredNonPageResult(response),
 		});
+	}
+	for (const item of input.indexUrls) {
+		add(item.url, item.source, attemptLimit, item.fetched, item.metadata);
 	}
 
 	observeResult(input.seedResponse, input.seedResources);
