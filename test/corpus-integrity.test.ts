@@ -3,11 +3,12 @@ import { readFile, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { snapshotStats } from "../src/core/snapshot.ts";
 import { corpusLimits } from "../src/corpus/access.ts";
-import { readSummary, readVerifiedManifest } from "../src/corpus/index.ts";
+import { readCorpus, readSummary } from "../src/corpus/index.ts";
 import { runFiles } from "../src/output/files.ts";
 import { conditionalRequestForPrior, loadPrior } from "../src/output/prior.ts";
 import { buildSummary } from "../src/report/summary.ts";
 import {
+	commitRun,
 	tempDir,
 	testConfig,
 	testPage,
@@ -19,16 +20,13 @@ describe("corpus integrity", () => {
 	test("accepts a valid corpus and rejects a tampered page", async () => {
 		const root = await tempDir("corpus-tamper");
 		await writeValidCorpus(root);
-		await expect(readVerifiedManifest(root)).resolves.toHaveProperty(
-			"records.length",
-			1,
-		);
+		await expect(readCorpus(root)).resolves.toHaveProperty("records.length", 1);
 		const pagePath = join(root, "guide.md");
 		await writeFile(
 			pagePath,
 			`${await readFile(pagePath, "utf8")}\ntampered\n`,
 		);
-		await expect(readVerifiedManifest(root)).rejects.toThrow("do not match");
+		await expect(readCorpus(root)).rejects.toThrow("do not match");
 	});
 
 	test("rejects a corpus page symlinked outside its real root", async () => {
@@ -39,12 +37,10 @@ describe("corpus integrity", () => {
 		await writeFile(outsidePage, "outside");
 		await unlink(join(root, "guide.md"));
 		await symlink(outsidePage, join(root, "guide.md"));
-		await expect(readVerifiedManifest(root)).rejects.toThrow(
-			"not inside output_dir",
-		);
+		await expect(readCorpus(root)).rejects.toThrow("not inside output_dir");
 	});
 
-	test("normalizes published pre-0.2 summary fields", async () => {
+	test("rejects published pre-0.2 summary fields", async () => {
 		const root = await tempDir("pre02-summary");
 		await writeFile(
 			join(root, "summary.json"),
@@ -59,10 +55,28 @@ describe("corpus integrity", () => {
 				byFailureKind: {},
 			}),
 		);
-		const summary = await readSummary(root);
-		expect(summary.captureMode).toBe("site");
-		expect(summary.corpusFiles).toBe(1);
-		expect(summary.seed.attempted).toBe(true);
+		await expect(readSummary(root)).rejects.toThrow("Invalid summary.json");
+	});
+
+	test("reads optional page kind from the manifest", async () => {
+		const root = await tempDir("corpus-kind");
+		const page = { ...testPage(), kind: "docs-html" as const };
+		const snapshot = snapshotStats([
+			{ path: page.outputPath, body: page.rendered },
+		]);
+		const config = testConfig(root);
+		const summary = buildSummary(
+			[page],
+			[page],
+			config,
+			[{ url: page.url, source: "seed", wasSeed: true }],
+			0,
+			snapshot,
+			1,
+		);
+		await commitRun([page], [page], summary, config);
+		const corpus = await readCorpus(root);
+		expect(corpus.records[0]?.kind).toBe("docs-html");
 	});
 
 	test("reads the pre-0.2 asset source as crawl", async () => {
@@ -76,7 +90,7 @@ describe("corpus integrity", () => {
 				'"source":"asset"',
 			),
 		);
-		const corpus = await readVerifiedManifest(root);
+		const corpus = await readCorpus(root);
 		expect(corpus.records[0]?.source).toBe("crawl");
 	});
 
@@ -162,9 +176,7 @@ describe("corpus integrity", () => {
 			join(root, "guide.md"),
 			"x".repeat(corpusLimits.pageBytes + 1),
 		);
-		await expect(readVerifiedManifest(root)).rejects.toThrow(
-			"duplicate output path",
-		);
+		await expect(readCorpus(root)).rejects.toThrow("duplicate output path");
 	});
 
 	test("bounds prior metadata before parsing", async () => {
@@ -238,7 +250,7 @@ describe("corpus integrity", () => {
 			1,
 		);
 		await writeRunMetadata([page], summary, config);
-		await expect(readVerifiedManifest(root)).rejects.toThrow(
+		await expect(readCorpus(root)).rejects.toThrow(
 			"injection metadata does not match",
 		);
 	});

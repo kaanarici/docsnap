@@ -52,9 +52,12 @@ export function jsonSearchResult(input: SearchInput, result: SearchResult) {
 			const titled = match.record.title
 				? { ...item, title: match.record.title }
 				: item;
-			return match.record.injectionSignals.length
-				? { ...titled, injectionSignals: match.record.injectionSignals }
+			const kinded = match.record.kind
+				? { ...titled, kind: match.record.kind }
 				: titled;
+			return match.record.injectionSignals.length
+				? { ...kinded, injectionSignals: match.record.injectionSignals }
+				: kinded;
 		}),
 	};
 }
@@ -98,6 +101,7 @@ export function textSearchResult(input: SearchInput, result: SearchResult) {
 				: []),
 		);
 		if (match.record.title) lines.push(`title: ${match.record.title}`);
+		if (match.record.kind) lines.push(`kind: ${match.record.kind}`);
 		if (match.record.injectionSignals.length) {
 			lines.push(
 				`injectionSignals: ${match.record.injectionSignals.join(", ")}`,

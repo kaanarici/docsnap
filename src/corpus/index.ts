@@ -1,6 +1,6 @@
 import { realpath } from "node:fs/promises";
 import { isAbsolute } from "node:path";
-import { defaultUserAgent, maxGeneratedCapturePages } from "../core/config.ts";
+import { maxGeneratedCapturePages } from "../core/config.ts";
 import {
 	isJsonBoolean,
 	isJsonNumber,
@@ -12,7 +12,6 @@ import {
 	parseJsonValue,
 } from "../core/json.ts";
 import { runBounded } from "../core/parallel.ts";
-import { emptyRefreshSummary } from "../core/refresh.ts";
 import {
 	hashContent,
 	snapshotLeaf,
@@ -29,6 +28,7 @@ import {
 	injectionSignals,
 	inlineStateSources,
 	type PageExtractor,
+	type PageKind,
 	pageExtractors,
 	pageKinds,
 	type RunSummary,
@@ -67,6 +67,12 @@ export type CorpusPage = {
 	outputHash?: string;
 	extractor?: PageExtractor;
 	fetchedAt?: string;
+	kind?: PageKind;
+};
+
+export type Corpus = {
+	summary: RunSummary;
+	records: CorpusPage[];
 };
 
 type SearchOptions = {
@@ -80,10 +86,6 @@ type SearchOptions = {
 };
 
 type CorpusFields<T> = JsonObject & Partial<Record<keyof T, JsonValue>>;
-type LegacySummary = RunSummary & {
-	renderedFiles: number;
-	renderedBytes: number;
-};
 
 const globCache = new Map<string, Bun.Glob>();
 
@@ -95,100 +97,11 @@ export async function readSummary(outputDir: string): Promise<RunSummary> {
 	);
 	try {
 		const parsed = parseJsonValue(text);
-		const raw = pre02Summary(parsed) ?? parsed;
-		if (!isRunSummary(raw)) throw new Error("invalid summary shape");
-		return raw;
+		if (!isRunSummary(parsed)) throw new Error("invalid summary shape");
+		return parsed;
 	} catch {
 		throw new Error(`Invalid ${runFiles.summary} in corpus`);
 	}
-}
-
-function pre02Summary(value: JsonValue): JsonValue | undefined {
-	if (!isCorpusFields<LegacySummary>(value) || "seed" in value)
-		return undefined;
-	const raw = value;
-	if (
-		raw.snapshotVersion !== snapshotSchemaVersion ||
-		!isSha256(raw.rootHash) ||
-		!isNonNegativeInteger(raw.renderedFiles) ||
-		!isNonNegativeInteger(raw.renderedBytes) ||
-		!isJsonString(raw.seedUrl) ||
-		!isNonNegativeInteger(raw.written)
-	) {
-		return undefined;
-	}
-	const errors = Array.isArray(raw.errors) ? raw.errors : [];
-	const seedFailure = errors.find(
-		(error): error is JsonObject =>
-			isJsonObject(error) && error["url"] === raw.seedUrl,
-	);
-	const failed = errors.length;
-	const seed: CorpusFields<RunSummary["seed"]> = {
-		attempted: true,
-		included: raw.written > 0 && !seedFailure,
-		url: raw.seedUrl,
-	};
-	if (seedFailure) {
-		seed.omissionReason = "failed";
-		if (isJsonString(seedFailure["kind"]))
-			seed.failureKind = seedFailure["kind"];
-		if (isJsonString(seedFailure["error"])) seed.error = seedFailure["error"];
-	}
-	return {
-		status: raw.written > 0 ? (failed > 0 ? "partial" : "ok") : "failed",
-		...raw,
-		seed,
-		warnings: [],
-		outDir: isJsonString(raw.outDir) ? raw.outDir : "",
-		dryRun: raw.dryRun === true,
-		captureMode: "site",
-		userAgent: defaultUserAgent,
-		generatedAt:
-			isJsonString(raw.generatedAt) &&
-			Number.isFinite(Date.parse(raw.generatedAt))
-				? raw.generatedAt
-				: new Date(0).toISOString(),
-		corpusFiles: raw.renderedFiles,
-		corpusBytes: raw.renderedBytes,
-		max:
-			isNonNegativeInteger(raw.max) &&
-			raw.max > 0 &&
-			raw.max <= maxGeneratedCapturePages
-				? raw.max
-				: Math.max(1, Math.min(maxGeneratedCapturePages, raw.written)),
-		maxAppliesTo: raw.maxAppliesTo === "all" ? "all" : "non-llms",
-		maxReached: raw.maxReached === true,
-		discovered: isNonNegativeInteger(raw.discovered)
-			? raw.discovered
-			: raw.written + failed,
-		deduped: isNonNegativeInteger(raw.deduped) ? raw.deduped : 0,
-		failed,
-		lowQuality: isNonNegativeInteger(raw.lowQuality) ? raw.lowQuality : 0,
-		qualityWarnings: isNonNegativeInteger(raw.qualityWarnings)
-			? raw.qualityWarnings
-			: 0,
-		injectionSignalPages: 0,
-		byInjectionSignal: {},
-		hostRedirects: 0,
-		redirectedHosts: [],
-		elapsedMs:
-			isJsonNumber(raw.elapsedMs) && raw.elapsedMs >= 0 ? raw.elapsedMs : 0,
-		pagesPerSecond: 0,
-		bySource: Object.fromEntries(discoverySources.map((source) => [source, 0])),
-		byExtractor: Object.fromEntries(
-			pageExtractors.map((extractor) => [extractor, 0]),
-		),
-		byInlineStateSource: {},
-		firstPageMs: null,
-		refresh: emptyRefreshSummary(),
-		cache: {
-			enabled: false,
-			dir: null,
-			...Object.fromEntries(cacheCounterFields.map((field) => [field, 0])),
-		},
-		errors,
-		byFailureKind: isJsonObject(raw.byFailureKind) ? raw.byFailureKind : {},
-	};
 }
 
 const summaryCounterFields = [
@@ -478,10 +391,10 @@ async function readManifest(outputDir: string): Promise<CorpusPage[]> {
 	return records;
 }
 
-export async function readVerifiedManifest(
+export async function readCorpus(
 	outputDir: string,
 	summary?: RunSummary,
-): Promise<{ summary: RunSummary; records: CorpusPage[] }> {
+): Promise<Corpus> {
 	const current = summary ?? (await readSummary(outputDir));
 	const records = await readManifest(outputDir);
 	if (!manifestMatchesSummary(current, records))
@@ -533,7 +446,7 @@ export async function listCorpora(
 		{ concurrency: 8, perOrigin: 1, key: (dir) => dir },
 		async (outputDir) => {
 			try {
-				const { summary } = await readVerifiedManifest(outputDir);
+				const { summary } = await readCorpus(outputDir);
 				return corpusListEntry(summary, outputDir);
 			} catch {
 				return undefined;

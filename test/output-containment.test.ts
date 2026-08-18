@@ -5,7 +5,7 @@ import { resolveSafeRelativePath } from "../src/core/fs-safety.ts";
 import { partitionPageOutputs } from "../src/core/pipeline.ts";
 import { snapshotStats } from "../src/core/snapshot.ts";
 import { corpusLimits } from "../src/corpus/access.ts";
-import { readVerifiedManifest } from "../src/corpus/index.ts";
+import { readCorpus } from "../src/corpus/index.ts";
 import { runFiles } from "../src/output/files.ts";
 import { discardStagedOutput, stagePages } from "../src/output/writer.ts";
 import { buildSummary } from "../src/report/summary.ts";
@@ -120,7 +120,7 @@ describe("output containment", () => {
 		if (!failure || failure.ok) throw new Error("expected oversized failure");
 		const runRecords = [good, failure];
 		await commitRun(limited.outputs, runRecords, summary, config);
-		const corpus = await readVerifiedManifest(root);
+		const corpus = await readCorpus(root);
 		expect(corpus.records.filter((record) => record.ok)).toHaveLength(1);
 		expect(corpus.records.find((record) => !record.ok)).toMatchObject({
 			failureKind: "too_large",
@@ -191,10 +191,7 @@ describe("output containment", () => {
 			},
 			config,
 		);
-		await expect(readVerifiedManifest(root)).resolves.toHaveProperty(
-			"records.length",
-			1,
-		);
+		await expect(readCorpus(root)).resolves.toHaveProperty("records.length", 1);
 		expect(await transactionFiles(root)).toEqual([]);
 		if (clean) {
 			await expect(readFile(join(root, "extra.txt"), "utf8")).rejects.toThrow();

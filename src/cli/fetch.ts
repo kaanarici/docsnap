@@ -18,11 +18,12 @@ import {
 	looksLikeSpecificContentUrl,
 } from "../core/url.ts";
 import {
+	type Corpus,
 	type CorpusPage,
 	listAllCorpora,
 	manifestMatchesSummary,
+	readCorpus,
 	readSummary,
-	readVerifiedManifest,
 	searchCorpus,
 } from "../corpus/index.ts";
 import { runFiles } from "../output/files.ts";
@@ -62,6 +63,7 @@ type FetchCitation = {
 	lineEnd: number;
 	url: string;
 	snippet: string;
+	kind?: CorpusPage["kind"];
 	injectionSignals?: CorpusPage["injectionSignals"];
 };
 
@@ -78,13 +80,13 @@ type FetchPage = {
 	path: string;
 	url: string;
 	title?: string;
+	kind?: CorpusPage["kind"];
 	injectionSignals?: CorpusPage["injectionSignals"];
 };
 
 type FetchPagesResult = FetchBaseResult & { pages: FetchPage[] };
 type FetchResult = FetchQuestionResult | FetchPagesResult;
-type VerifiedCorpus = { summary: RunSummary; records: CorpusPage[] };
-type LocatedCorpus = VerifiedCorpus & { outputDir: string };
+type LocatedCorpus = Corpus & { outputDir: string };
 
 const topPagesLimit = 10;
 const autoSiteCap = 25;
@@ -131,14 +133,12 @@ async function fetchResult(input: FetchInput): Promise<FetchResult> {
 	const requested =
 		input.freshness === "reuse" ? { ...base, maxExplicit: false } : base;
 	const requestedOutputDir = input.outputDir ?? base.outDir;
-	const reusable =
-		!input.outputDir && input.freshness !== "force"
-			? await reusableLibraryCorpus(requested)
-			: null;
-	const outputDir = reusable?.outputDir ?? requestedOutputDir;
-	const existing =
-		reusable ??
-		(await existingCorpus(outputDir, requested, input.freshness === "force"));
+	const existing = await loadReusableCorpus(
+		requested,
+		requestedOutputDir,
+		input,
+	);
+	const outputDir = existing?.outputDir ?? requestedOutputDir;
 	const prior = existing?.summary ?? null;
 	const action: FreshnessDecision = !prior
 		? "captured"
@@ -152,7 +152,7 @@ async function fetchResult(input: FetchInput): Promise<FetchResult> {
 					? "refreshed"
 					: "captured";
 	const progress = input.quiet || input.json ? undefined : logLine;
-	let corpus = existing;
+	let corpus: Corpus | null = existing;
 	if (action !== "reused" || !corpus) {
 		const config =
 			action === "refreshed" && prior
@@ -226,6 +226,7 @@ async function fetchResult(input: FetchInput): Promise<FetchResult> {
 				url: match.record.url,
 				snippet: match.text,
 			};
+			if (match.record.kind) citation.kind = match.record.kind;
 			if (match.record.injectionSignals.length) {
 				citation.injectionSignals = match.record.injectionSignals;
 			}
@@ -272,6 +273,7 @@ function textFetchResult(result: FetchResult): string {
 				`lines: ${citation.lineStart}-${citation.lineEnd}`,
 				`url: ${citation.url}`,
 			);
+			if (citation.kind) lines.push(`kind: ${citation.kind}`);
 			if (citation.injectionSignals?.length) {
 				lines.push(`injectionSignals: ${citation.injectionSignals.join(", ")}`);
 			}
@@ -312,6 +314,23 @@ function writeMismatch(error: CorpusMismatchError, json: boolean): void {
 	process.exitCode = 1;
 }
 
+async function loadReusableCorpus(
+	requested: PipelineConfig,
+	requestedOutputDir: string,
+	input: FetchInput,
+): Promise<LocatedCorpus | null> {
+	if (!input.outputDir && input.freshness !== "force") {
+		const library = await reusableLibraryCorpus(requested);
+		if (library) return library;
+	}
+	const existing = await existingCorpus(
+		requestedOutputDir,
+		requested,
+		input.freshness === "force",
+	);
+	return existing ? { outputDir: requestedOutputDir, ...existing } : null;
+}
+
 async function reusableLibraryCorpus(
 	requested: PipelineConfig,
 ): Promise<LocatedCorpus | null> {
@@ -324,7 +343,7 @@ async function reusableLibraryCorpus(
 	}
 	for (const { output_dir } of listed.corpora) {
 		try {
-			const verified = await readVerifiedManifest(output_dir);
+			const verified = await readCorpus(output_dir);
 			const { summary } = verified;
 			if (canReuseCorpus(summary, requested, verified.records)) {
 				const candidate = { outputDir: output_dir, ...verified };
@@ -346,7 +365,7 @@ async function existingCorpus(
 	outputDir: string,
 	requested: PipelineConfig,
 	allowReplace: boolean,
-): Promise<VerifiedCorpus | null> {
+): Promise<Corpus | null> {
 	let summary: RunSummary;
 	try {
 		summary = await readSummary(outputDir);
@@ -358,9 +377,9 @@ async function existingCorpus(
 		!runSucceeded(summary) ||
 		(summary.seedUrl === requested.seedUrl &&
 			summary.captureMode === (requested.pageOnly ? "page" : "site"));
-	let verified: VerifiedCorpus;
+	let verified: Corpus;
 	try {
-		verified = await readVerifiedManifest(outputDir, summary);
+		verified = await readCorpus(outputDir, summary);
 	} catch {
 		if (replaceable) return null;
 		throw new Error(`Invalid manifest in existing corpus: ${outputDir}`);
@@ -465,6 +484,7 @@ function topPages(records: CorpusPage[], requestedUrl: string): FetchPage[] {
 				url: page.url,
 			};
 			if (page.title) result.title = page.title;
+			if (page.kind) result.kind = page.kind;
 			if (page.injectionSignals.length) {
 				result.injectionSignals = page.injectionSignals;
 			}

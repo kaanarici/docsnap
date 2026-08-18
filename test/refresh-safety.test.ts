@@ -2,7 +2,7 @@ import { expect, onTestFinished, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { buildPipelineConfig } from "../src/core/config.ts";
 import { runPipeline } from "../src/core/pipeline.ts";
-import { readVerifiedManifest } from "../src/corpus/index.ts";
+import { readCorpus } from "../src/corpus/index.ts";
 import { setTestEnv, tempDir } from "./fixtures.ts";
 
 test("refresh removes cleanly missing pages but preserves an incomplete corpus", async () => {
@@ -54,9 +54,7 @@ test("refresh removes cleanly missing pages but preserves an incomplete corpus",
 	mode = "removed";
 	const refreshed = await runPipeline(config(removable));
 	expect(refreshed.summary.refresh).toMatchObject({ new: 1, removed: 1 });
-	expect(
-		(await readVerifiedManifest(removable)).records.map(({ url }) => url),
-	).toEqual([
+	expect((await readCorpus(removable)).records.map(({ url }) => url)).toEqual([
 		`${origin}/docs/`,
 		`${origin}/docs/hub`,
 		`${origin}/docs/a`,

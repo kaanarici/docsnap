@@ -8,7 +8,7 @@ import {
 	type CorpusPage,
 	globMatches,
 	listAllCorpora,
-	readVerifiedManifest,
+	readCorpus,
 	searchCorpus,
 	verifyPageBody,
 } from "../corpus/index.ts";
@@ -40,7 +40,7 @@ export async function runSearch(input: SearchInput): Promise<void> {
 }
 
 async function searchOne(input: SearchInput): Promise<SearchResult> {
-	const { records } = await readVerifiedManifest(input.outputDir);
+	const { records } = await readCorpus(input.outputDir);
 	const searchOptions = {
 		query: input.query,
 		records,
@@ -176,7 +176,7 @@ async function dedupedCorpusRecords(
 			try {
 				return {
 					corpusDir,
-					records: (await readVerifiedManifest(corpusDir)).records,
+					records: (await readCorpus(corpusDir)).records,
 				};
 			} catch {
 				return { corpusDir };
