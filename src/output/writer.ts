@@ -24,11 +24,12 @@ import {
 	realPathIsInside,
 	resolveSafeRelativePath,
 } from "../core/fs-safety.ts";
-import { isJsonString, type JsonObject } from "../core/json.ts";
 import { runBounded } from "../core/parallel.ts";
 import type {
+	InjectionSignal,
 	PageOutput,
 	PipelineConfig,
+	RedirectHop,
 	RunRecord,
 	RunSummary,
 } from "../core/types.ts";
@@ -232,31 +233,61 @@ function boundedRunFile(file: string, body: string, maxBytes: number) {
 }
 
 function manifestRecord(record: RunRecord) {
-	// SAFETY: RunRecord contains only JSON values; the copy is mutated only for manifest compaction.
-	const entry = { ...record } as JsonObject;
-	for (const key of ["markdown", "timings", "rendered"]) {
-		delete entry[key];
+	if (record.ok) {
+		const {
+			markdown: _markdown,
+			timings: _timings,
+			rendered: _rendered,
+			...fields
+		} = record;
+		return compactManifestFields(fields);
 	}
-	for (const key of ["links", "media"]) {
-		if (Array.isArray(entry[key])) {
-			const values = entry[key].filter(
-				(value): value is string =>
-					isJsonString(value) && !validatePublicHttpUrl(value),
-			);
-			const bounded = boundedManifestUrls(values);
-			entry[key] = bounded;
-			if (bounded.length < values.length) {
-				entry[`${key}Count`] = values.length;
-				entry[`${key}Truncated`] = true;
-			}
-		}
-	}
-	for (const [key, value] of Object.entries(entry)) {
-		if (key !== "links" && Array.isArray(value) && value.length === 0) {
-			delete entry[key];
-		}
-	}
-	return entry;
+	const { markdown: _markdown, timings: _timings, ...fields } = record;
+	return compactManifestFields(fields);
+}
+
+type ManifestCollections = {
+	links: string[];
+	media?: string[];
+	aliases?: string[];
+	redirects: RedirectHop[];
+	injectionSignals: InjectionSignal[];
+	qualityReasons: string[];
+};
+
+function compactManifestFields<T extends ManifestCollections>(record: T) {
+	const {
+		links,
+		media = [],
+		aliases = [],
+		redirects,
+		injectionSignals,
+		qualityReasons,
+		...fields
+	} = record;
+	const validLinks = publicManifestUrls(links);
+	const validMedia = publicManifestUrls(media);
+	const boundedLinks = boundedManifestUrls(validLinks);
+	const boundedMedia = boundedManifestUrls(validMedia);
+	return {
+		...fields,
+		links: boundedLinks,
+		aliases: aliases.length ? aliases : undefined,
+		redirects: redirects.length ? redirects : undefined,
+		injectionSignals: injectionSignals.length ? injectionSignals : undefined,
+		qualityReasons: qualityReasons.length ? qualityReasons : undefined,
+		media: boundedMedia.length ? boundedMedia : undefined,
+		linksCount:
+			boundedLinks.length < validLinks.length ? validLinks.length : undefined,
+		linksTruncated: boundedLinks.length < validLinks.length ? true : undefined,
+		mediaCount:
+			boundedMedia.length < validMedia.length ? validMedia.length : undefined,
+		mediaTruncated: boundedMedia.length < validMedia.length ? true : undefined,
+	};
+}
+
+function publicManifestUrls(values: readonly string[]) {
+	return values.filter((value) => !validatePublicHttpUrl(value));
 }
 
 function boundedManifestUrls(value: readonly string[]) {
@@ -265,7 +296,7 @@ function boundedManifestUrls(value: readonly string[]) {
 	for (const item of value) {
 		const next =
 			Buffer.byteLength(JSON.stringify(item)) + (output.length ? 1 : 0);
-		if (bytes + next > 12 * 1024) break;
+		if (bytes + next > 1_536) break;
 		output.push(item);
 		bytes += next;
 	}

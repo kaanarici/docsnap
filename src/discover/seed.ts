@@ -11,7 +11,6 @@ import { fetchText, preferredMarkdownAccept } from "../fetch/fetcher.ts";
 import type { Robots } from "./robots.ts";
 import { normalizeDiscoveryResourceUrl, normalizeUrl } from "./url.ts";
 
-// Give native Markdown a brief head start, then overlap its usual miss with HTML.
 const markdownProbeHedgeMs = 40;
 
 export function seedInputUrl(raw: string) {

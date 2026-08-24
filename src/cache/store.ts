@@ -66,6 +66,11 @@ export type CacheRequest = {
 	userAgent: string;
 };
 
+export type CacheWriteLock = DirLock & {
+	readonly key: string;
+	readonly request: CacheRequest;
+};
+
 export type CacheEntry = {
 	schemaVersion: string;
 	key: string;
@@ -156,11 +161,11 @@ export async function readCache(
 
 export async function writeCacheResult(
 	config: PipelineConfig,
-	key: string,
-	request: CacheRequest,
+	lock: CacheWriteLock,
 	result: FetchResult,
 ): Promise<void> {
 	const context = cacheContext(config);
+	const { key, request } = lock;
 	if (!(await cacheReady(context))) return;
 	if (!result.ok || isNotModifiedResult(result)) return notStored(context);
 	const freshUntil = freshUntilFor(result);
@@ -187,7 +192,6 @@ export async function writeCacheResult(
 	if (result.cacheControl) entry.cacheControl = result.cacheControl;
 	if (!entrySafe(entry)) return notStored(context);
 	try {
-		// Caller holds this key's lock, so the prior entry can't change under us.
 		const priorHash = await priorBodyHash(context, key);
 		const blob = blobPath(context, bodyHash);
 		if (!(await exists(blob))) {
@@ -218,9 +222,6 @@ async function priorBodyHash(
 	}
 }
 
-// Blobs are content-addressed and deduplicated across cache keys, so a replaced
-// blob may still back another live entry. Unlink it only when no surviving
-// entry references it. Re-fetch tolerates a lost blob (integrity check misses).
 async function removeOrphanBlob(context: CacheContext, hash: string) {
 	try {
 		if (await blobReferenced(context, hash)) return;
@@ -251,12 +252,15 @@ async function blobReferenced(
 
 export async function refreshCacheEntry(
 	config: PipelineConfig,
-	key: string,
+	lock: CacheWriteLock,
 	entry: CacheEntry,
 	result: FetchResult,
 ): Promise<CacheEntry> {
 	const context = cacheContext(config);
 	if (!(await cacheReady(context))) return entry;
+	if (entry.key !== lock.key)
+		throw new Error("Cache entry does not match lock");
+	const { key } = lock;
 	const now = new Date().toISOString();
 	const cacheControl = result.cacheControl ?? entry.cacheControl;
 	const refreshResult = cachedFetchResult(entry, "", 0);
@@ -288,19 +292,21 @@ export async function refreshCacheEntry(
 	return next;
 }
 
-export async function acquireCacheLock(
+export async function acquireCacheWriteLock(
 	config: PipelineConfig,
-	key: string,
-): Promise<DirLock | undefined> {
+	request: CacheRequest,
+): Promise<CacheWriteLock | undefined> {
 	const context = cacheContext(config);
 	if (!(await cacheReady(context))) return undefined;
-	return acquireDirLock({
+	const key = cacheKey(request);
+	const lock = await acquireDirLock({
 		path: lockPath(context, key),
 		mode: "soft",
 		delaysMs: [0, 25, 50, 100, 150],
 		staleMs: 60_000,
 		onAccessError: (error) => disableOnAccessError(context, error),
 	});
+	return lock ? { ...lock, key, request } : undefined;
 }
 
 export function cachedFetchResult(
@@ -386,10 +392,6 @@ function cacheDir(config: PipelineConfig): string | null {
 	return join(homedir(), ".cache", "docsnap");
 }
 
-// A configured cache root must obey the same safe-root rule as the output dir
-// (not the filesystem root, $HOME, or a protected $HOME child, before or after
-// symlink resolution). An unsafe root disables the cache rather than crashing
-// the run, since caching is best-effort.
 function safeCacheRoot(dir: string): string | null {
 	try {
 		assertSafeRoot(dir, "unsafe cache root");

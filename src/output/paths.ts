@@ -99,7 +99,6 @@ function startsWith(path: string[], prefix: string[]) {
 	return prefix.every((part, index) => path[index] === part);
 }
 
-// Leave room under the common 255-byte filesystem component limit.
 const maxSlugChars = 120;
 
 function slug(value: string) {

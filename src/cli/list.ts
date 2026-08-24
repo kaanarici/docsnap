@@ -34,17 +34,17 @@ function textResult(input: ListInput, result: ListResult) {
 			`docsnap: skipped ${countLabel(result.corporaSkipped, "unreadable or invalid corpus dir")}`,
 		);
 	}
-	if (result.next_cursor) {
-		lines.push(`docsnap: next cursor ${result.next_cursor}`);
+	if (result.nextCursor) {
+		lines.push(`docsnap: next cursor ${result.nextCursor}`);
 	}
 	for (const corpus of result.corpora) {
-		const mode = corpus.capture_mode ?? "unknown";
+		const mode = corpus.captureMode ?? "unknown";
 		lines.push(
 			"",
-			`${corpus.output_dir}  ${corpus.status}  ${mode}  ${countLabel(corpus.written, "page")}`,
-			`  captured: ${corpus.generated_at}`,
+			`${corpus.outputDir}  ${corpus.status}  ${mode}  ${countLabel(corpus.written, "page")}`,
+			`  captured: ${corpus.generatedAt}`,
 			...issueLines(corpus),
-			`  seed: ${corpus.seed_url}`,
+			`  seed: ${corpus.seedUrl}`,
 		);
 	}
 	return terminalText(`${lines.join("\n")}\n`);
@@ -53,11 +53,11 @@ function textResult(input: ListInput, result: ListResult) {
 function issueLines(corpus: ListEntry) {
 	const issues = [
 		countIssue("failed", corpus.failed),
-		countIssue("low_quality", corpus.low_quality),
-		countIssue("quality_warnings", corpus.quality_warnings),
-		countIssue("injection", corpus.injection_signal_pages),
-		corpus.seed_failure_kind ? `failureKind=${corpus.seed_failure_kind}` : "",
-		corpus.max_reached ? "max_reached" : "",
+		countIssue("low_quality", corpus.lowQuality),
+		countIssue("quality_warnings", corpus.qualityWarnings),
+		countIssue("injection", corpus.injectionSignalPages),
+		corpus.seedFailureKind ? `failureKind=${corpus.seedFailureKind}` : "",
+		corpus.maxReached ? "max_reached" : "",
 	].filter(Boolean);
 	return issues.length ? [`  issues: ${issues.join(", ")}`] : [];
 }

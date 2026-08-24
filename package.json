@@ -1,7 +1,7 @@
 {
 	"name": "docsnap",
 	"version": "2.0.0",
-	"description": "CLI that compiles public sites into a hash-verified local Markdown corpus agents and humans can grep.",
+	"description": "Save public documentation as Markdown and search it locally.",
 	"license": "MIT",
 	"author": "Kaan Aricioglu",
 	"repository": {
@@ -25,9 +25,9 @@
 		"web-scraper"
 	],
 	"type": "module",
-	"packageManager": "bun@1.4.0-canary.1+8326d1bd3",
+	"packageManager": "bun@1.4.0",
 	"engines": {
-		"bun": ">=1.3.14"
+		"bun": ">=1.4.0"
 	},
 	"bin": {
 		"docsnap": "dist/entry.ts"
@@ -49,13 +49,13 @@
 	},
 	"dependencies": {
 		"@firecrawl/anydoc": "0.1.9",
-		"defuddle": "0.19.0",
+		"defuddle": "0.19.3",
 		"linkedom": "0.18.12"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.13",
 		"@oxlint/plugins": "1.78.0",
-		"@types/bun": "1.3.14",
+		"@types/bun": "1.4.0",
 		"oxlint": "1.78.0",
 		"typescript": "^5.9.3"
 	}

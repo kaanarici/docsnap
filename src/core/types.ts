@@ -286,7 +286,6 @@ export type RunSummary = {
 	status: "ok" | "partial" | "failed";
 	seedUrl: string;
 	seed: SeedSummary;
-	warnings: RunWarning[];
 	outDir: string;
 	dryRun: boolean;
 	captureMode: "page" | "site";
@@ -300,6 +299,7 @@ export type RunSummary = {
 	maxAppliesTo: "all" | "non-llms";
 	maxReached: boolean;
 	discoveryTruncated?: boolean;
+	stopReason?: "rate_limited";
 	selectionHash?: string;
 	discovered: number;
 	deduped: number;
@@ -312,14 +312,14 @@ export type RunSummary = {
 	hostRedirects: number;
 	redirectedHosts: Array<{ from: string; to: string; count: number }>;
 	elapsedMs: number;
-	firstPageMs: number | null;
 	pagesPerSecond: number;
 	bySource: Record<DiscoverySource, number>;
 	byExtractor: Record<PageExtractor, number>;
 	byKind?: Partial<Record<PageKind, number>>;
 	byInlineStateSource: Partial<Record<InlineStateSource, number>>;
 	byFailureKind: Partial<Record<FailureKind, number>>;
-	errors: Array<{ url: string; error: string; kind: FailureKind }>;
+	errors: Array<{ url: string; error: string; failureKind: FailureKind }>;
+	errorsOmitted?: number;
 	render?: RenderMetrics & {
 		attempted: number;
 		rendered: number;
@@ -336,34 +336,14 @@ export type RunSummary = {
 };
 
 export function runSucceeded(
-	summary: Pick<RunSummary, "captureMode" | "written" | "seed">,
+	summary: Pick<RunSummary, "status" | "captureMode" | "written" | "seed">,
 ) {
 	return (
+		summary.status === "ok" &&
 		summary.written > 0 &&
 		(summary.captureMode === "site" || summary.seed.included)
 	);
 }
-
-export type RunWarning =
-	| {
-			kind: "seed_omitted" | "discovery_resource_empty";
-			message: string;
-			omissionReason?: SeedSummary["omissionReason"];
-			failureKind?: FailureKind;
-			error?: string;
-	  }
-	| {
-			kind: "discovery_resource_seed";
-			message: string;
-			source?: DiscoverySource;
-			pagesWritten: number;
-	  }
-	| {
-			kind: "seed_redirected";
-			message: string;
-			url?: string;
-			finalUrl?: string;
-	  };
 
 export type SeedSummary = {
 	attempted: boolean;

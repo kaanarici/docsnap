@@ -3,8 +3,6 @@ type Snippet = { lineStart: number; lineEnd: number; text: string };
 type SnippetDoc = {
 	body: string;
 	bodyLineOffset: number;
-	frontmatter: string;
-	frontmatterTerms: Set<string>;
 };
 
 const maxSnippetHits = 2_000;
@@ -17,24 +15,11 @@ export function docSnippet(
 	literalTerms: string[] = [],
 ): Snippet {
 	const body = bestSnippet(doc.body, queryTerms, snippetChars, literalTerms);
-	if (
-		queryHits(body.text, queryTerms).length ||
-		!frontmatterHit(doc, queryTerms)
-	) {
-		return {
-			...body,
-			lineStart: body.lineStart + doc.bodyLineOffset,
-			lineEnd: body.lineEnd + doc.bodyLineOffset,
-		};
-	}
-	const meta = bestSnippet(doc.frontmatter, queryTerms, snippetChars);
-	return { ...meta, lineStart: meta.lineStart + 1, lineEnd: meta.lineEnd + 1 };
-}
-
-function frontmatterHit(doc: SnippetDoc, queryTerms: Set<string>) {
-	for (const term of queryTerms)
-		if (doc.frontmatterTerms.has(term)) return true;
-	return false;
+	return {
+		...body,
+		lineStart: body.lineStart + doc.bodyLineOffset,
+		lineEnd: body.lineEnd + doc.bodyLineOffset,
+	};
 }
 
 function bestSnippet(

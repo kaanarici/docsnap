@@ -30,7 +30,6 @@ function rewriteMarkdown(
 			const resolved = new URL(href, record.finalUrl);
 			const path = map.get(urlWithoutFragment(href, record.finalUrl));
 			if (!path) {
-				// Uncaptured relative links must remain followable from the local file.
 				const http =
 					resolved.protocol === "http:" || resolved.protocol === "https:";
 				return isRelativeHref(href) && http

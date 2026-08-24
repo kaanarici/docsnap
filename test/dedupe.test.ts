@@ -42,5 +42,4 @@ test("keeps the requested seed record on an identity collision", () => {
 		1,
 	);
 	expect(summary.seed.redirected).toBeUndefined();
-	expect(summary.warnings).toEqual([]);
 });

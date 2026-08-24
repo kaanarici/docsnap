@@ -1,3 +1,4 @@
+import { availableParallelism } from "node:os";
 import type { FetchedUrl } from "../core/types.ts";
 import { shouldExtractInWorker } from "./content.ts";
 import { type ExtractedPage, extractPage } from "./html.ts";
@@ -7,62 +8,64 @@ type Message =
 	| { id: number; page: ExtractedPage }
 	| { id: number; error: string };
 
-// A byte threshold still offloads a few unusually large pages.
+export type ExtractionPool = {
+	extractMany(inputs: FetchedUrl[]): Promise<ExtractedPage[]>;
+	close(): Promise<void>;
+};
+
+const workerPageThreshold = 48;
 const workerByteThreshold = 8 * 1024 * 1024;
 
-export async function extractMany(
-	inputs: FetchedUrl[],
-): Promise<ExtractedPage[]> {
-	if (!("Worker" in globalThis))
-		return Promise.all(inputs.map(safeExtractPage));
+export function createExtractionPool(): ExtractionPool {
+	const workers: Worker[] = [];
+	let activeReject: ((error: Error) => void) | undefined;
+	let closed = false;
 
-	const results: ExtractedPage[] = [];
-	results.length = inputs.length;
-	const heavy: Array<{ id: number; input: FetchedUrl }> = [];
-	await Promise.all(
-		inputs.map(async (input, id) => {
-			if (shouldExtractInWorker(input.result)) heavy.push({ id, input });
-			else results[id] = await safeExtractPage(input);
-		}),
-	);
-	const heavyBytes = heavy.reduce(
-		(total, { input }) => total + Buffer.byteLength(input.result.body),
-		0,
-	);
-	if (
-		heavyBytes < workerByteThreshold &&
-		heavy.every(({ input }) => !input.result.document)
-	) {
+	return { extractMany, close };
+
+	async function extractMany(inputs: FetchedUrl[]): Promise<ExtractedPage[]> {
+		if (closed) throw new Error("Extraction pool is closed");
+		if (activeReject) throw new Error("Extraction pool is already running");
+		if (!("Worker" in globalThis))
+			return Promise.all(inputs.map(safeExtractPage));
+
+		const results: ExtractedPage[] = [];
+		results.length = inputs.length;
+		const heavy: Array<{ id: number; input: FetchedUrl }> = [];
 		await Promise.all(
-			heavy.map(async ({ id, input }) => {
-				results[id] = await safeExtractPage(input);
+			inputs.map(async (input, id) => {
+				if (shouldExtractInWorker(input.result)) heavy.push({ id, input });
+				else results[id] = await safeExtractPage(input);
 			}),
 		);
-		return results;
-	}
+		const heavyBytes = heavy.reduce(
+			(total, { input }) => total + Buffer.byteLength(input.result.body),
+			0,
+		);
+		if (
+			heavy.length < workerPageThreshold &&
+			heavyBytes < workerByteThreshold &&
+			heavy.every(({ input }) => !input.result.document)
+		) {
+			await Promise.all(
+				heavy.map(async ({ id, input }) => {
+					results[id] = await safeExtractPage(input);
+				}),
+			);
+			return results;
+		}
 
-	const size = Math.min(heavy.length, 2);
-	let next = 0;
-	const pool: Worker[] = [];
-	// a fatal error in one worker must tear down the siblings too; otherwise they
-	// keep draining the queue and hold the event loop open after a failed run
-	const terminateAll = () => {
-		for (const worker of pool) worker.terminate();
-	};
-
-	try {
-		const tasks = Array.from({ length: size }, () => {
-			const worker = new Worker(new URL("./worker.ts", import.meta.url), {
-				type: "module",
-			});
-			pool.push(worker);
-			return new Promise<void>((resolve, reject) => {
-				const fail = (error: Error) => {
-					terminateAll();
-					reject(error);
-				};
-				worker.onerror = (event) =>
-					fail(event.error ?? new Error("extract worker crashed"));
+		const size = Math.min(
+			heavy.length,
+			Math.max(1, availableParallelism() - 1),
+			8,
+		);
+		while (workers.length < size) workers.push(createWorker());
+		let next = 0;
+		let pending = heavy.length;
+		await new Promise<void>((resolve, reject) => {
+			activeReject = reject;
+			for (const worker of workers.slice(0, size)) {
 				worker.onmessage = (event: MessageEvent<Message>) => {
 					const message = event.data;
 					if ("error" in message) {
@@ -73,27 +76,47 @@ export async function extractMany(
 					} else {
 						results[message.id] = message.page;
 					}
-					if (!send()) {
-						worker.terminate();
+					pending--;
+					if (pending === 0) {
+						activeReject = undefined;
 						resolve();
+					} else {
+						send(worker);
 					}
 				};
-				send();
+				send(worker);
+			}
 
-				function send() {
-					const job = heavy[next++];
-					if (!job) return false;
-					worker.postMessage({ id: job.id, input: job.input });
-					return true;
-				}
-			});
+			function send(worker: Worker) {
+				const job = heavy[next++];
+				if (job) worker.postMessage({ id: job.id, input: job.input });
+			}
 		});
-
-		await Promise.all(tasks);
-	} finally {
-		terminateAll();
+		return results;
 	}
-	return results;
+
+	function createWorker() {
+		const worker = new Worker(new URL("./worker.ts", import.meta.url), {
+			type: "module",
+		});
+		worker.onerror = (event) => {
+			const reject = activeReject;
+			activeReject = undefined;
+			closed = true;
+			for (const active of workers) active.terminate();
+			reject?.(event.error ?? new Error("extract worker crashed"));
+		};
+		return worker;
+	}
+
+	async function close() {
+		if (closed) return;
+		closed = true;
+		const reject = activeReject;
+		activeReject = undefined;
+		reject?.(new Error("Extraction pool closed while running"));
+		await Promise.all(workers.map((worker) => worker.terminate()));
+	}
 }
 
 async function safeExtractPage(input: FetchedUrl): Promise<ExtractedPage> {

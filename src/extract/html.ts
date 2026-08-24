@@ -263,10 +263,12 @@ function isDocsHtml(document: Document, result: FetchResult) {
 	const main =
 		document.querySelector("main,[role=main],article") ?? document.body;
 	const headings = main?.querySelectorAll("h1,h2,h3").length ?? 0;
+	const tables = main?.querySelectorAll("table").length ?? 0;
 	const code = main?.querySelectorAll("pre,table,dl").length ?? 0;
 	const navLinks = document.querySelectorAll(
 		"nav a, aside a, [class*='sidebar' i] a, [role='navigation'] a",
 	).length;
+	if (headings >= 1 && tables >= 1) return true;
 	if (headings >= 3 && (code >= 2 || navLinks >= 20)) return true;
 	try {
 		const path = new URL(result.finalUrl).pathname;
@@ -508,11 +510,7 @@ type DeclaredMarkdown = {
 };
 
 function structuredOrFlat(document: Document, baseUrl: string) {
-	const status = { truncated: false };
-	const result = {
-		markdown: structuredFallback(document, baseUrl, status),
-		...status,
-	};
+	const result = structuredFallback(document, baseUrl);
 	if (wordCount(result.markdown) >= 20) {
 		return { ...result, extractor: "structured" as const };
 	}

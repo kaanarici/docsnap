@@ -8,10 +8,9 @@ import { validatePublicHttpUrl } from "../security/url.ts";
 import { isNotModifiedResult } from "./policy.ts";
 import type { CacheLookup, CacheRequest } from "./store.ts";
 import {
-	acquireCacheLock,
+	acquireCacheWriteLock,
 	cacheConditional,
 	cachedFetchResult,
-	cacheKey,
 	cacheRequest,
 	readCache,
 	refreshCacheEntry,
@@ -28,9 +27,6 @@ export type UncachedFetch = (
 	allowUrl?: UrlGate,
 ) => Promise<FetchResult>;
 
-// Process-local single-flight: concurrent same-key cold fetches share one
-// network request and cache write instead of stampeding the origin. Scoped per
-// PipelineConfig (cache context) so unrelated runs never collide; cleared on settle.
 const inFlight = new WeakMap<
 	PipelineConfig,
 	Map<string, Promise<FetchResult>>
@@ -95,7 +91,7 @@ async function fillCold(
 	allowUrl: UrlGate | undefined,
 ): Promise<FetchResult> {
 	const started = performance.now();
-	const lock = await acquireCacheLock(config, first.key);
+	const lock = await acquireCacheWriteLock(config, request);
 	if (!lock) {
 		const afterWait = await readCache(config, request);
 		if (afterWait.state === "fresh") {
@@ -124,12 +120,7 @@ async function fillCold(
 			allowUrl,
 		);
 		if (isNotModifiedResult(result) && stale) {
-			const entry = await refreshCacheEntry(
-				config,
-				first.key,
-				stale.entry,
-				result,
-			);
+			const entry = await refreshCacheEntry(config, lock, stale.entry, result);
 			return cachedFetchResult(
 				entry,
 				stale.body,
@@ -137,7 +128,7 @@ async function fillCold(
 				url,
 			);
 		}
-		await writeCacheResult(config, first.key, request, result);
+		await writeCacheResult(config, lock, result);
 		return result;
 	} finally {
 		await releaseDirLock(lock);
@@ -173,11 +164,10 @@ async function writeThroughCache(
 	result: FetchResult,
 ) {
 	const request = cacheRequest(url, config, accept);
-	const key = cacheKey(request);
-	const lock = await acquireCacheLock(config, key);
+	const lock = await acquireCacheWriteLock(config, request);
 	if (!lock) return;
 	try {
-		await writeCacheResult(config, key, request, result);
+		await writeCacheResult(config, lock, result);
 	} finally {
 		await releaseDirLock(lock);
 	}

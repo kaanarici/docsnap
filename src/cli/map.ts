@@ -18,7 +18,7 @@ export async function runMap(input: MapInput) {
 			? [
 					{
 						url: entry.url,
-						kind: entry.fetched.failureKind,
+						failureKind: entry.fetched.failureKind,
 						error: entry.fetched.error,
 					},
 				]

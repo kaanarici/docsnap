@@ -32,13 +32,9 @@ import {
 
 type OutputState = { chars: number; truncated: boolean };
 
-export function structuredFallback(
-	document: Document,
-	baseUrl: string,
-	status?: { truncated: boolean },
-): string {
+export function structuredFallback(document: Document, baseUrl: string) {
 	const root = document.body ?? document.documentElement;
-	if (!root) return "";
+	if (!root) return { markdown: "", truncated: false };
 
 	const candidates = Array.from(
 		document.querySelectorAll("main,[role=main],article"),
@@ -61,8 +57,10 @@ export function structuredFallback(
 			best = { markdown, score, truncated: serialized.truncated };
 		}
 	}
-	if (status) status.truncated = best?.truncated ?? false;
-	return best?.markdown ?? "";
+	return {
+		markdown: best?.markdown ?? "",
+		truncated: best?.truncated ?? false,
+	};
 }
 
 function markdownStats(markdown: string) {
@@ -413,12 +411,12 @@ function directNestedLists(item: Element) {
 }
 
 function hasBlockChild(element: Element) {
-	return Array.from(element.children)
-		.slice(0, maxDirectChildScan)
-		.some(
-			(child) =>
-				actsLikeBlock(child) ||
-				(tagName(child).includes("-") &&
-					Array.from(child.children).some(actsLikeBlock)),
-		);
+	const stack = Array.from(element.children).reverse();
+	for (let scanned = 0; stack.length > 0 && scanned < 240; scanned++) {
+		const child = stack.pop()!;
+		if (actsLikeBlock(child)) return true;
+		if (!shouldSkipElement(child))
+			stack.push(...Array.from(child.children).reverse());
+	}
+	return false;
 }

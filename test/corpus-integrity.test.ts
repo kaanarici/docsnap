@@ -2,8 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { readFile, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { snapshotStats } from "../src/core/snapshot.ts";
+import type { PageRecord } from "../src/core/types.ts";
 import { corpusLimits } from "../src/corpus/access.ts";
-import { readCorpus, readSummary } from "../src/corpus/index.ts";
+import { readCorpus, readSummary, searchCorpus } from "../src/corpus/index.ts";
 import { runFiles } from "../src/output/files.ts";
 import { conditionalRequestForPrior, loadPrior } from "../src/output/prior.ts";
 import { buildSummary } from "../src/report/summary.ts";
@@ -17,6 +18,119 @@ import {
 } from "./fixtures.ts";
 
 describe("corpus integrity", () => {
+	test("keeps page frontmatter useful to an agent", () => {
+		const page = testPage();
+		expect(page.rendered).toContain('url: "https://docs.example.com/guide"');
+		expect(page.rendered).not.toContain("contentHash:");
+		expect(page.rendered).not.toContain("fetchedAt:");
+		expect(page.rendered).not.toContain("extractor:");
+		expect(page.rendered).not.toContain("confidence:");
+		expect(page.rendered).not.toContain("redirects:");
+	});
+
+	test("bounds summary failure examples", () => {
+		const failures: PageRecord[] = Array.from({ length: 25 }, (_, index) => ({
+			ok: false,
+			url: `https://docs.example.com/${index}`,
+			finalUrl: `https://docs.example.com/${index}`,
+			status: 429,
+			source: "crawl",
+			timings: { fetchMs: 1, extractMs: 0, writeMs: 0 },
+			redirects: [],
+			fetchedAt: "2026-01-01T00:00:00.000Z",
+			injectionSignals: [],
+			markdown: "",
+			links: [],
+			contentHash: "",
+			extractor: "none",
+			confidence: 0,
+			qualityReasons: [],
+			error: "HTTP 429",
+			failureKind: "blocked",
+		}));
+		const summary = buildSummary(
+			failures,
+			[],
+			testConfig("unused", { pageOnly: false, max: 25 }),
+			failures.map((record) => ({ url: record.url, source: "crawl" })),
+			0,
+			snapshotStats([]),
+			1,
+		);
+		expect(summary.errors).toHaveLength(20);
+		expect(summary.errorsOmitted).toBe(5);
+	});
+
+	test("succeeds when failures do not prevent the requested page count", () => {
+		const page = testPage();
+		const failure: PageRecord = {
+			ok: false,
+			url: "https://docs.example.com/empty",
+			finalUrl: "https://docs.example.com/empty",
+			status: 200,
+			source: "sitemap",
+			timings: { fetchMs: 1, extractMs: 0, writeMs: 0 },
+			redirects: [],
+			fetchedAt: "2026-01-01T00:00:00.000Z",
+			injectionSignals: [],
+			markdown: "",
+			links: [],
+			contentHash: "",
+			extractor: "none",
+			confidence: 0,
+			qualityReasons: [],
+			error: "empty content",
+			failureKind: "empty",
+		};
+		const summary = buildSummary(
+			[page, failure],
+			[page],
+			testConfig("unused", { pageOnly: false }),
+			[
+				{ url: page.url, source: "seed", wasSeed: true },
+				{ url: failure.url, source: "sitemap" },
+			],
+			0,
+			snapshotStats([{ path: page.outputPath, body: page.rendered }]),
+			1,
+		);
+		expect(summary).toMatchObject({
+			status: "ok",
+			maxReached: true,
+			written: 1,
+			failed: 1,
+		});
+	});
+
+	test("keeps a successfully redirected seed successful", () => {
+		const seedUrl = "https://docs.example.com/start";
+		const finalUrl = "https://docs.example.com/guide";
+		const page = {
+			...testPage(),
+			url: seedUrl,
+			finalUrl,
+			redirects: [
+				{ from: seedUrl, to: finalUrl, type: "http" as const, status: 301 },
+			],
+		};
+		const summary = buildSummary(
+			[page],
+			[page],
+			testConfig("unused", { seedUrl }),
+			[{ url: seedUrl, source: "seed", wasSeed: true }],
+			0,
+			snapshotStats([{ path: page.outputPath, body: page.rendered }]),
+			1,
+		);
+		expect(summary.status).toBe("ok");
+		expect(summary.seed).toMatchObject({
+			included: true,
+			redirected: true,
+			url: seedUrl,
+			finalUrl,
+		});
+	});
+
 	test("accepts a valid corpus and rejects a tampered page", async () => {
 		const root = await tempDir("corpus-tamper");
 		await writeValidCorpus(root);
@@ -27,6 +141,36 @@ describe("corpus integrity", () => {
 			`${await readFile(pagePath, "utf8")}\ntampered\n`,
 		);
 		await expect(readCorpus(root)).rejects.toThrow("do not match");
+	});
+
+	test("fails search when a validated page disappears", async () => {
+		const root = await tempDir("search-page-race");
+		const { page } = await writeValidCorpus(root);
+		const { records } = await readCorpus(root);
+		await unlink(join(root, page.outputPath));
+		await expect(
+			searchCorpus(root, {
+				query: "documentation",
+				maxResults: 8,
+				snippetChars: 500,
+				records,
+			}),
+		).rejects.toThrow(`Corpus file not found: ${page.outputPath}`);
+	});
+
+	test("returns source text rather than frontmatter for metadata matches", async () => {
+		const root = await tempDir("search-frontmatter");
+		await writeValidCorpus(root);
+		const { records } = await readCorpus(root);
+		const result = await searchCorpus(root, {
+			query: "docs.example.com",
+			maxResults: 8,
+			snippetChars: 500,
+			records,
+		});
+		expect(result.matches).toHaveLength(1);
+		expect(result.matches[0]?.text).toContain("Hash-verified documentation");
+		expect(result.matches[0]?.text).not.toContain("url:");
 	});
 
 	test("rejects a corpus page symlinked outside its real root", async () => {
@@ -79,7 +223,7 @@ describe("corpus integrity", () => {
 		expect(corpus.records[0]?.kind).toBe("docs-html");
 	});
 
-	test("reads the pre-0.2 asset source as crawl", async () => {
+	test("rejects the pre-0.2 asset source", async () => {
 		const root = await tempDir("pre02-asset");
 		await writeValidCorpus(root);
 		const path = join(root, runFiles.manifest);
@@ -90,8 +234,9 @@ describe("corpus integrity", () => {
 				'"source":"asset"',
 			),
 		);
-		const corpus = await readCorpus(root);
-		expect(corpus.records[0]?.source).toBe("crawl");
+		await expect(readCorpus(root)).rejects.toThrow(
+			`Invalid ${runFiles.manifest} in corpus`,
+		);
 	});
 
 	test("keeps manifest resource indexes public", async () => {
@@ -141,7 +286,7 @@ describe("corpus integrity", () => {
 			{ length: 160 },
 			(_, index) => `https://docs.example.com/${index}/${"x".repeat(80)}`,
 		);
-		const records = Array.from({ length: 500 }, (_, index) => ({
+		const records = Array.from({ length: 2_000 }, (_, index) => ({
 			...testPage(),
 			url: `https://docs.example.com/${index}`,
 			finalUrl: `https://docs.example.com/${index}`,
@@ -150,7 +295,7 @@ describe("corpus integrity", () => {
 			media: links,
 		}));
 		const { summary } = await writeValidCorpus(root);
-		await writeRunMetadata(records, summary, testConfig(root, { max: 500 }));
+		await writeRunMetadata(records, summary, testConfig(root, { max: 2_000 }));
 		expect(
 			(await stat(join(root, runFiles.manifest))).size,
 		).toBeLessThanOrEqual(corpusLimits.manifestBytes);
@@ -203,7 +348,7 @@ describe("corpus integrity", () => {
 	});
 
 	test.each([
-		["oversized max", { max: 501 }],
+		["oversized max", { max: 2_001 }],
 		["invalid generatedAt", { generatedAt: "not-a-date" }],
 		["non-string userAgent", { userAgent: 42 }],
 		["negative written count", { written: -1 }],
@@ -219,7 +364,6 @@ describe("corpus integrity", () => {
 	});
 
 	test.each([
-		["warning", { warnings: [42] }],
 		["redirect", { redirectedHosts: [42] }],
 		["error", { errors: [42] }],
 		["render summary", { render: {} }],

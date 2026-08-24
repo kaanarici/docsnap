@@ -51,6 +51,7 @@ export function thrownFetchKind(cause: unknown): FailureKind {
 function isTimeoutError(cause: unknown) {
 	return (
 		cause instanceof Error &&
-		/timed out|timeout/i.test(`${cause.name} ${cause.message}`)
+		(cause.name === "TimeoutError" ||
+			/timed out|timeout/i.test(`${cause.name} ${cause.message}`))
 	);
 }

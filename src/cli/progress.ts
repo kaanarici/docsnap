@@ -21,7 +21,9 @@ export function printSummary(summary: RunSummary): void {
 	if (summary.maxReached) {
 		logLine(`docsnap: page limit ${summary.max} reached`);
 	}
-	if (summary.discoveryTruncated)
+	if (summary.stopReason === "rate_limited")
+		logLine("docsnap: stopped after repeated HTTP 429 responses");
+	else if (summary.discoveryTruncated)
 		logLine("docsnap: warning discovery stopped at its safety budget");
 	if (summary.render?.unavailable) {
 		logLine(

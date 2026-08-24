@@ -283,7 +283,6 @@ async function fetchOnce(
 				redirects,
 				...responseMetadata(response, requestStarted, fetchedAt, cookieTainted),
 			};
-			// 304 only counts as not-modified when we sent a validator for this URL.
 			if (response.status === 304 && Object.keys(sentConditional).length > 0) {
 				return {
 					...base,
@@ -316,7 +315,7 @@ async function fetchOnce(
 					...full,
 					ok: false,
 					error: `HTTP ${response.status}`,
-					failureKind: failureKind(response.status, `HTTP ${response.status}`),
+					failureKind: failureKind(response.status),
 				};
 			}
 			responseHeaders.set(result, response.headers);
@@ -533,7 +532,7 @@ export function fetchMany(
 	allowUrl?: FetchUrlGate,
 ): Promise<FetchedUrl[]> {
 	return runBounded(
-		[...urls],
+		urls,
 		{
 			concurrency: config.concurrency,
 			perOrigin: config.perOrigin,

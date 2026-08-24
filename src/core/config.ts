@@ -3,11 +3,11 @@ import { validatePublicHttpUrl } from "../security/url.ts";
 import type { PipelineConfig, RunSummary } from "./types.ts";
 import { canonicalUrlSearch, looksLikeSpecificContentUrl } from "./url.ts";
 
-const defaultConcurrency = 8;
+const defaultConcurrency = 64;
 const maxUserAgentChars = 1024;
 export const defaultUserAgent =
 	"Mozilla/5.0 (compatible; docsnap; +https://npmjs.com/package/docsnap)";
-export const maxGeneratedCapturePages = 500;
+export const maxGeneratedCapturePages = 2_000;
 export const maxGeneratedMediaUrls = 100;
 const maxPathSlugLength = 96;
 

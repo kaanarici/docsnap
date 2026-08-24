@@ -16,6 +16,15 @@ describe("output root guards", () => {
 	])("rejects unsafe root: %s", (root) =>
 		expect(() => assertSafeRoot(root, "unsafe")).toThrow("unsafe"));
 
+	test("accepts a fresh nested output path beneath home", () => {
+		expect(() =>
+			assertSafeRoot(
+				join(homedir(), ".docsnap-test-uncreated", "output"),
+				"unsafe",
+			),
+		).not.toThrow();
+	});
+
 	test("rejects a relative --out that escapes the current directory", async () => {
 		const parent = await tempDir("relative-parent");
 		const escaped = `../${parent.split("/").pop()}-escaped`;

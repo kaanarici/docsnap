@@ -200,7 +200,6 @@ function sitemapPartNumber(pathname: string) {
 }
 function scopePartVariants(part: string) {
 	const lower = part.toLowerCase();
-	// Bound and escape the seed-derived segment before building a RegExp.
 	if (lower.length > 64) return [];
 	const escaped = escapeRegExp(lower).replaceAll("-", "[_-]");
 	const variants = [escaped];

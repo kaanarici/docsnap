@@ -120,6 +120,21 @@ test("detects bounded encoded and confusable instructions", () => {
 	}
 });
 
+test("does not treat ordinary long identifiers as encoded instructions", () => {
+	const identifiers = Array.from(
+		{ length: 70 },
+		(_, index) => `aws_s3_resource_configuration_identifier_${index}`,
+	).join("\n");
+	expect(scanMarkdownForInjectionSignals(identifiers)).toEqual([]);
+	expect(
+		scanMarkdownForInjectionSignals(
+			"dGVzdC11cGxvYWQtaWRlbnRpZmllci10aGF0LWlzLW9wYXF1ZS1idXQtaGFybWxlc3M".repeat(
+				3,
+			),
+		),
+	).toEqual([]);
+});
+
 test("distinguishes authentication documentation from access gates", () => {
 	const guide = `# Authentication setup\n\n${"Configure the session middleware before protected routes. ".repeat(12)}Please sign in to continue is the default message.`;
 	const password = '<form><input type="password"></form>';
@@ -148,6 +163,13 @@ test("distinguishes authentication documentation from access gates", () => {
 	}
 	expect(
 		blockedAccessError(
+			`${"Explain how protected routes, session middleware, and authentication callbacks work. ".repeat(20)}Please sign in to continue is example interface copy.`,
+			"Authentication API reference",
+			password,
+		),
+	).toBeUndefined();
+	expect(
+		blockedAccessError(
 			"![](https://example.com/anubis/pensive.webp)\n\nLoading...\n\nPlease wait while we ensure the security of your connection.",
 			"Ordinary page title",
 		),
@@ -166,7 +188,7 @@ test("strips terminal controls without changing source newlines", () => {
 
 test.each([
 	["zero", 0],
-	["above maximum", 501],
+	["above maximum", 2_001],
 	["NaN", Number.NaN],
 	["infinite", Number.POSITIVE_INFINITY],
 	["fractional", 1.5],

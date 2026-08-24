@@ -21,7 +21,6 @@ export function titleFromContent(
 	fallback?: string,
 ): string | undefined {
 	const title = cleanTitle(fallback);
-	if (title && !genericTitle(title)) return title;
 	return firstMarkdownHeading(markdown) ?? title;
 }
 

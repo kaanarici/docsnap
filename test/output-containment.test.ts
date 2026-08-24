@@ -148,12 +148,7 @@ describe("output containment", () => {
 				[next],
 				{
 					...summary,
-					warnings: [
-						{
-							kind: "seed_omitted",
-							message: "x".repeat(corpusLimits.summaryBytes),
-						},
-					],
+					userAgent: "x".repeat(corpusLimits.summaryBytes),
 				},
 				config,
 			),

@@ -34,14 +34,6 @@ const shellPlaceholderMarkers = markerPattern([
 	...shellFrameworkMarkers,
 	rawGithubMarker,
 ]);
-const emptyShellMarkers = markerPattern([
-	"v-app-loading",
-	"enable javascript in your browser",
-	"zdWebClientConfig",
-	...shellFrameworkMarkers,
-	rawGithubMarker,
-]);
-
 export function isShellPlaceholder(
 	markdown: string,
 	title: string | undefined,
@@ -98,9 +90,10 @@ export function reportedNotFoundError(
 	if (
 		/^(?:(?:article|page|post) not found|404)$/i.test(titleText ?? "") &&
 		wordCount(markdown) < 80 &&
-		/(?:could not|couldn't|cannot|can't|unable to) (?:be found|find)\b/i.test(
+		(/(?:could not|couldn't|cannot|can't|unable to) (?:be found|find)\b/i.test(
 			markdown,
-		)
+		) ||
+			/\b(?:page|document|url)\b[^\n]{0,80}\bdoes not exist\b/i.test(markdown))
 	) {
 		return "page reported not found";
 	}
@@ -112,8 +105,7 @@ export function reportedNotFoundError(
 }
 
 export function isRecoverableAppShell(html: string, dom?: Document): boolean {
-	if (emptyAppMountMarker.test(html) || emptyShellMarkers.test(html))
-		return true;
+	if (emptyAppMountMarker.test(html)) return true;
 	try {
 		const document = dom ?? parseHTML(html).document;
 		const scriptCount = document.querySelectorAll(
@@ -212,8 +204,9 @@ function accessGate(markdown: string, title: string | undefined, html: string) {
 	const compact = whitespaceKey([title ?? "", markdown].join(" "));
 	const words = wordCount(markdown);
 	const ambiguous = ambiguousGatePattern.test(compact);
-	if (ambiguous && (gateTitle(title) || formLikeGate(html))) return true;
+	if (ambiguous && gateTitle(title)) return true;
 	if (words > 160) return false;
+	if (ambiguous && formLikeGate(html)) return true;
 	if (
 		/\b(?:complete the security check|paywall|verif(?:y|ying) (?:you are (?:a )?human|your identity))\b/i.test(
 			compact,

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import type { PageRecord } from "../src/core/types.ts";
 import {
+	chromeBudgetMs,
 	chromeStopped,
 	createChromeSession,
 	maxConsecutiveRenderMisses,
@@ -8,7 +9,13 @@ import {
 	needsChromeFetch,
 	skipChrome,
 } from "../src/render/session.ts";
-import { okFetch } from "./fixtures.ts";
+import { okFetch, testConfig } from "./fixtures.ts";
+
+test("gives rendered pages enough time without allowing unbounded runs", () => {
+	const config = testConfig("unused", { max: 10, timeoutMs: 10_000 });
+	expect(chromeBudgetMs(config)).toBe(50_000);
+	expect(chromeBudgetMs(config, 100)).toBe(120_000);
+});
 
 test("selects Chrome from app-shell kind and empty shell failures, not confidence", () => {
 	const shell = success({ kind: "app-shell", confidence: 0.95 });

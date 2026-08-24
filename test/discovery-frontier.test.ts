@@ -1,8 +1,10 @@
 import { describe, expect, onTestFinished, test } from "bun:test";
+import { runPipeline } from "../src/core/pipeline.ts";
+import { runSucceeded } from "../src/core/types.ts";
 import { createDiscoveryFrontier } from "../src/discover/frontier.ts";
 import { parseRobots } from "../src/discover/robots.ts";
 import { discoverSitemaps } from "../src/discover/sitemap.ts";
-import { okFetch, setTestEnv, testConfig } from "./fixtures.ts";
+import { okFetch, setTestEnv, tempDir, testConfig } from "./fixtures.ts";
 
 const origin = "https://docs.example.com";
 
@@ -76,6 +78,48 @@ describe("discovery frontier", () => {
 			`${origin}/two`,
 		]);
 		expect(discovery.truncated).toBe(true);
+	});
+
+	test("stops after a full batch is rate limited", async () => {
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			fetch(request) {
+				const url = new URL(request.url);
+				if (url.pathname === "/robots.txt")
+					return new Response("User-agent: *\nAllow: /");
+				if (url.pathname === "/docs/")
+					return new Response(
+						`<main><h1>Guide</h1><p>${"Useful documentation content. ".repeat(20)}</p><a href="/docs/one">One</a><a href="/docs/two">Two</a><a href="/docs/three">Three</a><a href="/docs/four">Four</a></main>`,
+						{ headers: { "content-type": "text/html" } },
+					);
+				if (/^\/docs\/(?:one|two|three|four)$/.test(url.pathname))
+					return new Response("slow down", { status: 429 });
+				return new Response("not found", { status: 404 });
+			},
+		});
+		onTestFinished(() => server.stop(true));
+		const localOrigin = server.url.origin;
+		setTestEnv("DOCSNAP_ALLOW_TEST_HOST", localOrigin);
+		const outputDir = await tempDir("rate-limit");
+		const result = await runPipeline(
+			testConfig(outputDir, {
+				seedUrl: `${localOrigin}/docs/`,
+				pageOnly: false,
+				max: 5,
+				concurrency: 2,
+				perOrigin: 2,
+			}),
+		);
+
+		expect(result.summary).toMatchObject({
+			status: "partial",
+			written: 1,
+			failed: 2,
+			discoveryTruncated: true,
+			stopReason: "rate_limited",
+		});
+		expect(runSucceeded(result.summary)).toBe(false);
 	});
 
 	test("searches late index children and keeps numeric part priority", async () => {

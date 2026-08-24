@@ -1,7 +1,6 @@
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 
-// Report source totals and files over the soft limit.
 const roots = ["src", "scripts"];
 const softLimit = 500;
 

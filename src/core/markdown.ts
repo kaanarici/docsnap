@@ -179,10 +179,6 @@ function isImage(markdown: string, start: number) {
 
 type CodeRegion = { start: number; end: number };
 
-// Captured docs frequently contain Markdown examples; links inside fenced
-// blocks or inline code are source content and must not be rewritten. Linear
-// scan: fenced blocks (lines opened by ``` / ~~~) take priority, then inline
-// code spans delimited by matching backtick runs on the same logical text.
 function codeRegions(markdown: string): CodeRegion[] {
 	const regions: CodeRegion[] = [];
 	const length = markdown.length;

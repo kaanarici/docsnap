@@ -42,7 +42,6 @@ import {
 	corpusLimits,
 	readBoundedCorpusFile,
 	readBoundedCorpusFileFromRealRoot,
-	readOptionalCorpusFileFromRealRoot,
 } from "./access.ts";
 import {
 	maxAllSearchScannedDirs,
@@ -155,7 +154,6 @@ function isRunSummary(value: JsonValue): value is JsonObject & RunSummary {
 		enumIncludes(["ok", "partial", "failed"], value.status) &&
 		isBoundedString(value.seedUrl, maxPublicUrlChars) &&
 		isSeedSummary(value.seed) &&
-		isWarnings(value.warnings) &&
 		isJsonString(value.outDir) &&
 		isJsonBoolean(value.dryRun) &&
 		enumIncludes(["page", "site"], value.captureMode) &&
@@ -171,6 +169,7 @@ function isRunSummary(value: JsonValue): value is JsonObject & RunSummary {
 		isJsonBoolean(value.maxReached) &&
 		(value.discoveryTruncated === undefined ||
 			isJsonBoolean(value.discoveryTruncated)) &&
+		optionalEnum(value.stopReason, ["rate_limited"]) &&
 		(value.selectionHash === undefined || isSha256(value.selectionHash)) &&
 		isCountRecord(value.byInjectionSignal, injectionSignals) &&
 		isObjectArray(
@@ -181,7 +180,6 @@ function isRunSummary(value: JsonValue): value is JsonObject & RunSummary {
 				isNonNegativeInteger(item["count"]),
 		) &&
 		isNonNegativeFinite(value.elapsedMs) &&
-		(value.firstPageMs === null || isNonNegativeFinite(value.firstPageMs)) &&
 		isNonNegativeFinite(value.pagesPerSecond) &&
 		isCountRecord(value.bySource, discoverySources, true) &&
 		isCountRecord(value.byExtractor, pageExtractors, true) &&
@@ -194,8 +192,10 @@ function isRunSummary(value: JsonValue): value is JsonObject & RunSummary {
 			(item) =>
 				isJsonString(item["url"]) &&
 				isJsonString(item["error"]) &&
-				enumIncludes(failureKinds, item["kind"]),
+				enumIncludes(failureKinds, item["failureKind"]),
 		) &&
+		(value.errorsOmitted === undefined ||
+			isNonNegativeInteger(value.errorsOmitted)) &&
 		isRefreshSummary(value.refresh) &&
 		isCacheSummary(value.cache) &&
 		(value.render === undefined || isRenderSummary(value.render))
@@ -250,32 +250,6 @@ function isCacheSummary(value: JsonValue | undefined): boolean {
 		(value.dir === null || isJsonString(value.dir)) &&
 		countersAreValid(value, cacheCounterFields)
 	);
-}
-
-function isWarnings(value: JsonValue | undefined) {
-	return isObjectArray(value, (warning) => {
-		if (!isJsonString(warning["message"])) return false;
-		switch (warning["kind"]) {
-			case "seed_omitted":
-			case "discovery_resource_empty":
-				return (
-					optionalEnum(warning["omissionReason"], omissionReasons) &&
-					optionalEnum(warning["failureKind"], failureKinds) &&
-					optionalString(warning["error"])
-				);
-			case "discovery_resource_seed":
-				return (
-					isNonNegativeInteger(warning["pagesWritten"]) &&
-					optionalEnum(warning["source"], discoverySources)
-				);
-			case "seed_redirected":
-				return (
-					optionalString(warning["url"]) && optionalString(warning["finalUrl"])
-				);
-			default:
-				return false;
-		}
-	});
 }
 
 function isRenderSummary(value: JsonValue | undefined) {
@@ -458,14 +432,14 @@ export async function listCorpora(
 	);
 	corpora.sort(
 		(left, right) =>
-			right.generated_at.localeCompare(left.generated_at) ||
-			left.output_dir.localeCompare(right.output_dir),
+			right.generatedAt.localeCompare(left.generatedAt) ||
+			left.outputDir.localeCompare(right.outputDir),
 	);
 	return {
 		corpora: corpora.slice(offset, offset + pageSize),
 		truncated: scanned.truncated,
 		corporaSkipped: scanned.skipped + (scanned.dirs.length - corpora.length),
-		next_cursor:
+		nextCursor:
 			offset + pageSize < corpora.length
 				? String(offset + pageSize)
 				: undefined,
@@ -495,16 +469,16 @@ export async function searchCorpus(outputDir: string, options: SearchOptions) {
 				record.injectionSignals.length === 0),
 	);
 	const realOutputDir = await realpath(outputDir);
-	const { input, truncated, skipped } = await buildRankInput(
+	const { input, truncated } = await buildRankInput(
 		records,
 		async (record) => {
-			const body = await readOptionalCorpusFileFromRealRoot(
+			const body = await readBoundedCorpusFileFromRealRoot(
 				outputDir,
 				realOutputDir,
 				record.outputPath,
 				corpusLimits.pageBytes,
 			);
-			return body === null ? null : verifyPageBody(record, body);
+			return verifyPageBody(record, body);
 		},
 		{ maxPages: corpusLimits.searchPages, maxBytes: corpusLimits.searchBytes },
 		{ query: options.query },
@@ -518,7 +492,6 @@ export async function searchCorpus(outputDir: string, options: SearchOptions) {
 		matches: ranked.slice(0, options.maxResults),
 		truncated,
 		limited: ranked.length > options.maxResults,
-		skipped,
 	};
 }
 
@@ -588,10 +561,7 @@ function parseManifestLine(line: string, outputDir: string): CorpusPage {
 		const aliases = parsed.aliases.filter(isJsonString);
 		if (aliases.length) page.aliases = aliases;
 	}
-	const source =
-		parsed.source === "asset"
-			? "crawl"
-			: jsonEnum(parsed.source, discoverySources);
+	const source = jsonEnum(parsed.source, discoverySources);
 	if (source) page.source = source;
 	const failureKind = jsonEnum(parsed.failureKind, failureKinds);
 	if (failureKind) page.failureKind = failureKind;
@@ -639,21 +609,21 @@ function isNonNegativeInteger(value: JsonValue | undefined): value is number {
 
 function corpusListEntry(summary: RunSummary, outputDir: string) {
 	return {
-		output_dir: outputDir,
-		seed_url: summary.seedUrl,
-		generated_at: summary.generatedAt,
+		outputDir,
+		seedUrl: summary.seedUrl,
+		generatedAt: summary.generatedAt,
 		status: summary.status,
-		capture_mode: summary.captureMode,
+		captureMode: summary.captureMode,
 		written: summary.written,
 		failed: summary.failed,
-		low_quality: summary.lowQuality,
-		quality_warnings: summary.qualityWarnings,
-		injection_signal_pages: summary.injectionSignalPages,
-		seed_included: summary.seed.included,
-		seed_output_path: summary.seed.outputPath,
-		seed_failure_kind: summary.seed.failureKind,
-		max_pages: summary.max,
-		max_reached: summary.maxReached,
+		lowQuality: summary.lowQuality,
+		qualityWarnings: summary.qualityWarnings,
+		injectionSignalPages: summary.injectionSignalPages,
+		seedIncluded: summary.seed.included,
+		seedOutputPath: summary.seed.outputPath,
+		seedFailureKind: summary.seed.failureKind,
+		maxPages: summary.max,
+		maxReached: summary.maxReached,
 	};
 }
 

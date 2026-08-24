@@ -9,8 +9,6 @@ export function freshUntilFor(result: FetchResult): Date | undefined {
 	const ageMs = (result.ageSeconds ?? 0) * 1000;
 	const cacheControl = result.cacheControl?.toLowerCase();
 	if (cacheControl) {
-		// docsnap's cache is shared across output dirs, so honor s-maxage over
-		// max-age regardless of header order (RFC 7234 shared-cache semantics).
 		const directives = parseCacheControl(cacheControl);
 		const maxAge = directives.get("s-maxage") ?? directives.get("max-age");
 		if (maxAge !== undefined && /^\d+$/.test(maxAge)) {

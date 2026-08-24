@@ -6,6 +6,7 @@ import type { DiscoveryFrontier } from "../discover/frontier.ts";
 import { startDiscovery } from "../discover/index.ts";
 import type { PageResources } from "../discover/nav.ts";
 import { normalizeUrl } from "../discover/url.ts";
+import { createExtractionPool, type ExtractionPool } from "../extract/pool.ts";
 import {
 	fetchMany,
 	fetchText,
@@ -80,7 +81,6 @@ import { lowQualityConfidence } from "./types.ts";
 
 type Progress = (message: string) => void;
 type PriorRecoveryUpdates = Parameters<typeof recoverPriorPage>[2];
-const extractModule = import("../extract/pool.ts");
 export async function runPipeline(
 	config: PipelineConfig,
 	progress?: Progress,
@@ -88,23 +88,28 @@ export async function runPipeline(
 	assertOutputRootSafe(config);
 	const lock = await acquireOutputLock(config);
 	const render = createChromeSession();
+	const extraction = createExtractionPool();
 	try {
-		return await runPipelineLocked(config, render, progress);
+		return await runPipelineLocked(config, render, extraction, progress);
 	} finally {
 		try {
-			await closeChromeSession(render);
+			await extraction.close();
 		} finally {
-			await releaseOutputLock(lock);
+			try {
+				await closeChromeSession(render);
+			} finally {
+				await releaseOutputLock(lock);
+			}
 		}
 	}
 }
 async function runPipelineLocked(
 	config: PipelineConfig,
 	render: ChromeSession,
+	extraction: ExtractionPool,
 	progress?: Progress,
 ): Promise<PipelineResult> {
 	const started = performance.now();
-	let firstPageMs: number | null = null;
 	const prior = await loadPrior(config);
 	if (prior.reason === "invalid_manifest") {
 		throw new Error(
@@ -136,31 +141,30 @@ async function runPipelineLocked(
 	let pageRecords: PageRecord[] = [];
 	let deduped = 0;
 	let captured = 0;
+	let stopReason: PipelineResult["summary"]["stopReason"];
+	let pending: { count: number; fetched: Promise<FetchedUrl[]> } | undefined;
 	progress?.("docsnap: fetching and extracting pages");
 	while (captured < config.max) {
 		const deficit = config.max - captured;
-		const pulled = await discovery.frontier.take(
-			Math.min(config.perOrigin, deficit),
-		);
-		if (pulled.length === 0) break;
-		const batch = pulled.filter((item) => {
-			const key = candidateKey(item.url);
-			if (seen.has(key)) return false;
-			seen.add(key);
-			return true;
-		});
-		if (batch.length === 0) continue;
-		attempted.push(...batch);
-		const extracted = await fetchAndExtract(
-			batch,
+		const current = pending ?? (await startBatch(deficit));
+		pending = undefined;
+		if (!current) break;
+		const fetched = await current.fetched;
+		const rateLimited =
+			fetched.length > 0 &&
+			fetched.every((page) => !page.result.ok && page.result.status === 429);
+		if (!rateLimited) {
+			const nextDeficit = deficit - current.count;
+			if (nextDeficit > 0) pending = await startBatch(nextDeficit);
+		}
+		const extracted = await extractFetched(
+			fetched,
 			config,
 			prior,
 			refresh,
 			discovery.frontier,
 			render,
-			() => {
-				firstPageMs ??= performance.now() - started;
-			},
+			extraction,
 			progress,
 		);
 		const next = dedupeRecords([...pageRecords, ...extracted]);
@@ -169,9 +173,11 @@ async function runPipelineLocked(
 		captured = pageRecords.filter(
 			(record) => record.ok && (config.maxExplicit || record.source !== "llms"),
 		).length;
+		if (rateLimited) {
+			stopReason = "rate_limited";
+			break;
+		}
 	}
-	await closeChromeSession(render);
-
 	const successfulPages = pageRecords
 		.filter((record): record is PageSuccess => record.ok)
 		.slice(0, config.maxExplicit ? config.max : maxGeneratedCapturePages);
@@ -272,17 +278,43 @@ async function runPipelineLocked(
 			deduped,
 			snapshot,
 			performance.now() - started,
-			firstPageMs,
 			refreshReport,
 			cacheSummary(config),
 			discovery.seedResource,
-			discovery.frontier.truncated,
+			discovery.frontier.truncated || stopReason !== undefined,
 			chromeRunSummary(render),
+			stopReason,
 		);
 		await commitStagedOutput(staged, runRecords, summary, config);
 		return { records: runRecords, summary };
 	} finally {
 		await discardStagedOutput(staged);
+	}
+
+	async function startBatch(limit: number) {
+		for (;;) {
+			const pulled = await discovery.frontier.take(
+				Math.min(config.perOrigin, limit),
+			);
+			if (pulled.length === 0) return undefined;
+			const discovered = pulled.filter((item) => {
+				const key = candidateKey(item.url);
+				if (seen.has(key)) return false;
+				seen.add(key);
+				return true;
+			});
+			if (discovered.length === 0) continue;
+			attempted.push(...discovered);
+			return {
+				count: discovered.length,
+				fetched: fetchMany(
+					discovered,
+					config,
+					(item) => conditionalRequestForPrior(prior, item),
+					(url) => resourceAllowed(url, config),
+				),
+			};
+		}
 	}
 }
 
@@ -332,23 +364,17 @@ export function partitionPageOutputs(
 	};
 }
 
-async function fetchAndExtract(
-	discovered: DiscoveredUrl[],
+async function extractFetched(
+	fetched: FetchedUrl[],
 	config: PipelineConfig,
 	prior: PriorState,
 	refresh: RefreshCounters,
 	frontier: DiscoveryFrontier,
 	render: ChromeSession,
-	onContent: () => void,
+	extraction: ExtractionPool,
 	progress?: Progress,
 ): Promise<PageRecord[]> {
 	const allowUrl = (url: string) => resourceAllowed(url, config);
-	const fetched = await fetchMany(
-		discovered,
-		config,
-		(item) => conditionalRequestForPrior(prior, item),
-		allowUrl,
-	);
 	const reusedPages: PageRecord[] = [];
 	const toExtract: FetchedUrl[] = [];
 	for (const page of fetched) {
@@ -366,17 +392,13 @@ async function fetchAndExtract(
 			toExtract.push(rejectNonPageFinal(page));
 		}
 	}
-	const extracted = await (await extractModule).extractMany(toExtract);
+	const extracted = await extraction.extractMany(toExtract);
 	const extractedRecords = extracted.map(([record, resources], index) => {
 		frontier.observe(toExtract[index]!.result, resources);
 		mergeResources(record, resources);
 		return record;
 	});
 	const shells = extracted.map(([, , shell]) => shell);
-	const hadContent =
-		reusedPages.some((record) => record.ok) ||
-		extractedRecords.some((record) => record.ok);
-	if (hadContent) onContent();
 	const renderedRecords = await renderAppShells(
 		toExtract,
 		extractedRecords,
@@ -384,9 +406,9 @@ async function fetchAndExtract(
 		config,
 		frontier,
 		render,
+		extraction,
 		progress,
 	);
-	if (!hadContent && renderedRecords.some((record) => record.ok)) onContent();
 	return [...reusedPages, ...renderedRecords];
 }
 
@@ -397,6 +419,7 @@ async function renderAppShells(
 	config: PipelineConfig,
 	frontier: DiscoveryFrontier,
 	session: ChromeSession,
+	extraction: ExtractionPool,
 	progress?: Progress,
 ): Promise<PageRecord[]> {
 	const indexes = inputs.flatMap((input, index) => {
@@ -427,7 +450,13 @@ async function renderAppShells(
 			break;
 		}
 		const input = inputs[index]!;
-		const result = await renderChromePage(session, input, config, remaining);
+		const originalRecord = output[index]!;
+		const result = await renderChromePage(
+			session,
+			input,
+			config,
+			originalRecord.ok ? Math.min(remaining, 4_000) : remaining,
+		);
 		if (!result) {
 			skipChrome(session, indexes.length - offset);
 			break;
@@ -435,16 +464,15 @@ async function renderAppShells(
 		if (!result.ok) {
 			session.failed++;
 			session.misses++;
-			const record = output[index];
-			if (record && !record.ok) {
-				record.error = `client render: ${result.error.slice(0, 300)}`;
-				if (result.kind === "timeout") record.failureKind = "timeout";
+			if (!originalRecord.ok) {
+				originalRecord.error = `client render: ${result.error.slice(0, 300)}`;
+				if (result.kind === "timeout") originalRecord.failureKind = "timeout";
 			}
 			continue;
 		}
 		session.rendered++;
 		const page = { ...input, result: result.result };
-		const [extracted] = await (await extractModule).extractMany([page]);
+		const [extracted] = await extraction.extractMany([page]);
 		if (!extracted) {
 			session.misses++;
 			continue;
@@ -452,7 +480,7 @@ async function renderAppShells(
 		const [record, resources] = extracted;
 		frontier.observe(page.result, resources);
 		const { metrics } = result;
-		const original = output[index]!;
+		const original = originalRecord;
 		const renderMetrics: NonNullable<PageRecord["render"]> = {
 			renderer: "chrome-cdp",
 			renderMs: Number(metrics.renderMs.toFixed(1)),
@@ -470,6 +498,7 @@ async function renderAppShells(
 			if (!page.result.ok) output[index] = record;
 			continue;
 		}
+		frontier.observeLinks(record.finalUrl, record.links);
 		if (
 			original.ok &&
 			record.confidence < lowQualityConfidence &&
@@ -591,20 +620,14 @@ async function materializeOutputs(
 		async (record) => {
 			const previous = prior.enabled ? prior.find(record) : undefined;
 			let fetchedAt = record.fetchedAt;
-			let rendered: string;
+			const rendered = renderPage(record);
 			if (
 				previous?.fetchedAt &&
 				previous.outputPath === record.outputPath &&
-				previous.contentHash === record.contentHash
+				previous.contentHash === record.contentHash &&
+				(await readPriorOutput(config, previous.outputPath)) === rendered
 			) {
-				rendered = renderPage(record, previous.fetchedAt);
-				if ((await readPriorOutput(config, previous.outputPath)) === rendered) {
-					fetchedAt = previous.fetchedAt;
-				} else {
-					rendered = renderPage(record);
-				}
-			} else {
-				rendered = renderPage(record);
+				fetchedAt = previous.fetchedAt;
 			}
 			return {
 				...record,

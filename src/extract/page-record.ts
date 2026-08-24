@@ -85,6 +85,10 @@ export function recordFromExtracted(
 		),
 	]);
 	const quality = scoreMarkdown(markdown, title);
+	if (extracted.extractor === "inline-state") {
+		quality.confidence = Math.min(quality.confidence, 0.8);
+		quality.reasons.push("inline state may omit content");
+	}
 	if (extracted.truncated) {
 		quality.confidence = Math.min(quality.confidence, 0.55);
 		quality.reasons.push("truncated extraction");
@@ -238,9 +242,7 @@ function publicHrefs(hrefs: string[], base: string, limit: number) {
 		try {
 			const url = new URL(href, base);
 			if (!validatePublicHttpUrl(url.href)) links.add(url.href);
-		} catch {
-			// Ignore malformed extracted links.
-		}
+		} catch {}
 		if (links.size >= limit) break;
 	}
 	return [...links];

@@ -11,8 +11,6 @@ import {
 	resolve,
 } from "node:path";
 
-// Top-level directories under $HOME that hold user data, not docsnap artifacts.
-// A cache or output root may not BE the filesystem root, $HOME, or one of these.
 const protectedHomeDirs = new Set([
 	"Applications",
 	"Desktop",
@@ -151,9 +149,6 @@ export function isWindowsAbsolute(path: string): boolean {
 	return /^[a-zA-Z]:[\\/]/.test(path) || path.startsWith("\\\\");
 }
 
-// Reject roots that are the filesystem root, $HOME, or a protected $HOME child.
-// Checks the resolved path AND its realpath so a symlink cannot disguise an
-// unsafe destination as a benign-looking root.
 export function assertSafeRoot(dir: string, message: string): void {
 	const resolved = resolve(dir);
 	if (isUnsafeRoot(resolved) || isUnsafeRoot(realRoot(resolved))) {
@@ -179,10 +174,6 @@ function isTempRoot(dir: string): boolean {
 	].includes(dir);
 }
 
-// Resolve symlinks on the existing portion of the path while preserving the
-// not-yet-created tail (the cache/output dir is often created after validation),
-// so a fresh path like ~/proj/out stays itself instead of collapsing onto its
-// nearest existing ancestor ($HOME) and being wrongly rejected.
 function realRoot(dir: string): string {
 	const tail: string[] = [];
 	let current = dir;

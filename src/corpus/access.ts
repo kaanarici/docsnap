@@ -149,29 +149,6 @@ function readLimitMessage(maxBytes: number, outputPath: string): string {
 	return `Corpus file exceeds read limit (${Math.ceil(maxBytes / 1024 / 1024)}MB): ${outputPath}`;
 }
 
-export async function readOptionalCorpusFileFromRealRoot(
-	outputDir: string,
-	realOutputDir: string,
-	outputPath: string,
-	maxBytes: number,
-): Promise<string | null> {
-	try {
-		return await readBoundedCorpusFileFromRealRoot(
-			outputDir,
-			realOutputDir,
-			outputPath,
-			maxBytes,
-		);
-	} catch (error) {
-		if (optionalCorpusReadError(error)) return null;
-		throw error;
-	}
-}
-
-function optionalCorpusReadError(cause: unknown): boolean {
-	return cause instanceof Error && cause.message.startsWith("Corpus file ");
-}
-
 async function realpathOrMessage(
 	path: string,
 	message: string,

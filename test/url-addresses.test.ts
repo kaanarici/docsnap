@@ -206,3 +206,18 @@ test("widens only an empty feed path scope without crossing origins", async () =
 		"https://example.com/blog/1",
 	]);
 });
+
+test("reads namespaced RDF feeds", async () => {
+	const seed = "https://example.com/feed.rdf";
+	const response = okFetch(
+		seed,
+		`<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/"><item><link>https://example.com/guide</link></item></rdf:RDF>`,
+		{ contentType: "application/rss+xml" },
+	);
+	const found = await discoverFeed(seed, seed, "/", testConfig("unused"), {
+		response,
+	});
+	expect(found.pages.map((page) => page.url)).toEqual([
+		"https://example.com/guide",
+	]);
+});

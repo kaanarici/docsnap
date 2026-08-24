@@ -5,25 +5,26 @@ import { type SnapshotStats, snapshotSchemaVersion } from "../core/snapshot.ts";
 import {
 	type DiscoveredUrl,
 	type DiscoveryResourceSeed,
-	discoverySources,
+	type DiscoverySource,
 	type FailureKind,
 	type InjectionSignal,
 	type InlineStateSource,
 	injectionSignals,
 	inlineStateSources,
 	lowQualityConfidence,
+	type PageExtractor,
 	type PageKind,
 	type PageOutput,
 	type PageRecord,
 	type PipelineConfig,
-	pageExtractors,
 	pageKinds,
 	type RefreshSummary,
 	type RunSummary,
-	type RunWarning,
 	type SeedSummary,
 } from "../core/types.ts";
 import { classifyDiscoveryResource } from "../core/url.ts";
+
+const maxSummaryErrors = 20;
 
 export function buildSummary(
 	records: PageRecord[],
@@ -33,12 +34,12 @@ export function buildSummary(
 	deduped: number,
 	snapshot: SnapshotStats,
 	elapsedMs: number,
-	firstPageMs: number | null = null,
 	refresh: RefreshSummary = emptyRefreshSummary(),
 	cache = cacheSummary(config),
 	seedResource?: DiscoveryResourceSeed,
 	discoveryTruncated = false,
 	render?: RunSummary["render"],
+	stopReason?: RunSummary["stopReason"],
 ): RunSummary {
 	const written = outputs.length;
 	let failed = 0;
@@ -51,8 +52,22 @@ export function buildSummary(
 		string,
 		{ from: string; to: string; count: number }
 	>();
-	const bySource = emptyCounts(discoverySources);
-	const byExtractor = emptyCounts(pageExtractors);
+	const bySource = {
+		seed: 0,
+		llms: 0,
+		sitemap: 0,
+		feed: 0,
+		nav: 0,
+		crawl: 0,
+	} satisfies Record<DiscoverySource, number>;
+	const byExtractor = {
+		markdown: 0,
+		html: 0,
+		text: 0,
+		fallback: 0,
+		structured: 0,
+		"inline-state": 0,
+	} satisfies Record<PageExtractor, number>;
 	const byKind: Partial<Record<PageKind, number>> = {};
 	const byInlineStateSource: Partial<Record<InlineStateSource, number>> = {};
 	const byFailureKind: Partial<Record<FailureKind, number>> = {};
@@ -68,11 +83,12 @@ export function buildSummary(
 		failed++;
 		byFailureKind[record.failureKind] =
 			(byFailureKind[record.failureKind] ?? 0) + 1;
-		errors.push({
-			url: record.url,
-			error: record.error,
-			kind: record.failureKind,
-		});
+		if (errors.length < maxSummaryErrors)
+			errors.push({
+				url: record.url,
+				error: record.error,
+				failureKind: record.failureKind,
+			});
 	}
 
 	for (const record of outputs) {
@@ -101,15 +117,18 @@ export function buildSummary(
 	const reached = !config.pageOnly && maxEligible >= config.max;
 	const selectionHash = captureSelectionHash(config.topic);
 	const seed = seedSummary(records, outputs, config, seedResource);
-	const warnings = runWarnings(seed);
 	const partial =
-		failed || lowQuality || reached || discoveryTruncated || render?.truncated;
+		(failed > 0 && !reached) ||
+		!seed.included ||
+		lowQuality ||
+		stopReason !== undefined ||
+		(discoveryTruncated && !reached) ||
+		render?.truncated;
 
 	const summary: RunSummary = {
 		status: written === 0 ? "failed" : partial ? "partial" : "ok",
 		seedUrl: config.seedUrl,
 		seed,
-		warnings,
 		outDir: config.outDir,
 		dryRun: config.dryRun,
 		captureMode: config.pageOnly ? "page" : "site",
@@ -139,7 +158,6 @@ export function buildSummary(
 			.sort((a, b) => b.count - a.count || a.from.localeCompare(b.from))
 			.slice(0, 10),
 		elapsedMs: Number(elapsedMs.toFixed(1)),
-		firstPageMs: firstPageMs === null ? null : Number(firstPageMs.toFixed(1)),
 		pagesPerSecond: Number(
 			(written / Math.max(elapsedMs / 1000, 0.001)).toFixed(2),
 		),
@@ -154,52 +172,14 @@ export function buildSummary(
 		refresh,
 		cache,
 	};
+	if (failed > errors.length) summary.errorsOmitted = failed - errors.length;
+	if (stopReason) summary.stopReason = stopReason;
 	if (selectionHash) summary.selectionHash = selectionHash;
 	if (render) summary.render = render;
 	const countedByKind = orderedPartialCounts(byKind, pageKinds);
 	if (Object.keys(countedByKind).length) summary.byKind = countedByKind;
 	return summary;
 }
-
-function runWarnings(seed: SeedSummary): RunWarning[] {
-	const resource = seed.kind === "discovery_resource";
-	if (!seed.included) {
-		const warning: Extract<
-			RunWarning,
-			{ kind: "seed_omitted" | "discovery_resource_empty" }
-		> = {
-			kind: resource ? "discovery_resource_empty" : "seed_omitted",
-			message: resource
-				? "The requested discovery resource produced no captured pages."
-				: "The requested seed page is not in the written corpus.",
-		};
-		if (seed.omissionReason) warning.omissionReason = seed.omissionReason;
-		if (seed.failureKind) warning.failureKind = seed.failureKind;
-		if (seed.error) warning.error = seed.error;
-		return [warning];
-	}
-	if (resource) {
-		const warning: Extract<RunWarning, { kind: "discovery_resource_seed" }> = {
-			kind: "discovery_resource_seed",
-			message:
-				"The requested seed was used as a discovery resource, not captured as an exact page.",
-			pagesWritten: seed.pagesWritten ?? 0,
-		};
-		if (seed.source) warning.source = seed.source;
-		return [warning];
-	}
-	if (seed.redirected) {
-		const warning: Extract<RunWarning, { kind: "seed_redirected" }> = {
-			kind: "seed_redirected",
-			message: "The requested seed redirected before capture.",
-		};
-		if (seed.url) warning.url = seed.url;
-		if (seed.finalUrl) warning.finalUrl = seed.finalUrl;
-		return [warning];
-	}
-	return [];
-}
-
 function seedSummary(
 	records: PageRecord[],
 	outputs: PageOutput[],
@@ -335,11 +315,6 @@ function hostKey(raw: string) {
 	} catch {
 		return "";
 	}
-}
-
-function emptyCounts<T extends string>(keys: readonly T[]) {
-	// SAFETY: every key from the generic input is emitted exactly once with a number value.
-	return Object.fromEntries(keys.map((key) => [key, 0])) as Record<T, number>;
 }
 
 function orderedPartialCounts<T extends string>(

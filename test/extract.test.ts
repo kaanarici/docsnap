@@ -30,6 +30,19 @@ test("classifies markdown and text assets onto dedicated plans", async () => {
 	expect(json.confidence).toBeGreaterThan(0);
 });
 
+test("rejects a route fallback that reports a missing page", async () => {
+	const [record] = await extractSeed(
+		"https://docs.example.com/missing.md",
+		"# Page Not Found\n\nThe requested URL does not exist.",
+		{ contentType: "text/markdown" },
+	);
+	expect(record).toMatchObject({
+		ok: false,
+		failureKind: "not_found",
+		error: "page reported not found",
+	});
+});
+
 test("fails feed, empty, and blocked pages before HTML extract", async () => {
 	const [feed, , feedShell] = await extractSeed(
 		"https://docs.example.com/feed.xml",
@@ -89,7 +102,8 @@ test("skips Defuddle for app shells and recovers inline state only", async () =>
 	expect(inlineShell).toBe(true);
 	if (!inline.ok) throw new Error("inline-state extract failed");
 	expect(inline.markdown).toContain("Install the command line package");
-	expect(inline.confidence).toBeGreaterThan(0);
+	expect(inline.confidence).toBe(0.8);
+	expect(inline.qualityReasons).toContain("inline state may omit content");
 });
 
 test("runs structured-only extract for docs HTML", async () => {
@@ -100,7 +114,7 @@ test("runs structured-only extract for docs HTML", async () => {
 			.map((letter) => `<a href="/${letter}">${letter}</a>`)
 			.join(
 				"",
-			)}</nav><main><h1>CLI</h1><h2>Install</h2><pre>bun add -g docsnap</pre><p>Run the capture command against a public documentation site and write local Markdown files.</p><h2>Search</h2><p>Rank local hits with source URLs, titles, and the recorded confidence for each captured page.</p></main></div></body></html>`,
+			)}</nav><main><h1>CLI</h1><h2>Install</h2><pre>bun add -g docsnap</pre><p>Run the capture command against a public documentation site and write local Markdown files.</p><p><a href="https://raw.githubusercontent.com/example/docs/main/config.yaml">Download the example configuration</a>.</p><h2>Search</h2><p>Rank local hits with source URLs, titles, and the recorded confidence for each captured page.</p></main></div></body></html>`,
 	);
 	expect(record).toMatchObject({
 		ok: true,
@@ -113,15 +127,51 @@ test("runs structured-only extract for docs HTML", async () => {
 	expect(record.confidence).toBeGreaterThan(0);
 });
 
+test("uses the page heading instead of a shared site title", async () => {
+	const [record] = await extractSeed(
+		"https://docs.example.com/install",
+		`<html><head><title>Transformers</title></head><body><main><h1>Installation</h1><p>${"Install and configure the library before loading a model. ".repeat(12)}</p></main></body></html>`,
+	);
+	expect(record).toMatchObject({ ok: true, title: "Installation" });
+});
+
+test("keeps paragraphs separated through nested custom elements", async () => {
+	const first = "The first paragraph explains how to configure access safely.";
+	const second = "The second paragraph explains how to verify the result.";
+	const [record] = await extractSeed(
+		"https://docs.example.com/access",
+		`<main><docs-root><docs-layout><docs-content><h1>Access</h1><p>${first}</p><p>${second}</p></docs-content></docs-layout></docs-root></main>`,
+	);
+	if (!record.ok) throw new Error("nested documentation extract failed");
+	expect(record.markdown).toContain(`${first}\n\n${second}`);
+});
+
+test("renders documentation tables as Markdown", async () => {
+	const [record] = await extractSeed(
+		"https://docs.example.com/errors",
+		"<main><h1>Errors</h1><p>Error reference content for agents.</p><table><thead><tr><th>Code</th><th>Meaning</th></tr></thead><tbody><tr><td>400</td><td>Bad request</td></tr><tr><td>403</td><td>Access denied</td></tr></tbody></table></main>",
+	);
+	expect(record).toMatchObject({
+		ok: true,
+		kind: "docs-html",
+		extractor: "structured",
+	});
+	if (!record.ok) throw new Error("documentation table extract failed");
+	expect(record.markdown).toContain("| Code | Meaning |");
+	expect(record.markdown).not.toContain("<table>");
+});
+
 test("runs Defuddle once for article HTML without swapping console", async () => {
 	const error = console.error;
 	const warn = console.warn;
+	const stderr = process.stderr.write;
 	const [record, , shell] = await extractSeed(
 		"https://blog.example.com/hashing",
-		`<html><head><title>Why hashing matters</title></head><body><article><h1>Why hashing matters</h1><p>Hash-verified documentation lets agents trust a local corpus after a capture run. Each page records a content hash so later refreshes can detect drift without rereading every file.</p><p>When a page changes, the writer replaces that Markdown file and updates the manifest. Unchanged pages keep their previous output path, title, and hash so search ranking stays stable.</p></article></body></html>`,
+		`<html><head><title>Why hashing matters</title><script type="application/ld+json">{broken</script></head><body><article><h1>Why hashing matters</h1><p>Hash-verified documentation lets agents trust a local corpus after a capture run. Each page records a content hash so later refreshes can detect drift without rereading every file.</p><p>When a page changes, the writer replaces that Markdown file and updates the manifest. Unchanged pages keep their previous output path, title, and hash so search ranking stays stable.</p></article></body></html>`,
 	);
 	expect(console.error).toBe(error);
 	expect(console.warn).toBe(warn);
+	expect(process.stderr.write).toBe(stderr);
 	expect(record).toMatchObject({
 		ok: true,
 		kind: "article-html",

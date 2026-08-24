@@ -2,7 +2,7 @@ import { realpath } from "node:fs/promises";
 import { runBounded } from "../core/parallel.ts";
 import {
 	corpusLimits,
-	readOptionalCorpusFileFromRealRoot,
+	readBoundedCorpusFileFromRealRoot,
 } from "../corpus/access.ts";
 import {
 	type CorpusPage,
@@ -70,7 +70,6 @@ async function searchOne(input: SearchInput): Promise<SearchResult> {
 		corporaTruncated: false,
 		truncated: result.truncated,
 		limited: result.limited,
-		pagesSkipped: result.skipped,
 		injectionFiltered: input.includeInjection
 			? 0
 			: records.filter(
@@ -102,7 +101,6 @@ async function searchAll(input: SearchInput): Promise<SearchResult> {
 		corporaTruncated: listed.truncated,
 		truncated: searched.truncated,
 		limited: searched.limited,
-		pagesSkipped: searched.pagesSkipped,
 		injectionFiltered: records.injectionFiltered,
 	};
 }
@@ -110,9 +108,7 @@ async function searchAll(input: SearchInput): Promise<SearchResult> {
 async function searchAllRecords(
 	corpora: CorpusRecords[],
 	input: SearchInput,
-): Promise<
-	Pick<SearchResult, "matches" | "truncated" | "limited" | "pagesSkipped">
-> {
+): Promise<Pick<SearchResult, "matches" | "truncated" | "limited">> {
 	const roots = new Map<string, string>();
 	for (const corpus of corpora)
 		roots.set(corpus.corpusDir, await realpath(corpus.corpusDir));
@@ -123,24 +119,20 @@ async function searchAllRecords(
 		}
 		return corpus.records ?? [];
 	});
-	const {
-		input: rankInput,
-		truncated,
-		skipped,
-	} = await buildRankInput(
+	const { input: rankInput, truncated } = await buildRankInput(
 		pages,
 		async (record) => {
 			const corpusDir = corpusByRecord.get(record);
 			if (!corpusDir) throw new Error("Search record lost its corpus owner");
 			const realRoot = roots.get(corpusDir);
 			if (!realRoot) throw new Error("Search corpus root is unavailable");
-			const body = await readOptionalCorpusFileFromRealRoot(
+			const body = await readBoundedCorpusFileFromRealRoot(
 				corpusDir,
 				realRoot,
 				record.outputPath,
 				corpusLimits.pageBytes,
 			);
-			return body === null ? null : verifyPageBody(record, body);
+			return verifyPageBody(record, body);
 		},
 		{ maxPages: corpusLimits.searchPages, maxBytes: corpusLimits.searchBytes },
 		{ query: input.query },
@@ -156,7 +148,6 @@ async function searchAllRecords(
 		})),
 		truncated,
 		limited: ranked.length > input.limit,
-		pagesSkipped: skipped,
 	};
 }
 

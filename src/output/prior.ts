@@ -233,10 +233,7 @@ export function parseReusablePrior(
 	config: OutputRoot,
 ): PriorPage | undefined {
 	if (!isJsonObject(value) || value["ok"] !== true) return undefined;
-	const source =
-		value["source"] === "asset"
-			? "crawl"
-			: jsonEnum(value["source"], discoverySources);
+	const source = jsonEnum(value["source"], discoverySources);
 	const extractor = jsonEnum(value["extractor"], pageExtractors);
 	const redirects =
 		value["redirects"] === undefined ? [] : parseRedirects(value["redirects"]);

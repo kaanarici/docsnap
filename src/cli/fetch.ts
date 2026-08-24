@@ -50,8 +50,8 @@ type FetchBaseResult = {
 	memory: ReturnType<typeof corpusFreshness>;
 	maxPages: number;
 	maxReached: boolean;
-	summaryPath: string;
-	manifestPath: string;
+	stopReason?: RunSummary["stopReason"];
+	paths: { summary: string; manifest: string };
 	failureKind?: FailureKind;
 	error?: string;
 };
@@ -64,6 +64,7 @@ type FetchCitation = {
 	url: string;
 	snippet: string;
 	kind?: CorpusPage["kind"];
+	qualityReasons?: string[];
 	injectionSignals?: CorpusPage["injectionSignals"];
 };
 
@@ -72,7 +73,6 @@ type FetchQuestionResult = FetchBaseResult & {
 	citations: FetchCitation[];
 	limited: boolean;
 	truncated: boolean;
-	pagesSkipped: number;
 	injectionFiltered: number;
 };
 
@@ -184,9 +184,12 @@ async function fetchResult(input: FetchInput): Promise<FetchResult> {
 		memory: corpusFreshness(input.freshness, action, summary, prior),
 		maxPages: summary.max,
 		maxReached: summary.maxReached,
-		summaryPath: join(outputDir, runFiles.summary),
-		manifestPath: join(outputDir, runFiles.manifest),
+		paths: {
+			summary: join(outputDir, runFiles.summary),
+			manifest: join(outputDir, runFiles.manifest),
+		},
 	};
+	if (summary.stopReason) baseResult.stopReason = summary.stopReason;
 	if (summary.seed.failureKind)
 		baseResult.failureKind = summary.seed.failureKind;
 	if (summary.seed.error) baseResult.error = summary.seed.error;
@@ -227,6 +230,9 @@ async function fetchResult(input: FetchInput): Promise<FetchResult> {
 				snippet: match.text,
 			};
 			if (match.record.kind) citation.kind = match.record.kind;
+			if (match.record.qualityReasons?.length) {
+				citation.qualityReasons = match.record.qualityReasons;
+			}
 			if (match.record.injectionSignals.length) {
 				citation.injectionSignals = match.record.injectionSignals;
 			}
@@ -234,7 +240,6 @@ async function fetchResult(input: FetchInput): Promise<FetchResult> {
 		}),
 		limited: ranked.limited,
 		truncated: ranked.truncated,
-		pagesSkipped: ranked.skipped,
 		injectionFiltered,
 	};
 }
@@ -253,9 +258,26 @@ function textFetchResult(result: FetchResult): string {
 	const counts = result.counts;
 	const lines = [
 		`docsnap: ${result.action} ${counts.written} page${counts.written === 1 ? "" : "s"} in ${result.outputDir}`,
-		`docsnap: status ${result.status}; scope ${result.scope}; failed ${counts.failed}; low-quality ${counts.lowQuality}; injection-signals ${counts.injectionSignalPages}`,
-		`docsnap: freshness ${result.memory.decision}; age ${result.memory.ageSeconds}s; stale ${result.memory.stale}`,
 	];
+	const issues = [
+		counts.failed ? `failed ${counts.failed}` : "",
+		counts.lowQuality ? `low-quality ${counts.lowQuality}` : "",
+		counts.qualityWarnings ? `quality-warnings ${counts.qualityWarnings}` : "",
+		counts.injectionSignalPages
+			? `injection-signals ${counts.injectionSignalPages}`
+			: "",
+	].filter(Boolean);
+	if (result.status !== "ok" || issues.length) {
+		lines.push(
+			`docsnap: status ${result.status}${issues.length ? `; ${issues.join("; ")}` : ""}`,
+		);
+	}
+	if (result.memory.stale) {
+		lines.push(
+			`docsnap: reused stale corpus; age ${result.memory.ageSeconds}s`,
+		);
+	}
+	if (result.stopReason) lines.push(`docsnap: stopped ${result.stopReason}`);
 	if (result.failureKind || result.error) {
 		lines.push(
 			`docsnap: failure ${result.failureKind ?? "unknown"}${result.error ? `: ${result.error}` : ""}`,
@@ -274,6 +296,9 @@ function textFetchResult(result: FetchResult): string {
 				`url: ${citation.url}`,
 			);
 			if (citation.kind) lines.push(`kind: ${citation.kind}`);
+			if (citation.qualityReasons?.length) {
+				lines.push(`warning: ${citation.qualityReasons.join(", ")}`);
+			}
 			if (citation.injectionSignals?.length) {
 				lines.push(`injectionSignals: ${citation.injectionSignals.join(", ")}`);
 			}
@@ -287,7 +312,7 @@ function textFetchResult(result: FetchResult): string {
 			);
 		}
 	}
-	lines.push(`docsnap: summary ${result.summaryPath}`);
+	lines.push(`docsnap: summary ${result.paths.summary}`);
 	return terminalText(`${lines.join("\n")}\n`);
 }
 

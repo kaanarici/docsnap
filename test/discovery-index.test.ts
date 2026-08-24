@@ -1,6 +1,7 @@
 import { describe, expect, onTestFinished, test } from "bun:test";
 import { startDiscovery } from "../src/discover/index.ts";
-import { setTestEnv, testConfig } from "./fixtures.ts";
+import { discoverLlms } from "../src/discover/llms.ts";
+import { okFetch, setTestEnv, testConfig } from "./fixtures.ts";
 
 function listed(session: Awaited<ReturnType<typeof startDiscovery>>) {
 	return drain(session).then((found) =>
@@ -117,4 +118,30 @@ describe("discovery index policy", () => {
 			{ path: "/two", source: "crawl", wasSeed: false },
 		]);
 	});
+});
+
+test("rejects a large unfinished Markdown link corpus", async () => {
+	const seed = "https://example.com/";
+	const llms = `${seed}llms.txt`;
+	const cache = new Map([
+		[
+			llms,
+			Promise.resolve(
+				okFetch(llms, `[Docs](${"x".repeat(1_000_000)}`, {
+					contentType: "text/markdown",
+				}),
+			),
+		],
+	]);
+	await expect(
+		discoverLlms(
+			seed,
+			testConfig("unused", {
+				seedUrl: seed,
+				max: 10,
+				maxExplicit: true,
+			}),
+			{ cache },
+		),
+	).resolves.toEqual([]);
 });

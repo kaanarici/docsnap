@@ -9,6 +9,7 @@ import { assertRefreshSelection } from "../core/refresh.ts";
 import {
 	type CliOptions,
 	type PipelineConfig,
+	type RunSummary,
 	runSucceeded,
 } from "../core/types.ts";
 import { readSummary } from "../corpus/index.ts";
@@ -42,19 +43,61 @@ async function runConfiguredCapture(config: PipelineConfig, cli: CliOptions) {
 		(!cli.failOnLowQuality || summary.lowQuality === 0) &&
 		(!cli.failOnInjectionSignal || summary.injectionSignalPages === 0);
 	if (cli.json) {
-		process.stdout.write(
-			`${JSON.stringify({
-				ok,
-				...summary,
-				paths: summary.dryRun
-					? undefined
-					: {
-							summary: join(summary.outDir, runFiles.summary),
-							manifest: join(summary.outDir, runFiles.manifest),
-						},
-			})}\n`,
-		);
+		process.stdout.write(`${JSON.stringify(captureResult(summary, ok))}\n`);
 	}
 	if (!cli.quiet && !cli.json) printSummary(summary);
 	if (!ok) process.exitCode = 1;
+}
+
+type CaptureResult = {
+	ok: boolean;
+	status: RunSummary["status"];
+	seedUrl: string;
+	outputDir: string;
+	written: number;
+	failed: number;
+	lowQuality: number;
+	maxReached: boolean;
+	discoveryTruncated?: true;
+	stopReason?: RunSummary["stopReason"];
+	qualityWarnings?: number;
+	injectionSignalPages?: number;
+	byFailureKind?: RunSummary["byFailureKind"];
+	errors?: RunSummary["errors"];
+	errorsOmitted?: number;
+	elapsedMs: number;
+	paths?: { summary: string; manifest: string };
+};
+
+function captureResult(summary: RunSummary, ok: boolean): CaptureResult {
+	const errors = summary.errors.slice(0, 3);
+	const errorsOmitted =
+		(summary.errorsOmitted ?? 0) + summary.errors.length - errors.length;
+	const result: CaptureResult = {
+		ok,
+		status: summary.status,
+		seedUrl: summary.seedUrl,
+		outputDir: summary.outDir,
+		written: summary.written,
+		failed: summary.failed,
+		lowQuality: summary.lowQuality,
+		maxReached: summary.maxReached,
+		elapsedMs: summary.elapsedMs,
+	};
+	if (summary.discoveryTruncated) result.discoveryTruncated = true;
+	if (summary.stopReason) result.stopReason = summary.stopReason;
+	if (summary.qualityWarnings) result.qualityWarnings = summary.qualityWarnings;
+	if (summary.injectionSignalPages)
+		result.injectionSignalPages = summary.injectionSignalPages;
+	if (Object.keys(summary.byFailureKind).length)
+		result.byFailureKind = summary.byFailureKind;
+	if (errors.length) result.errors = errors;
+	if (errorsOmitted) result.errorsOmitted = errorsOmitted;
+	if (!summary.dryRun) {
+		result.paths = {
+			summary: join(summary.outDir, runFiles.summary),
+			manifest: join(summary.outDir, runFiles.manifest),
+		};
+	}
+	return result;
 }

@@ -54,7 +54,7 @@ const stopTerms = new Set(
 	),
 );
 
-type PageLoader = (record: PageRecord) => Promise<string | null>;
+type PageLoader = (record: PageRecord) => Promise<string>;
 
 type CandidateFilter = { terms: string[] };
 
@@ -68,7 +68,7 @@ export async function buildRankInput(
 	load: PageLoader,
 	limits: { maxPages: number; maxBytes: number },
 	options: { query?: string } = {},
-): Promise<{ input: RankInput; truncated: boolean; skipped: number }> {
+): Promise<{ input: RankInput; truncated: boolean }> {
 	if (options.query) assertSearchQuery(options.query);
 	const filter = candidateFilter(options.query);
 	const pages: PageDoc[] = [];
@@ -76,7 +76,6 @@ export async function buildRankInput(
 	let scannedBytes = 0;
 	let totalBodyLength = 0;
 	let truncated = false;
-	let skipped = 0;
 	for (const record of records) {
 		if (!isPageRecord(record)) continue;
 		if (pages.length >= limits.maxPages || scannedBytes >= limits.maxBytes) {
@@ -84,10 +83,6 @@ export async function buildRankInput(
 			break;
 		}
 		const source = await load(record);
-		if (source === null) {
-			skipped++;
-			continue;
-		}
 		scannedBytes += Buffer.byteLength(source);
 		if (filter.terms.length && !candidateTextMatches(record, source, filter)) {
 			continue;
@@ -107,7 +102,6 @@ export async function buildRankInput(
 			docFreq,
 		},
 		truncated,
-		skipped,
 	};
 }
 

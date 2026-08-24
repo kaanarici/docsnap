@@ -15,7 +15,6 @@ export type SearchResult = {
 	corporaTruncated: boolean;
 	truncated: boolean;
 	limited: boolean;
-	pagesSkipped: number;
 	injectionFiltered: number;
 };
 
@@ -30,7 +29,6 @@ export function jsonSearchResult(input: SearchInput, result: SearchResult) {
 		corporaSearched: result.corporaSearched,
 		corporaSkipped: result.corporaSkipped,
 		corporaTruncated: result.corporaTruncated,
-		pagesSkipped: result.pagesSkipped,
 		injectionFiltered: result.injectionFiltered,
 		limited: result.limited,
 		truncated: result.truncated,
@@ -55,9 +53,12 @@ export function jsonSearchResult(input: SearchInput, result: SearchResult) {
 			const kinded = match.record.kind
 				? { ...titled, kind: match.record.kind }
 				: titled;
-			return match.record.injectionSignals.length
-				? { ...kinded, injectionSignals: match.record.injectionSignals }
+			const warned = match.record.qualityReasons?.length
+				? { ...kinded, qualityReasons: match.record.qualityReasons }
 				: kinded;
+			return match.record.injectionSignals.length
+				? { ...warned, injectionSignals: match.record.injectionSignals }
+				: warned;
 		}),
 	};
 }
@@ -74,11 +75,6 @@ export function textSearchResult(input: SearchInput, result: SearchResult) {
 	}
 	if (result.truncated || result.corporaTruncated) {
 		lines.push("docsnap: search truncated by corpus scan or read limits");
-	}
-	if (result.pagesSkipped) {
-		lines.push(
-			`docsnap: skipped ${countLabel(result.pagesSkipped, "missing or unreadable page body", "missing or unreadable page bodies")}`,
-		);
 	}
 	if (result.limited) {
 		lines.push("docsnap: more ranked matches available beyond --limit");
@@ -102,16 +98,15 @@ export function textSearchResult(input: SearchInput, result: SearchResult) {
 		);
 		if (match.record.title) lines.push(`title: ${match.record.title}`);
 		if (match.record.kind) lines.push(`kind: ${match.record.kind}`);
+		if (match.record.qualityReasons?.length) {
+			lines.push(`warning: ${match.record.qualityReasons.join(", ")}`);
+		}
 		if (match.record.injectionSignals.length) {
 			lines.push(
 				`injectionSignals: ${match.record.injectionSignals.join(", ")}`,
 			);
 		}
-		lines.push(
-			`score: ${roundScore(match.score)}; confidence: ${match.confidence}; extractor: ${match.extractor}`,
-			"",
-			match.text.trimEnd(),
-		);
+		lines.push("", match.text.trimEnd());
 	}
 	return terminalText(`${lines.join("\n")}\n`);
 }

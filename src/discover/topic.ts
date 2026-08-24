@@ -8,7 +8,6 @@ export function candidateWindow(
 	limit = config.max,
 ): number {
 	if (!config.maxExplicit) return limit;
-	// Rank a reserve without turning small --max runs into 256-page discovery.
 	return Math.max(limit * 4, 32);
 }
 

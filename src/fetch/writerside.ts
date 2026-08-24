@@ -22,8 +22,6 @@ export async function withWritersideTopic(
 ): Promise<string> {
 	const topicUrl = writersideTopicUrl(html, base);
 	if (!topicUrl) return html;
-	// the topic JSON is a same-origin subrequest on its own path; respect robots
-	// for it like every other secondary fetch
 	signal?.throwIfAborted();
 	if (
 		allowUrl &&

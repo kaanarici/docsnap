@@ -32,7 +32,9 @@ export async function requestPublicHttp(
 	let lastError: unknown;
 	for (const address of resolved.addresses) {
 		const remainingMs = deadlineAt - Date.now();
-		if (remainingMs <= 0) throw deadlineError();
+		if (remainingMs <= 0) {
+			throw timeoutError("request timed out: whole-request deadline exceeded");
+		}
 		try {
 			return await requestAddress(
 				raw,
@@ -106,9 +108,6 @@ function requestAddress(
 				const status = res.statusCode ?? 0;
 				const headers = responseHeaders(res);
 				if (status >= 300 && status <= 399) {
-					// Redirect bodies are never consumed. Closing the response keeps an
-					// attacker from streaming outside the byte and wall-clock limits after
-					// the caller has already moved on to the next hop.
 					if (res.socket) res.socket.destroy();
 					else res.destroy();
 					resolveOnce({ url: raw, status, headers, body: new Uint8Array() });
@@ -150,10 +149,14 @@ function requestAddress(
 				return;
 			}
 		}
-		// the socket timeout above is idle-based; a server trickling bytes resets
-		// it forever, so a whole-request wall-clock deadline bounds the worst case
-		deadline = setTimeout(() => abort(deadlineError()), deadlineMs);
-		req.on("timeout", () => abort(new Error("request timed out")));
+		deadline = setTimeout(
+			() =>
+				abort(
+					timeoutError("request timed out: whole-request deadline exceeded"),
+				),
+			deadlineMs,
+		);
+		req.on("timeout", () => abort(timeoutError("request timed out")));
 		req.end();
 	});
 }
@@ -169,9 +172,10 @@ export function pinnedLookup(address: PublicAddress): LookupFunction {
 	return lookup;
 }
 
-function deadlineError() {
-	// "timed out" keeps this non-retryable per retry.ts and classified as timeout
-	return new Error("request timed out: whole-request deadline exceeded");
+function timeoutError(message: string) {
+	const error = new Error(message);
+	error.name = "TimeoutError";
+	return error;
 }
 
 export function decodeContent(

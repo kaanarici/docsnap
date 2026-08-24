@@ -29,7 +29,7 @@ const usage = `Usage:
 Flags:
   -o, --out <dir>           output dir; relative paths must stay under the current directory
   -m, --max <count>         max pages; default all llms.txt pages, otherwise 50
-  --concurrency <n>         fetch concurrency; default 8
+  --concurrency <n>         fetch concurrency; default 64
   --clean                   remove output dir before writing
   --dry-run                 run without writing files
   --page                    capture only the supplied page
@@ -52,7 +52,7 @@ const mapUsage = `Usage:
 Returns bounded site-capture candidates without extracting or writing a corpus.
 
 Flags:
-  -m, --max <count>         max URLs; default 50, max 500
+  -m, --max <count>         max URLs; default 50, max ${maxGeneratedCapturePages}
   --concurrency <n>         fetch concurrency
   --no-cache                disable the shared fetch cache
   --json                    include sources, errors, timing, and coverage limits
@@ -63,7 +63,7 @@ const fetchUsage = `Usage:
 
 Flags:
   -o, --out <dir>           local corpus dir; defaults to docsnap's normal slug
-  -m, --max <count>         max pages for site captures; max 500
+  -m, --max <count>         max pages for site captures; max ${maxGeneratedCapturePages}
   --scope <mode>            page, site, or auto; default auto
   --freshness <mode>        auto, reuse, refresh, or force; default auto
   --context-chars <count>   chars per cited snippet; default 500, max 1200

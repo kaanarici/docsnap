@@ -2,8 +2,6 @@ import { awaitWithSignal } from "../core/parallel.ts";
 import type { PipelineConfig } from "../core/types.ts";
 import { fetchTextUncached } from "../fetch/fetcher.ts";
 
-// Bound hostile robots files independently from normal page bodies. The
-// renderer also charges this cap against its aggregate relay budget.
 export const maxRobotsBytes = 512 * 1024;
 const MAX_ROBOTS_LINES = 100_000;
 const MAX_AGENTS_PER_GROUP = 1_000;

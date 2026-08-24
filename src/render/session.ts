@@ -54,7 +54,7 @@ export function createChromeSession(): ChromeSession {
 }
 
 export function chromeBudgetMs(config: PipelineConfig, pages = config.max) {
-	return Math.min(120_000, Math.max(config.timeoutMs, pages * 1_500));
+	return Math.min(120_000, Math.max(config.timeoutMs, pages * 5_000));
 }
 
 export function chromeStopped(session: ChromeSession) {
@@ -77,12 +77,8 @@ export function skipChrome(
 }
 
 export function needsChrome(record: PageRecord, shell: boolean) {
-	const appShell = record.ok
-		? record.kind
-			? record.kind === "app-shell"
-			: shell
-		: shell;
-	return appShell && (record.ok || record.failureKind === "empty");
+	if (record.ok) return record.kind ? record.kind === "app-shell" : shell;
+	return shell && record.failureKind === "empty";
 }
 
 export function needsChromeFetch(result: FetchResult) {

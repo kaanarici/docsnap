@@ -171,9 +171,7 @@ export function scanRawHtmlForInjectionSignals(
 			signals.add("hidden-html-text");
 			for (const signal of phraseSignals) signals.add(signal);
 		}
-	} catch {
-		return [...signals];
-	}
+	} catch {}
 	return [...signals];
 }
 
@@ -182,25 +180,23 @@ function visibleUnicodeSignals(
 	hidden: Set<Element>,
 ): InjectionSignal[] {
 	const signals = new Set<InjectionSignal>();
-	const stack: Node[] = [document.body ?? document.documentElement];
+	const root = document.body ?? document.documentElement;
+	const stack: Element[] = root ? [root] : [];
 	while (stack.length > 0) {
-		const node = stack.pop();
-		if (!node) continue;
-		if (node.nodeType === 3) {
+		const element = stack.pop();
+		if (!element) continue;
+		if (hidden.has(element) || rawSkipTags.has(element.tagName.toLowerCase())) {
+			continue;
+		}
+		for (const node of element.childNodes) {
+			if (node.nodeType !== 3) continue;
 			const text = node.textContent ?? "";
 			if (/\p{L}|\p{N}/u.test(stripInvisibleText(text))) {
 				addSignals(signals, unicodeSignals(text));
 			}
-			continue;
 		}
-		if (node.nodeType !== 1) continue;
-		// SAFETY: DOM nodeType 1 is the platform discriminator for Element nodes.
-		const element = node as Element;
-		if (hidden.has(element) || rawSkipTags.has(element.tagName.toLowerCase()))
-			continue;
-		const children = element.childNodes;
-		for (let index = children.length - 1; index >= 0; index--) {
-			const child = children[index];
+		for (let index = element.children.length - 1; index >= 0; index--) {
+			const child = element.children.item(index);
 			if (child) stack.push(child);
 		}
 	}
@@ -314,17 +310,12 @@ function addEncodedSignals(text: string, signals: Set<InjectionSignal>) {
 		pattern.lastIndex = end;
 		const candidate = text.slice(match.index, end);
 		if (seen.has(candidate)) continue;
-		if (seen.size >= maxEncodedCandidates) {
-			signals.add("opaque-encoded-blob");
-			break;
-		}
+		if (seen.size >= maxEncodedCandidates) break;
 		seen.add(candidate);
 		const decoded = decodeCandidate(candidate);
 		if (decoded && instructionSignals(decoded).size > 0) {
 			signals.add("encoded-injection-blob");
-			continue;
 		}
-		if (isOpaqueEncodedBlob(candidate)) signals.add("opaque-encoded-blob");
 	}
 }
 
@@ -337,15 +328,6 @@ function isEncodedChar(code: number) {
 		code === 0x2d ||
 		code === 0x2f ||
 		code === 0x5f
-	);
-}
-
-function isOpaqueEncodedBlob(candidate: string) {
-	return (
-		candidate.length >= 128 &&
-		!candidate.includes("/") &&
-		!/^[0-9a-fA-F]+$/.test(candidate) &&
-		!/^[a-z0-9]+(?:-[a-z0-9]+){2,}$/.test(candidate)
 	);
 }
 
@@ -536,7 +518,5 @@ function whiteColorPattern(property: string) {
 	return new RegExp(`${property}${gap}:${gap}${white}\\b`);
 }
 
-// Compiled once: hidesText runs per styled element, so building these per call
-// recompiled two regexes on every element of every page.
 const whiteColorText = whiteColorPattern("color");
 const whiteColorBackground = whiteColorPattern("background(?:-color)?");

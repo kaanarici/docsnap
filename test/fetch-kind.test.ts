@@ -105,20 +105,23 @@ describe("chromium status helper", () => {
 		[429, "HTTP 429", "blocked"],
 		[500, "HTTP 500", "http"],
 		[0, "HTTP 0", "fetch"],
-	] as const)("maps %i without sniffing %s", (status, error, kind) => {
-		expect(failureKind(status, error)).toBe(kind);
+	] as const)("maps %i without sniffing %s", (status, _error, kind) => {
+		expect(failureKind(status)).toBe(kind);
 	});
 
 	test("does not classify from the error string", () => {
-		expect(failureKind(404, "blocked by robots.txt")).toBe("not_found");
-		expect(failureKind(0, "request timed out")).toBe("fetch");
-		expect(failureKind(200, "response exceeds 12 bytes")).toBe("http");
+		expect(failureKind(404)).toBe("not_found");
+		expect(failureKind(0)).toBe("fetch");
+		expect(failureKind(200)).toBe("http");
 	});
 });
 
 describe("thrown fetch kind", () => {
 	test("maps timeout, size, unsafe, and generic causes", () => {
 		expect(thrownFetchKind(new Error("request timed out"))).toBe("timeout");
+		const timeout = new Error("deadline reached");
+		timeout.name = "TimeoutError";
+		expect(thrownFetchKind(timeout)).toBe("timeout");
 		expect(thrownFetchKind(new Error("response exceeds 12 bytes"))).toBe(
 			"too_large",
 		);
