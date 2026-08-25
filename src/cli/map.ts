@@ -1,8 +1,8 @@
 import { pruneCache } from "../cache/eviction.ts";
 import { buildPipelineConfig } from "../core/config.ts";
-import { terminalText } from "../core/text.ts";
 import { discoverMap } from "../discover/map-run.ts";
 import type { MapInput } from "./args.ts";
+import { failureResult, successResult, writeResult } from "./result.ts";
 
 export async function runMap(input: MapInput) {
 	const config = buildPipelineConfig(input.config);
@@ -28,10 +28,9 @@ export async function runMap(input: MapInput) {
 		.filter((entry) => !entry.fetched || entry.fetched.ok)
 		.map(({ url, source }) => ({ url, source }));
 	const resultBase = {
-		ok: entries.length > 0,
 		seedUrl: config.seedUrl,
 		complete: discovery.complete ?? false,
-		truncated: discovery.truncated ?? false,
+		discoveryTruncated: discovery.truncated ?? false,
 		limit: config.max,
 		maxReached: entries.length >= config.max,
 		entries,
@@ -41,14 +40,34 @@ export async function runMap(input: MapInput) {
 	const result = discovery.render
 		? { ...resultBase, render: discovery.render }
 		: resultBase;
-	if (input.json) process.stdout.write(`${JSON.stringify(result)}\n`);
-	else if (entries.length)
-		process.stdout.write(
-			terminalText(`${entries.map((entry) => entry.url).join("\n")}\n`),
-		);
-	else
-		process.stderr.write(
-			terminalText(`${errors[0]?.error ?? "No URLs discovered"}\n`),
-		);
-	if (!result.ok) process.exitCode = 1;
+	const warnings = [
+		...(failures.length
+			? [
+					`${failures.length} discovered URL${failures.length === 1 ? " failed" : "s failed"}.`,
+				]
+			: []),
+		...(result.discoveryTruncated && !result.maxReached
+			? ["Discovery stopped at its safety limit."]
+			: []),
+	];
+	if (entries.length) {
+		const message = `Found ${entries.length} capture candidate${entries.length === 1 ? "" : "s"}.`;
+		const next = result.complete
+			? "Capture the site when you are ready."
+			: result.maxReached
+				? "Use this map. Increase the page limit only if broader coverage matters."
+				: "Use this map for the current task; capture a specific missing page only if it matters.";
+		writeResult(successResult(result, message, next, warnings));
+		return;
+	}
+	writeResult(
+		failureResult({
+			code: errors[0]?.failureKind?.toUpperCase() ?? "MAP_FAILED",
+			message: errors[0]?.error ?? "DocSnap found no usable URLs.",
+			retryable: errors[0]?.failureKind === "timeout",
+			suggestion: "Check that the URL is public and reachable, then retry.",
+			details: result,
+		}),
+	);
+	process.exitCode = 1;
 }

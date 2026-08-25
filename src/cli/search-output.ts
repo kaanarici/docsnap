@@ -1,4 +1,4 @@
-import { citationId, countLabel, terminalText } from "../core/text.ts";
+import { citationId } from "../core/text.ts";
 import type { searchCorpus } from "../corpus/index.ts";
 import type { SearchInput } from "./args.ts";
 
@@ -20,7 +20,6 @@ export type SearchResult = {
 
 export function jsonSearchResult(input: SearchInput, result: SearchResult) {
 	return {
-		ok: true,
 		matchCount: result.matches.length,
 		outputDir: input.outputDir,
 		query: input.query,
@@ -28,10 +27,10 @@ export function jsonSearchResult(input: SearchInput, result: SearchResult) {
 		corporaScanned: input.all ? result.corporaScanned : undefined,
 		corporaSearched: input.all ? result.corporaSearched : undefined,
 		corporaSkipped: input.all ? result.corporaSkipped : undefined,
-		corporaTruncated: input.all ? result.corporaTruncated : undefined,
+		corpusScanTruncated: input.all ? result.corporaTruncated : undefined,
 		injectionFiltered: result.injectionFiltered || undefined,
-		limited: result.limited,
-		truncated: result.truncated,
+		moreMatches: result.limited,
+		searchTruncated: result.truncated,
 		matches: result.matches.map(({ corpusDir, match }) => {
 			const item = {
 				citationId: displayCitation(input, corpusDir, match),
@@ -57,54 +56,6 @@ export function jsonSearchResult(input: SearchInput, result: SearchResult) {
 				: warned;
 		}),
 	};
-}
-
-export function textSearchResult(input: SearchInput, result: SearchResult) {
-	const scope = input.all
-		? `${countLabel(result.corporaScanned, "valid corpus", "valid corpora")} under ${input.outputDir}`
-		: input.outputDir;
-	const lines = [`docsnap: ${result.matches.length} matches in ${scope}`];
-	if (result.corporaSkipped) {
-		lines.push(
-			`docsnap: skipped ${countLabel(result.corporaSkipped, "unreadable or invalid corpus dir")}`,
-		);
-	}
-	if (result.truncated || result.corporaTruncated) {
-		lines.push("docsnap: search truncated by corpus scan or read limits");
-	}
-	if (result.limited) {
-		lines.push("docsnap: more ranked matches available beyond --limit");
-	}
-	if (result.injectionFiltered) {
-		lines.push(
-			`docsnap: excluded ${countLabel(result.injectionFiltered, "concealed-injection page")}`,
-		);
-	}
-	for (const { corpusDir, match } of result.matches) {
-		lines.push(
-			"",
-			displayCitation(input, corpusDir, match),
-			...(input.all ? [`corpus: ${corpusDir}`] : []),
-			`path: ${match.record.outputPath}`,
-			`lines: ${match.lineStart}-${match.lineEnd}`,
-			`url: ${match.record.url}`,
-			...(match.record.finalUrl !== match.record.url
-				? [`finalUrl: ${match.record.finalUrl}`]
-				: []),
-		);
-		if (match.record.title) lines.push(`title: ${match.record.title}`);
-		if (match.record.kind) lines.push(`kind: ${match.record.kind}`);
-		if (match.record.qualityReasons?.length) {
-			lines.push(`warning: ${match.record.qualityReasons.join(", ")}`);
-		}
-		if (match.record.injectionSignals.length) {
-			lines.push(
-				`injectionSignals: ${match.record.injectionSignals.join(", ")}`,
-			);
-		}
-		lines.push("", match.text.trimEnd());
-	}
-	return terminalText(`${lines.join("\n")}\n`);
 }
 
 function displayCitation(

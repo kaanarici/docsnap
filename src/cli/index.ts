@@ -1,6 +1,7 @@
 import packageJson from "../../package.json";
-import { terminalText } from "../core/text.ts";
-import { flagTakesValue, parseArgs } from "./args.ts";
+import { CliArgumentError, flagTakesValue, parseArgs } from "./args.ts";
+import { helpData } from "./help.ts";
+import { failureResult, successResult, writeResult } from "./result.ts";
 
 let outputGuardInstalled = false;
 const noStdinUrl =
@@ -11,7 +12,13 @@ export async function runCli(argv: string[]): Promise<void> {
 	try {
 		const parsed = parseArgs(await normalizeArgv(argv));
 		if (parsed.kind === "help") {
-			process.stdout.write(`${parsed.help}\n`);
+			writeResult(
+				successResult(
+					helpData(parsed.help),
+					"DocSnap captures public documentation into local Markdown for coding agents.",
+					"Run docsnap with a public URL. Use a subcommand only when you need mapping, retrieval, refresh, listing, or search.",
+				),
+			);
 			return;
 		}
 		if (parsed.kind === "version") {
@@ -48,24 +55,27 @@ export async function runCli(argv: string[]): Promise<void> {
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		if (process.exitCode === 130 || process.exitCode === 143) return;
-		if (wantsJsonError(argv)) {
-			process.stdout.write(
-				`${JSON.stringify({ ok: false, status: "error", error: message.split("\n", 1)[0] ?? message })}\n`,
-			);
-		} else {
-			process.stderr.write(`${terminalText(message)}\n`);
-		}
-		process.exitCode = 1;
+		const usageError =
+			error instanceof CliArgumentError ||
+			message.startsWith("Unsafe URL:") ||
+			message.startsWith("Invalid URL:") ||
+			message.includes("--stdin");
+		const firstLine = message.split("\n", 1)[0] ?? message;
+		const tryLine = message.split("\n").find((line) => line.startsWith("Try:"));
+		writeResult(
+			failureResult({
+				code: usageError ? "INVALID_ARGUMENT" : "DOCSNAP_ERROR",
+				message: firstLine,
+				retryable: false,
+				suggestion:
+					tryLine ??
+					(usageError
+						? "Correct the input and retry. Run docsnap --help if the expected argument is unclear."
+						: "Inspect the error and retry only after its cause is fixed."),
+			}),
+		);
+		process.exitCode = usageError ? 2 : 1;
 	}
-}
-
-function wantsJsonError(argv: string[]) {
-	if (argv[0] === "map" || argv[0] === "fetch" || argv[0] === "search") {
-		const queryStart = argv.indexOf("--");
-		const flags = queryStart >= 0 ? argv.slice(0, queryStart) : argv;
-		return flags.includes("--json");
-	}
-	return argv.includes("--json");
 }
 
 async function normalizeArgv(argv: string[]) {

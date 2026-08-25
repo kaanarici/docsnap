@@ -2,6 +2,8 @@ import { statSync } from "node:fs";
 import { type ConfigInput, maxGeneratedCapturePages } from "../core/config.ts";
 import type { CliOptions } from "../core/types.ts";
 
+export class CliArgumentError extends Error {}
+
 const maxSearchResults = 50;
 const maxListResults = 100;
 const minContextChars = 120;
@@ -35,7 +37,6 @@ Flags:
   --page                    capture only the supplied page
   --site                    force site discovery for a specific page URL
   --no-cache                disable the shared fetch cache for this run
-  --json                    print one machine-readable result
   --quiet                   suppress progress logs
   --stdin                   read the URL from stdin
   --user-agent <value>      custom User-Agent
@@ -54,7 +55,6 @@ Flags:
   -m, --max <count>         max URLs; default 50, max ${maxGeneratedCapturePages}
   --concurrency <n>         fetch concurrency
   --no-cache                disable the shared fetch cache
-  --json                    include sources, errors, and coverage limits
   --user-agent <value>      custom User-Agent`;
 
 const fetchUsage = `Usage:
@@ -68,7 +68,6 @@ Flags:
   --context-chars <count>   chars per cited snippet; default 400, max 1200
   --include-injection       include concealed-injection pages in ranked results
   --no-cache                disable the shared fetch cache when capturing or refreshing
-  --json                    print one machine-readable result
   --quiet                   suppress progress logs
 
 Put docsnap flags before --. Tokens after -- are literal question text.
@@ -81,7 +80,6 @@ Flags:
   -m, --max <count>         override prior page limit
   --concurrency <n>         fetch concurrency
   --no-cache                disable the shared fetch cache for this run
-  --json                    print one machine-readable result
   --quiet                   suppress progress logs`;
 
 const listUsage = `Usage:
@@ -89,8 +87,7 @@ const listUsage = `Usage:
 
 Flags:
   --limit <count>           max corpora; default 20, max 100
-  --cursor <value>          continue from a prior list result
-  --json                    print one machine-readable result`;
+  --cursor <value>          continue from a prior list result`;
 
 const searchUsage = `Usage:
   docsnap search <corpus-dir> <query> [flags]
@@ -101,7 +98,6 @@ Flags:
   --glob <pattern>          restrict matches to output paths
   --all                     search every corpus under the given root
   --include-injection       include concealed-injection pages in ranked results
-  --json                    print one machine-readable result
 
 Put docsnap flags before --. Tokens after -- are literal query text.
 Use -- before query text that starts with a docsnap flag.
@@ -123,14 +119,12 @@ export type FetchInput = {
 	contextChars: number;
 	includeInjection: boolean;
 	cache: boolean;
-	json: boolean;
 	quiet: boolean;
 };
 export type SearchInput = {
 	outputDir: string;
 	query: string;
 	limit: number;
-	json: boolean;
 	all: boolean;
 	includeInjection: boolean;
 	pathGlob?: string;
@@ -139,9 +133,8 @@ export type ListInput = {
 	rootDir: string;
 	limit: number;
 	cursor?: string;
-	json: boolean;
 };
-export type MapInput = { config: ConfigInput; json: boolean };
+export type MapInput = { config: ConfigInput };
 type ParsedArgs =
 	| { kind: "run"; run: ConfigInput; cli: CliOptions }
 	| { kind: "map"; map: MapInput }
@@ -187,19 +180,20 @@ export function parseArgs(argv: string[]): ParsedArgs {
 		else if (arg === "--page") run.pageOnly = true;
 		else if (arg === "--site") run.site = true;
 		else if (arg === "--no-cache") run.cache = false;
-		else if (arg === "--json") cli.json = true;
+		else if (arg === "--json") continue;
 		else if (arg === "--quiet") cli.quiet = true;
 		else if (arg === "--user-agent") run.userAgent = readValue(argv, ++i, arg);
 		else if (arg === "--fail-on-injection-signal")
 			cli.failOnInjectionSignal = true;
-		else throw new Error(`Unknown argument: ${arg}\n\n${usage}`);
+		else throw new CliArgumentError(`Unknown argument: ${arg}\n\n${usage}`);
 	}
 
 	if (!run.seedUrl)
-		throw new Error(
+		throw new CliArgumentError(
 			`Missing URL\n\nTry: docsnap https://react.dev/reference --help`,
 		);
-	if (run.pageOnly && run.site) throw new Error("--page and --site conflict");
+	if (run.pageOnly && run.site)
+		throw new CliArgumentError("--page and --site conflict");
 	return { kind: "run", run, cli };
 }
 
@@ -212,7 +206,6 @@ function parseMapArgs(argv: string[]): ParsedArgs {
 		maxExplicit: true,
 		site: true,
 	};
-	let json = false;
 	const positional: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i]!;
@@ -221,19 +214,22 @@ function parseMapArgs(argv: string[]): ParsedArgs {
 		} else if (arg === "--concurrency")
 			config.concurrency = readInt(argv, ++i, arg);
 		else if (arg === "--no-cache") config.cache = false;
-		else if (arg === "--json") json = true;
+		else if (arg === "--json") continue;
+		else if (arg === "--quiet") continue;
 		else if (arg === "--user-agent")
 			config.userAgent = readValue(argv, ++i, arg);
 		else if (arg.startsWith("-"))
-			throw new Error(`Unknown map argument: ${arg}\n\n${mapUsage}`);
+			throw new CliArgumentError(`Unknown map argument: ${arg}\n\n${mapUsage}`);
 		else positional.push(arg);
 	}
 	config.seedUrl = positional[0] ?? "";
 	if (!config.seedUrl)
-		throw new Error("Missing URL\n\nTry: docsnap map https://react.dev --json");
+		throw new CliArgumentError(
+			"Missing URL\n\nTry: docsnap map https://react.dev",
+		);
 	if (positional.length > 1)
-		throw new Error(`Unexpected map argument: ${positional[1]}`);
-	return { kind: "map", map: { config, json } };
+		throw new CliArgumentError(`Unexpected map argument: ${positional[1]}`);
+	return { kind: "map", map: { config } };
 }
 
 function parseFetchArgs(argv: string[]): ParsedArgs {
@@ -249,7 +245,6 @@ function parseFetchArgs(argv: string[]): ParsedArgs {
 		contextChars: 400,
 		includeInjection: false,
 		cache: true,
-		json: false,
 		quiet: false,
 	};
 	const positional: string[] = [];
@@ -273,23 +268,25 @@ function parseFetchArgs(argv: string[]): ParsedArgs {
 				fetch.contextChars < minContextChars ||
 				fetch.contextChars > maxContextChars
 			) {
-				throw new Error(
+				throw new CliArgumentError(
 					`--context-chars must be from ${minContextChars} to ${maxContextChars}`,
 				);
 			}
 		} else if (arg === "--include-injection") fetch.includeInjection = true;
 		else if (arg === "--no-cache") fetch.cache = false;
-		else if (arg === "--json") fetch.json = true;
+		else if (arg === "--json") continue;
 		else if (arg === "--quiet") fetch.quiet = true;
 		else if (arg.startsWith("-"))
-			throw new Error(`Unknown fetch argument: ${arg}\n\n${fetchUsage}`);
+			throw new CliArgumentError(
+				`Unknown fetch argument: ${arg}\n\n${fetchUsage}`,
+			);
 		else positional.push(arg);
 	}
 	fetch.url = positional[0] ?? "";
 	const question = positional.slice(1).join(" ").trim();
 	if (question) fetch.question = question;
 	if (!fetch.url) {
-		throw new Error(
+		throw new CliArgumentError(
 			`Missing URL\n\nTry: docsnap fetch https://react.dev/reference/react/useEffect "cleanup function"`,
 		);
 	}
@@ -309,20 +306,22 @@ function parseRefreshArgs(argv: string[]): ParsedArgs {
 		else if (arg === "--concurrency")
 			refresh.concurrency = readInt(argv, ++i, arg);
 		else if (arg === "--no-cache") refresh.cache = false;
-		else if (arg === "--json") cli.json = true;
+		else if (arg === "--json") continue;
 		else if (arg === "--quiet") cli.quiet = true;
 		else if (arg.startsWith("-"))
-			throw new Error(`Unknown refresh argument: ${arg}\n\n${refreshUsage}`);
+			throw new CliArgumentError(
+				`Unknown refresh argument: ${arg}\n\n${refreshUsage}`,
+			);
 		else positional.push(arg);
 	}
 	refresh.outputDir = positional[0] ?? "";
 	if (!refresh.outputDir) {
-		throw new Error(
-			`Missing corpus directory\n\nTry: docsnap refresh docsnap/react-dev-reference --json`,
+		throw new CliArgumentError(
+			`Missing corpus directory\n\nTry: docsnap refresh docsnap/react-dev-reference`,
 		);
 	}
 	if (positional.length > 1) {
-		throw new Error(`Unexpected refresh argument: ${positional[1]}`);
+		throw new CliArgumentError(`Unexpected refresh argument: ${positional[1]}`);
 	}
 	return { kind: "refresh", refresh, cli };
 }
@@ -331,21 +330,24 @@ function parseListArgs(argv: string[]): ParsedArgs {
 	if (argv.includes("-h") || argv.includes("--help")) {
 		return { kind: "help", help: listUsage };
 	}
-	const list: ListInput = { rootDir: "docsnap", limit: 20, json: false };
+	const list: ListInput = { rootDir: "docsnap", limit: 20 };
 	const positional: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i]!;
 		if (arg === "--limit") {
 			list.limit = readInt(argv, ++i, arg, maxListResults);
 		} else if (arg === "--cursor") list.cursor = readValue(argv, ++i, arg);
-		else if (arg === "--json") list.json = true;
+		else if (arg === "--json") continue;
+		else if (arg === "--quiet") continue;
 		else if (arg.startsWith("-"))
-			throw new Error(`Unknown list argument: ${arg}\n\n${listUsage}`);
+			throw new CliArgumentError(
+				`Unknown list argument: ${arg}\n\n${listUsage}`,
+			);
 		else positional.push(arg);
 	}
 	if (positional[0]) list.rootDir = positional[0];
 	if (positional.length > 1) {
-		throw new Error(`Unexpected list argument: ${positional[1]}`);
+		throw new CliArgumentError(`Unexpected list argument: ${positional[1]}`);
 	}
 	return { kind: "list", list };
 }
@@ -360,7 +362,6 @@ function parseSearchArgs(argv: string[]): ParsedArgs {
 		outputDir: "",
 		query: "",
 		limit: 5,
-		json: false,
 		all: false,
 		includeInjection: false,
 	};
@@ -374,11 +375,14 @@ function parseSearchArgs(argv: string[]): ParsedArgs {
 		if (arg === "--limit") {
 			search.limit = readInt(argv, ++i, arg, maxSearchResults);
 		} else if (arg === "--glob") search.pathGlob = readGlob(argv, ++i, arg);
-		else if (arg === "--json") search.json = true;
+		else if (arg === "--json") continue;
+		else if (arg === "--quiet") continue;
 		else if (arg === "--all") search.all = true;
 		else if (arg === "--include-injection") search.includeInjection = true;
 		else if (arg.startsWith("-"))
-			throw new Error(`Unknown search argument: ${arg}\n\n${searchUsage}`);
+			throw new CliArgumentError(
+				`Unknown search argument: ${arg}\n\n${searchUsage}`,
+			);
 		else positional.push(arg);
 	}
 	if (search.all) {
@@ -393,7 +397,7 @@ function parseSearchArgs(argv: string[]): ParsedArgs {
 		search.query = positional.slice(1).join(" ").trim();
 	}
 	if (!search.outputDir || !search.query) {
-		throw new Error(
+		throw new CliArgumentError(
 			`Missing corpus directory/root or query\n\nTry: docsnap search docsnap/react-dev-reference "useEffect cleanup"\nOr: docsnap search --all "signature verification"`,
 		);
 	}
@@ -421,7 +425,6 @@ function hasAllSearchRoot(positional: string[]) {
 }
 
 const defaultCliOptions = (): CliOptions => ({
-	json: false,
 	quiet: false,
 	failOnInjectionSignal: false,
 });
@@ -429,7 +432,7 @@ const defaultCliOptions = (): CliOptions => ({
 function readValue(argv: string[], index: number, flag: string) {
 	const value = argv[index];
 	if (!value || value.startsWith("-"))
-		throw new Error(`${flag} requires a value`);
+		throw new CliArgumentError(`${flag} requires a value`);
 	return value;
 }
 
@@ -441,7 +444,7 @@ function readGlob(argv: string[], index: number, flag: string) {
 		/^[a-zA-Z]:[\\/]/.test(value) ||
 		value.split(/[\\/]+/).includes("..")
 	) {
-		throw new Error(`${flag} must be a simple relative glob`);
+		throw new CliArgumentError(`${flag} must be a simple relative glob`);
 	}
 	return value;
 }
@@ -449,9 +452,9 @@ function readGlob(argv: string[], index: number, flag: string) {
 function readInt(argv: string[], index: number, flag: string, max?: number) {
 	const value = Number(readValue(argv, index, flag));
 	if (!Number.isInteger(value) || value < 1)
-		throw new Error(`${flag} requires a positive integer`);
+		throw new CliArgumentError(`${flag} requires a positive integer`);
 	if (max !== undefined && value > max)
-		throw new Error(`${flag} must be ${max} or fewer`);
+		throw new CliArgumentError(`${flag} must be ${max} or fewer`);
 	return value;
 }
 
@@ -464,5 +467,5 @@ function readChoice<T extends string>(
 	const value = readValue(argv, index, flag);
 	const choice = choices.find((candidate) => candidate === value);
 	if (choice) return choice;
-	throw new Error(`${flag} must be one of: ${choices.join(", ")}`);
+	throw new CliArgumentError(`${flag} must be one of: ${choices.join(", ")}`);
 }

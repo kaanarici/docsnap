@@ -2,7 +2,6 @@ import { expect, test } from "bun:test";
 import {
 	jsonSearchResult,
 	type SearchResult,
-	textSearchResult,
 } from "../src/cli/search-output.ts";
 
 function emptySearch(matches: SearchResult["matches"]): SearchResult {
@@ -24,7 +23,6 @@ test("includes page kind on citations when present", () => {
 			outputDir: "/tmp/corpus",
 			query: "guide",
 			limit: 8,
-			json: true,
 			all: false,
 			includeInjection: false,
 		},
@@ -64,45 +62,4 @@ test("includes page kind on citations when present", () => {
 		kind: "markdown",
 		title: "Guide",
 	});
-});
-
-test("keeps text citations useful without internal ranking diagnostics", () => {
-	const input = {
-		outputDir: "/tmp/corpus",
-		query: "guide",
-		limit: 8,
-		json: false,
-		all: false,
-		includeInjection: false,
-	};
-	const result = emptySearch([
-		{
-			corpusDir: "/tmp/corpus",
-			match: {
-				record: {
-					ok: true,
-					url: "https://docs.example.com/guide",
-					finalUrl: "https://docs.example.com/guide",
-					outputPath: "guide.md",
-					injectionSignals: [],
-					qualityReasons: ["inline state may omit content"],
-					title: "Guide",
-					kind: "markdown",
-				},
-				contentHash: "a".repeat(64),
-				extractor: "markdown",
-				score: 1,
-				lineStart: 4,
-				lineEnd: 6,
-				text: "Guide body",
-			},
-		},
-	]);
-	const text = textSearchResult(input, result);
-	expect(text).toContain("guide.md#L4-L6");
-	expect(text).toContain("Guide body");
-	expect(text).toContain("warning: inline state may omit content");
-	expect(text).not.toContain("score:");
-	expect(text).not.toContain("confidence:");
-	expect(text).not.toContain("extractor:");
 });

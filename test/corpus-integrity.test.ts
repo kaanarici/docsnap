@@ -1,9 +1,21 @@
 import { describe, expect, test } from "bun:test";
-import { readFile, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	readFile,
+	stat,
+	symlink,
+	unlink,
+	writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { snapshotStats } from "../src/core/snapshot.ts";
 import { corpusLimits } from "../src/corpus/access.ts";
-import { readCorpus, readSummary, searchCorpus } from "../src/corpus/index.ts";
+import {
+	listCorpora,
+	readCorpus,
+	readSummary,
+	searchCorpus,
+} from "../src/corpus/index.ts";
 import { runFiles } from "../src/output/files.ts";
 import { conditionalRequestForPrior, loadPrior } from "../src/output/prior.ts";
 import { buildSummary } from "../src/report/summary.ts";
@@ -64,13 +76,53 @@ describe("corpus integrity", () => {
 			testConfig("unused", { seedUrl }),
 			snapshotStats([{ path: page.outputPath, body: page.rendered }]),
 		);
-		expect(summary.status).toBe("ok");
+		expect(summary.ok).toBe(true);
 		expect(summary.seed).toMatchObject({
 			included: true,
 			redirected: true,
 			url: seedUrl,
 			finalUrl,
 		});
+	});
+
+	test("describes dry runs without advertising unwritten files", () => {
+		const page = testPage();
+		const summary = buildSummary(
+			[page],
+			[page],
+			testConfig("preview", { dryRun: true }),
+			snapshotStats([{ path: page.outputPath, body: page.rendered }]),
+		);
+		expect(summary.message).toBe(
+			"Dry run found 1 page. No files were written.",
+		);
+		expect(summary.next).toBe(
+			"Run the same command without --dry-run to write the Markdown corpus.",
+		);
+	});
+
+	test("lists usable corpora rather than failed run directories", async () => {
+		const root = await tempDir("corpus-list");
+		const usableDir = join(root, "usable");
+		await mkdir(usableDir);
+		await writeValidCorpus(usableDir);
+		const failedDir = join(root, "failed");
+		await mkdir(failedDir);
+		const config = testConfig(failedDir);
+		const failure = testFailure({
+			url: config.seedUrl,
+			finalUrl: config.seedUrl,
+			wasSeed: true,
+		});
+		const summary = buildSummary([failure], [], config, snapshotStats([]));
+		await commitRun([], [failure], summary, config);
+
+		const listed = await listCorpora(root, 10, undefined, {
+			allowAbsoluteRoot: true,
+			preserveAbsolutePaths: true,
+		});
+		expect(listed.corpora).toHaveLength(1);
+		expect(listed.corpora[0]?.written).toBe(1);
 	});
 
 	test("accepts a valid corpus and rejects a tampered page", async () => {
@@ -244,7 +296,7 @@ describe("corpus integrity", () => {
 		["invalid generatedAt", { generatedAt: "not-a-date" }],
 		["non-string userAgent", { userAgent: 42 }],
 		["negative written count", { written: -1 }],
-		["unknown status", { status: "unknown" }],
+		["non-boolean ok", { ok: "yes" }],
 	] as const)("rejects %s in summary workload fields", async (_, invalid) => {
 		const root = await tempDir("summary-schema");
 		const { summary } = await writeValidCorpus(root);

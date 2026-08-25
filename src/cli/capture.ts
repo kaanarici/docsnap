@@ -13,8 +13,10 @@ import {
 } from "../core/types.ts";
 import { readSummary } from "../corpus/index.ts";
 import { runFiles } from "../output/files.ts";
+import { summaryWarnings } from "../report/summary.ts";
 import type { RefreshInput } from "./args.ts";
-import { logLine, printSummary } from "./progress.ts";
+import { logLine } from "./progress.ts";
+import { failureResult, successResult, writeResult } from "./result.ts";
 
 export async function runCapture(input: ConfigInput, cli: CliOptions) {
 	await runConfiguredCapture(buildPipelineConfig(input), cli);
@@ -34,22 +36,24 @@ export async function runRefresh(input: RefreshInput, cli: CliOptions) {
 }
 
 async function runConfiguredCapture(config: PipelineConfig, cli: CliOptions) {
-	const progress = cli.quiet || cli.json ? undefined : logLine;
+	const progress = cli.quiet ? undefined : logLine;
 	const { summary } = await runPipeline(config, progress);
 	const ok =
 		runSucceeded(summary) &&
 		(!cli.failOnInjectionSignal || summary.injectionSignalPages === 0);
-	if (cli.json) {
-		process.stdout.write(`${JSON.stringify(captureResult(summary, ok))}\n`);
-	}
-	if (!cli.quiet && !cli.json) printSummary(summary);
+	const data = captureData(summary);
+	const warnings = summaryWarnings(summary);
+	const error = ok ? null : captureError(summary, cli.failOnInjectionSignal);
+	writeResult(
+		error
+			? failureResult(error, error.suggestion, warnings)
+			: successResult(data, summary.message, summary.next, warnings),
+	);
 	if (!ok) process.exitCode = 1;
 }
 
-function captureResult(summary: RunSummary, ok: boolean) {
+function captureData(summary: RunSummary) {
 	return {
-		ok,
-		status: summary.status,
 		seedUrl: summary.seedUrl,
 		outputDir: summary.outDir,
 		written: summary.written,
@@ -72,5 +76,36 @@ function captureResult(summary: RunSummary, ok: boolean) {
 					summary: join(summary.outDir, runFiles.summary),
 					manifest: join(summary.outDir, runFiles.manifest),
 				},
+	};
+}
+
+function captureError(summary: RunSummary, failOnInjectionSignal: boolean) {
+	if (failOnInjectionSignal && summary.injectionSignalPages > 0) {
+		return {
+			code: "INJECTION_SIGNAL",
+			message: `Captured ${summary.written} pages, but ${summary.injectionSignalPages} contained prompt-like text.`,
+			retryable: false,
+			suggestion:
+				"Review the flagged pages before using them, or rerun without --fail-on-injection-signal.",
+			details: captureData(summary),
+		};
+	}
+	if (summary.stopReason === "rate_limited") {
+		return {
+			code: "RATE_LIMITED",
+			message: summary.message,
+			retryable: true,
+			suggestion: summary.next,
+			details: captureData(summary),
+		};
+	}
+	return {
+		code: summary.seed.failureKind?.toUpperCase() ?? "CAPTURE_FAILED",
+		message: summary.message,
+		retryable:
+			summary.seed.failureKind === "timeout" ||
+			summary.seed.failureKind === "fetch",
+		suggestion: summary.next,
+		details: captureData(summary),
 	};
 }

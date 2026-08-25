@@ -19,11 +19,8 @@ import {
 } from "../search/rank.ts";
 import { hasConcealedInjection } from "../security/injection.ts";
 import type { SearchInput } from "./args.ts";
-import {
-	jsonSearchResult,
-	type SearchResult,
-	textSearchResult,
-} from "./search-output.ts";
+import { successResult, writeResult } from "./result.ts";
+import { jsonSearchResult, type SearchResult } from "./search-output.ts";
 
 const snippetChars = 500;
 const allSearchConcurrency = 32;
@@ -31,13 +28,29 @@ const allSearchConcurrency = 32;
 export async function runSearch(input: SearchInput): Promise<void> {
 	assertSearchQuery(input.query);
 	const result = input.all ? await searchAll(input) : await searchOne(input);
-	if (input.json) {
-		process.stdout.write(
-			`${JSON.stringify(jsonSearchResult(input, result))}\n`,
-		);
-		return;
-	}
-	process.stdout.write(textSearchResult(input, result));
+	const matches = result.matches.length;
+	const message = `Found ${matches} matching passage${matches === 1 ? "" : "s"}.`;
+	const next = matches
+		? "Use the cited passages. Search again only if they do not answer the question."
+		: result.injectionFiltered
+			? "Use another source, or rerun with --include-injection only if you need to inspect the flagged pages as untrusted source material."
+			: "Try different search terms; the corpus was searched successfully.";
+	const warnings = [
+		...(result.truncated || result.corporaTruncated
+			? ["Search stopped at a corpus scan or read limit."]
+			: []),
+		...(result.limited
+			? ["More ranked matches exist beyond the requested limit."]
+			: []),
+		...(result.injectionFiltered
+			? [
+					`Excluded ${result.injectionFiltered} page${result.injectionFiltered === 1 ? "" : "s"} containing concealed prompt-like text.`,
+				]
+			: []),
+	];
+	writeResult(
+		successResult(jsonSearchResult(input, result), message, next, warnings),
+	);
 }
 
 async function searchOne(input: SearchInput): Promise<SearchResult> {

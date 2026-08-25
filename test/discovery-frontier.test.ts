@@ -113,14 +113,15 @@ describe("discovery frontier", () => {
 		);
 
 		expect(result.summary).toMatchObject({
-			status: "partial",
+			ok: false,
 			written: 1,
 			failed: 2,
 			discoveryTruncated: true,
 			stopReason: "rate_limited",
 		});
 		expect(runSucceeded(result.summary)).toBe(false);
-		const { stopReason: _stopReason, ...usable } = result.summary;
+		const { stopReason: _stopReason, ...rest } = result.summary;
+		const usable = { ...rest, ok: true };
 		expect(runSucceeded(usable)).toBe(true);
 	});
 

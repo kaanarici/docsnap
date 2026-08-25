@@ -128,7 +128,9 @@ const omissionReasons = [
 function isRunSummary(value: JsonValue): value is JsonObject & RunSummary {
 	return (
 		isCorpusFields<RunSummary>(value) &&
-		enumIncludes(["ok", "partial", "failed"], value.status) &&
+		isJsonBoolean(value.ok) &&
+		isBoundedString(value.message, 2048) &&
+		isBoundedString(value.next, 2048) &&
 		isBoundedString(value.seedUrl, maxPublicUrlChars) &&
 		isSeedSummary(value.seed) &&
 		isJsonString(value.outDir) &&
@@ -357,6 +359,7 @@ export async function listCorpora(
 		async (outputDir) => {
 			try {
 				const { summary } = await readCorpus(outputDir);
+				if (!summary.ok || summary.written === 0) return null;
 				return corpusListEntry(summary, outputDir);
 			} catch {
 				return undefined;
@@ -364,7 +367,7 @@ export async function listCorpora(
 		},
 	);
 	const corpora = entries.filter(
-		(entry): entry is ReturnType<typeof corpusListEntry> => entry !== undefined,
+		(entry): entry is ReturnType<typeof corpusListEntry> => Boolean(entry),
 	);
 	corpora.sort(
 		(left, right) =>
@@ -374,7 +377,8 @@ export async function listCorpora(
 	return {
 		corpora: corpora.slice(offset, offset + pageSize),
 		truncated: scanned.truncated,
-		corporaSkipped: scanned.skipped + (scanned.dirs.length - corpora.length),
+		corporaSkipped:
+			scanned.skipped + entries.filter((entry) => entry === undefined).length,
 		nextCursor:
 			offset + pageSize < corpora.length
 				? String(offset + pageSize)
@@ -548,7 +552,6 @@ function corpusListEntry(summary: RunSummary, outputDir: string) {
 		outputDir,
 		seedUrl: summary.seedUrl,
 		generatedAt: summary.generatedAt,
-		status: summary.status,
 		captureMode: summary.captureMode,
 		written: summary.written,
 		failed: summary.failed,

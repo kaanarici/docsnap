@@ -31,21 +31,39 @@ test("keeps tokens after -- as literal fetch question text", () => {
 	});
 });
 
-test("returns one JSON error and no stderr for an unsafe URL", async () => {
-	const { exitCode, stdout, stderr } = await runCli([
-		"http://127.0.0.1",
-		"--json",
-	]);
-	expect(exitCode).toBe(1);
+test("describes every command in one JSON help response", async () => {
+	const { exitCode, stdout, stderr } = await runCli(["--help"]);
+	const result = JSON.parse(stdout);
+	expect(exitCode).toBe(0);
 	expect(stderr).toBe("");
-	expect(JSON.parse(stdout)).toEqual({
+	expect(result).toMatchObject({
+		ok: true,
+		error: null,
+		data: {
+			tool: "docsnap",
+		},
+	});
+	expect(result.data.commands).toHaveLength(6);
+	expect(result.data.commands.slice(0, 3)).toMatchObject([
+		{ name: "capture", effects: "idempotent" },
+		{ name: "map", effects: "read_only" },
+		{ name: "fetch", effects: "idempotent" },
+	]);
+});
+
+test("returns a structured usage error on stderr for an unsafe URL", async () => {
+	const { exitCode, stdout, stderr } = await runCli(["http://127.0.0.1"]);
+	expect(exitCode).toBe(2);
+	expect(stdout).toBe("");
+	expect(JSON.parse(stderr)).toMatchObject({
 		ok: false,
-		status: "error",
-		error: "Unsafe URL: private or internal IP addresses are not allowed",
+		message: "Unsafe URL: private or internal IP addresses are not allowed",
+		error: { code: "INVALID_ARGUMENT", retryable: false },
+		warnings: [],
 	});
 });
 
-test("quiet capture writes nothing", async () => {
+test("quiet capture still returns one structured result", async () => {
 	const server = Bun.serve({
 		hostname: "127.0.0.1",
 		port: 0,
@@ -62,7 +80,21 @@ test("quiet capture writes nothing", async () => {
 			{ ...process.env, DOCSNAP_ALLOW_TEST_HOST: origin },
 		);
 		expect(exitCode).toBe(0);
-		expect(stdout).toBe("");
+		expect(JSON.parse(stdout)).toMatchObject({
+			ok: true,
+			message: "Dry run found 1 page. No files were written.",
+			data: { written: 1 },
+			error: null,
+			warnings: [],
+		});
+		expect(Object.keys(JSON.parse(stdout))).toEqual([
+			"ok",
+			"message",
+			"next",
+			"data",
+			"error",
+			"warnings",
+		]);
 		expect(stderr).toBe("");
 	} finally {
 		server.stop(true);

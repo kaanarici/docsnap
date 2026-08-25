@@ -5,7 +5,7 @@ import {
 	type ConfigInput,
 } from "../core/config.ts";
 import { identityKeys } from "../core/identity.ts";
-import { citationId, terminalText } from "../core/text.ts";
+import { citationId } from "../core/text.ts";
 import type { FailureKind, PipelineConfig, RunSummary } from "../core/types.ts";
 import { runSucceeded } from "../core/types.ts";
 import {
@@ -22,9 +22,11 @@ import {
 	searchCorpus,
 } from "../corpus/index.ts";
 import { runFiles } from "../output/files.ts";
+import { summaryWarnings } from "../report/summary.ts";
 import { hasConcealedInjection } from "../security/injection.ts";
 import type { FetchInput } from "./args.ts";
 import { logLine } from "./progress.ts";
+import { failureResult, successResult, writeResult } from "./result.ts";
 
 type FetchScope = "page" | "site";
 type FreshnessDecision = "captured" | "refreshed" | "reused";
@@ -38,8 +40,10 @@ type FetchCounts = {
 
 type FetchBaseResult = {
 	ok: boolean;
+	message: string;
+	next: string;
+	warnings: string[];
 	action: FreshnessDecision;
-	status: RunSummary["status"];
 	outputDir: string;
 	seedUrl: string;
 	scope: FetchScope;
@@ -67,8 +71,8 @@ type FetchCitation = {
 type FetchQuestionResult = FetchBaseResult & {
 	question: string;
 	citations: FetchCitation[];
-	limited: boolean;
-	truncated: boolean;
+	moreMatches: boolean;
+	searchTruncated: boolean;
 	injectionFiltered: number;
 };
 
@@ -110,16 +114,21 @@ export async function runFetch(input: FetchInput): Promise<void> {
 		result = await fetchResult(input);
 	} catch (error) {
 		if (error instanceof CorpusMismatchError) {
-			writeMismatch(error, input.json);
+			writeMismatch(error);
 			return;
 		}
 		throw error;
 	}
-	if (input.json) {
-		process.stdout.write(`${JSON.stringify(result)}\n`);
-	} else {
-		process.stdout.write(textFetchResult(result));
-	}
+	writeResult(
+		result.ok
+			? successResult(
+					fetchData(result),
+					result.message,
+					result.next,
+					result.warnings,
+				)
+			: failureResult(fetchError(result), result.next, result.warnings),
+	);
 	if (!result.ok) process.exitCode = 1;
 }
 
@@ -143,7 +152,7 @@ async function fetchResult(input: FetchInput): Promise<FetchResult> {
 			: input.freshness === "refresh"
 				? "refreshed"
 				: "captured";
-	const progress = input.quiet || input.json ? undefined : logLine;
+	const progress = input.quiet ? undefined : logLine;
 	let corpus: Corpus | null = existing;
 	if (action !== "reused" || !corpus) {
 		const config =
@@ -167,8 +176,10 @@ async function fetchResult(input: FetchInput): Promise<FetchResult> {
 	const { summary, records } = corpus;
 	const baseResult: FetchBaseResult = {
 		ok: runSucceeded(summary),
+		message: summary.message,
+		next: summary.next,
+		warnings: summaryWarnings(summary),
 		action,
-		status: summary.status,
 		outputDir,
 		seedUrl: summary.seedUrl,
 		scope: summary.captureMode,
@@ -203,34 +214,54 @@ async function fetchResult(input: FetchInput): Promise<FetchResult> {
 					Boolean(record.outputPath) &&
 					hasConcealedInjection(record.injectionSignals),
 			).length;
+	const citations = ranked.matches.map((match) => {
+		const citation: FetchCitation = {
+			citationId: citationId(
+				match.record.outputPath,
+				match.lineStart,
+				match.lineEnd,
+				match.contentHash,
+			),
+			path: match.record.outputPath,
+			lineStart: match.lineStart,
+			lineEnd: match.lineEnd,
+			url: match.record.url,
+			snippet: match.text,
+		};
+		if (match.record.kind) citation.kind = match.record.kind;
+		if (match.record.qualityReasons?.length) {
+			citation.qualityReasons = match.record.qualityReasons;
+		}
+		if (match.record.injectionSignals.length) {
+			citation.injectionSignals = match.record.injectionSignals;
+		}
+		return citation;
+	});
 	return {
 		...baseResult,
+		message: citations.length
+			? `Found ${citations.length} matching passage${citations.length === 1 ? "" : "s"} in a ${summary.written}-page corpus.`
+			: `Captured ${summary.written} pages, but found no matching passages.`,
+		next: citations.length
+			? "Use the cited passages. Search the corpus again only if they do not answer the question."
+			: "Search the corpus with different terms; the capture succeeded but this query found no relevant passage.",
+		warnings: [
+			...baseResult.warnings,
+			...(ranked.truncated
+				? [
+						"Search reached its read limit; the returned passages are usable but may not cover the whole corpus.",
+					]
+				: []),
+			...(injectionFiltered
+				? [
+						`Excluded ${injectionFiltered} page${injectionFiltered === 1 ? "" : "s"} containing concealed prompt-like text.`,
+					]
+				: []),
+		],
 		question: input.question,
-		citations: ranked.matches.map((match) => {
-			const citation: FetchCitation = {
-				citationId: citationId(
-					match.record.outputPath,
-					match.lineStart,
-					match.lineEnd,
-					match.contentHash,
-				),
-				path: match.record.outputPath,
-				lineStart: match.lineStart,
-				lineEnd: match.lineEnd,
-				url: match.record.url,
-				snippet: match.text,
-			};
-			if (match.record.kind) citation.kind = match.record.kind;
-			if (match.record.qualityReasons?.length) {
-				citation.qualityReasons = match.record.qualityReasons;
-			}
-			if (match.record.injectionSignals.length) {
-				citation.injectionSignals = match.record.injectionSignals;
-			}
-			return citation;
-		}),
-		limited: ranked.limited,
-		truncated: ranked.truncated,
+		citations,
+		moreMatches: ranked.limited,
+		searchTruncated: ranked.truncated,
 		injectionFiltered,
 	};
 }
@@ -245,83 +276,22 @@ function summaryCounts(summary: RunSummary): FetchCounts {
 	};
 }
 
-function textFetchResult(result: FetchResult): string {
-	const counts = result.counts;
-	const lines = [
-		`docsnap: ${result.action} ${counts.written} page${counts.written === 1 ? "" : "s"} in ${result.outputDir}`,
-	];
-	const issues = [
-		counts.failed ? `failed ${counts.failed}` : "",
-		counts.lowQuality ? `low-quality ${counts.lowQuality}` : "",
-		counts.qualityWarnings ? `quality-warnings ${counts.qualityWarnings}` : "",
-		counts.injectionSignalPages
-			? `injection-signals ${counts.injectionSignalPages}`
-			: "",
-	].filter(Boolean);
-	if (result.status !== "ok" || issues.length) {
-		lines.push(
-			`docsnap: status ${result.status}${issues.length ? `; ${issues.join("; ")}` : ""}`,
-		);
-	}
-	if (result.stopReason) lines.push(`docsnap: stopped ${result.stopReason}`);
-	if (result.failureKind || result.error) {
-		lines.push(
-			`docsnap: failure ${result.failureKind ?? "unknown"}${result.error ? `: ${result.error}` : ""}`,
-		);
-	}
-	if ("citations" in result) {
-		lines.push(
-			`docsnap: ${result.citations.length} citation${result.citations.length === 1 ? "" : "s"} for ${JSON.stringify(result.question)}`,
-		);
-		for (const citation of result.citations) {
-			lines.push(
-				"",
-				citation.citationId,
-				`path: ${citation.path}`,
-				`lines: ${citation.lineStart}-${citation.lineEnd}`,
-				`url: ${citation.url}`,
-			);
-			if (citation.kind) lines.push(`kind: ${citation.kind}`);
-			if (citation.qualityReasons?.length) {
-				lines.push(`warning: ${citation.qualityReasons.join(", ")}`);
-			}
-			if (citation.injectionSignals?.length) {
-				lines.push(`injectionSignals: ${citation.injectionSignals.join(", ")}`);
-			}
-			lines.push("", citation.snippet.trimEnd());
-		}
-	} else if (result.pages.length) {
-		lines.push("docsnap: pages");
-		for (const page of result.pages) {
-			lines.push(
-				`- ${page.path}${page.title ? ` (${page.title.replace(/\s+/g, " ").trim()})` : ""}: ${page.url}`,
-			);
-		}
-	}
-	lines.push(`docsnap: summary ${result.paths.summary}`);
-	return terminalText(`${lines.join("\n")}\n`);
-}
-
-function writeMismatch(error: CorpusMismatchError, json: boolean): void {
-	const result = {
-		ok: false,
-		status: "error",
-		failureKind: error.failureKind,
-		error: error.message,
-		counts: error.counts,
-		outputDir: error.outputDir,
-		existingSeedUrl: error.existingSeedUrl,
-		requestedUrl: error.requestedSeedUrl,
-	};
-	if (json) {
-		process.stdout.write(`${JSON.stringify(result)}\n`);
-	} else {
-		process.stderr.write(
-			terminalText(
-				`docsnap: ${result.failureKind}: ${result.error}\ndocsnap: counts written=${result.counts.written} failed=${result.counts.failed}\n`,
-			),
-		);
-	}
+function writeMismatch(error: CorpusMismatchError): void {
+	writeResult(
+		failureResult({
+			code: "CORPUS_MISMATCH",
+			message: error.message,
+			retryable: false,
+			suggestion:
+				"Choose a different output directory or use --freshness force to replace this corpus.",
+			details: {
+				counts: error.counts,
+				outputDir: error.outputDir,
+				existingSeedUrl: error.existingSeedUrl,
+				requestedUrl: error.requestedSeedUrl,
+			},
+		}),
+	);
 	process.exitCode = 1;
 }
 
@@ -385,7 +355,7 @@ async function existingCorpus(
 	}
 	const replaceable =
 		allowReplace ||
-		summary.status !== "ok" ||
+		!summaryCanBeReused(summary) ||
 		(summary.seedUrl === requested.seedUrl &&
 			summary.captureMode === (requested.pageOnly ? "page" : "site"));
 	let verified: Corpus;
@@ -414,7 +384,7 @@ function canReuseCorpus(
 		!summary.maxReached ||
 		!requested.maxExplicit ||
 		requested.max <= summary.max;
-	if (summary.status !== "ok" || !enoughPages) return false;
+	if (!summaryCanBeReused(summary) || !enoughPages) return false;
 	if (!manifestMatchesSummary(summary, records)) return false;
 	const resource = classifyDiscoveryResource(requested.seedUrl);
 	if (
@@ -440,6 +410,39 @@ function canReuseCorpus(
 		return true;
 	}
 	return matchingOutputPaths(records, requested.seedUrl).length > 0;
+}
+
+function summaryCanBeReused(summary: RunSummary) {
+	return (
+		summary.ok &&
+		summary.seed.included &&
+		summary.lowQuality === 0 &&
+		!summary.stopReason &&
+		(!summary.discoveryTruncated || summary.maxReached) &&
+		!summary.render?.truncated
+	);
+}
+
+function fetchData(result: FetchResult) {
+	const {
+		ok: _ok,
+		message: _message,
+		next: _next,
+		warnings: _warnings,
+		...data
+	} = result;
+	return data;
+}
+
+function fetchError(result: FetchResult) {
+	return {
+		code: result.failureKind?.toUpperCase() ?? "FETCH_FAILED",
+		message: result.message,
+		retryable:
+			result.failureKind === "timeout" || result.stopReason === "rate_limited",
+		suggestion: result.next,
+		details: fetchData(result),
+	};
 }
 
 function buildBaseConfig(input: FetchInput, scope: FetchScope): PipelineConfig {

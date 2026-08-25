@@ -139,7 +139,6 @@ export type PipelineConfig = {
 };
 
 export type CliOptions = {
-	json: boolean;
 	quiet: boolean;
 	failOnInjectionSignal: boolean;
 };
@@ -261,7 +260,9 @@ export type PageRecord = PageSuccess | PageFailure;
 export type RunRecord = PageOutput | PageFailure;
 
 export type RunSummary = {
-	status: "ok" | "partial" | "failed";
+	ok: boolean;
+	message: string;
+	next: string;
 	seedUrl: string;
 	seed: SeedSummary;
 	outDir: string;
@@ -300,11 +301,11 @@ export type RunSummary = {
 export function runSucceeded(
 	summary: Pick<
 		RunSummary,
-		"status" | "captureMode" | "written" | "seed" | "stopReason"
+		"ok" | "captureMode" | "written" | "seed" | "stopReason"
 	>,
 ) {
 	return (
-		summary.status !== "failed" &&
+		summary.ok &&
 		!summary.stopReason &&
 		summary.written > 0 &&
 		(summary.captureMode === "site" || summary.seed.included)

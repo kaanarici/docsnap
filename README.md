@@ -71,7 +71,7 @@ docsnap list
 
 Run `docsnap --help` or `docsnap <command> --help` for all flags.
 
-For scripts and agents, add `--json` for one machine-readable result on stdout. A failed result exits nonzero.
+Every command returns one JSON result. `message` says what happened and `next` says what to do. Progress goes to stderr; `--quiet` hides it. Errors exit nonzero and say whether retrying can help.
 
 ## Safety and limits
 
