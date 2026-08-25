@@ -385,7 +385,7 @@ async function existingCorpus(
 	}
 	const replaceable =
 		allowReplace ||
-		!runSucceeded(summary) ||
+		summary.status !== "ok" ||
 		(summary.seedUrl === requested.seedUrl &&
 			summary.captureMode === (requested.pageOnly ? "page" : "site"));
 	let verified: Corpus;
@@ -414,7 +414,7 @@ function canReuseCorpus(
 		!summary.maxReached ||
 		!requested.maxExplicit ||
 		requested.max <= summary.max;
-	if (!runSucceeded(summary) || !enoughPages) return false;
+	if (summary.status !== "ok" || !enoughPages) return false;
 	if (!manifestMatchesSummary(summary, records)) return false;
 	const resource = classifyDiscoveryResource(requested.seedUrl);
 	if (

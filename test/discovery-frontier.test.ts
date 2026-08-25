@@ -120,6 +120,8 @@ describe("discovery frontier", () => {
 			stopReason: "rate_limited",
 		});
 		expect(runSucceeded(result.summary)).toBe(false);
+		const { stopReason: _stopReason, ...usable } = result.summary;
+		expect(runSucceeded(usable)).toBe(true);
 	});
 
 	test("searches late index children and keeps numeric part priority", async () => {

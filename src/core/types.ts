@@ -298,10 +298,14 @@ export type RunSummary = {
 };
 
 export function runSucceeded(
-	summary: Pick<RunSummary, "status" | "captureMode" | "written" | "seed">,
+	summary: Pick<
+		RunSummary,
+		"status" | "captureMode" | "written" | "seed" | "stopReason"
+	>,
 ) {
 	return (
-		summary.status === "ok" &&
+		summary.status !== "failed" &&
+		!summary.stopReason &&
 		summary.written > 0 &&
 		(summary.captureMode === "site" || summary.seed.included)
 	);
