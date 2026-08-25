@@ -1,55 +1,21 @@
 import { type PriorState, readPriorOutput } from "../output/prior.ts";
-import { captureSelectionHash } from "./config.ts";
 import { identityKeys } from "./identity.ts";
 import type {
 	PageOutput,
 	PipelineConfig,
 	RefreshChangedPage,
 	RefreshSummary,
-	RunSummary,
 } from "./types.ts";
-
-export type RefreshCounters = {
-	notModified: number;
-	reused: number;
-	fallbackRefetches: number;
-	skippedWrites: number;
-};
-
-export function refreshCounters(): RefreshCounters {
-	return {
-		notModified: 0,
-		reused: 0,
-		fallbackRefetches: 0,
-		skippedWrites: 0,
-	};
-}
-
-export function assertRefreshSelection(
-	prior: Pick<RunSummary, "selectionHash">,
-	topic?: string,
-) {
-	if (
-		prior.selectionHash &&
-		captureSelectionHash(topic) !== prior.selectionHash
-	) {
-		throw new Error(
-			"Question-selected corpora require the original question when refreshing.",
-		);
-	}
-}
 
 export async function refreshSummary(
 	prior: PriorState,
 	outputs: PageOutput[],
 	config: PipelineConfig,
-	counters: RefreshCounters,
 ): Promise<RefreshSummary> {
 	if (!prior.enabled) return emptyRefreshSummary(prior.reason);
 
 	const changedPages: RefreshChangedPage[] = [];
 	const currentKeys = new Set<string>();
-	let checked = 0;
 	let fresh = 0;
 	let changed = 0;
 	let unchanged = 0;
@@ -65,7 +31,6 @@ export async function refreshSummary(
 			: previousOutput === record.rendered
 				? "unchanged"
 				: "changed";
-		if (previous) checked++;
 		if (change === "new") fresh++;
 		else if (change === "changed") changed++;
 		else unchanged++;
@@ -99,13 +64,6 @@ export async function refreshSummary(
 
 	const summary: RefreshSummary = {
 		enabled: prior.enabled,
-		priorRecords: prior.records.length,
-		checked,
-		notModified: counters.notModified,
-		reused: counters.reused,
-		fallbackRefetches: counters.fallbackRefetches,
-		pageWrites: 0,
-		skippedWrites: counters.skippedWrites,
 		new: fresh,
 		changed,
 		unchanged,
@@ -122,13 +80,6 @@ export function emptyRefreshSummary(
 	return {
 		enabled: false,
 		reason,
-		priorRecords: 0,
-		checked: 0,
-		notModified: 0,
-		reused: 0,
-		fallbackRefetches: 0,
-		pageWrites: 0,
-		skippedWrites: 0,
 		new: 0,
 		changed: 0,
 		unchanged: 0,

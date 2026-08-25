@@ -108,13 +108,7 @@ describe("output containment", () => {
 			limited.records,
 			limited.outputs,
 			config,
-			[
-				{ url: good.url, source: "seed", wasSeed: true },
-				{ url: large.url, source: "crawl" },
-			],
-			0,
 			snapshot,
-			1,
 		);
 		const failure = limited.records.find((record) => !record.ok);
 		if (!failure || failure.ok) throw new Error("expected oversized failure");

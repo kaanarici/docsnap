@@ -1,10 +1,10 @@
-import { maxGeneratedMediaUrls } from "../core/config.ts";
 import { artifactUrl } from "../core/identity.ts";
 import {
 	isJsonBoolean,
 	isJsonNumber,
 	isJsonObject,
 	isJsonString,
+	type JsonObject,
 	type JsonValue,
 } from "../core/json.ts";
 import { awaitWithSignal } from "../core/parallel.ts";
@@ -16,22 +16,30 @@ import { failureKind } from "../fetch/result.ts";
 import { requestPublicHttp } from "../fetch/transport.ts";
 import { validatePublicHttpUrl } from "../security/url.ts";
 import {
-	Cdp,
-	type CdpClient,
-	type CdpEvent,
-	chromeExists,
-	chromePath,
-	type JsonObject,
-} from "./cdp.ts";
-import {
 	blockerSource,
 	renderedPageExpression,
 	shellStateExpression,
 } from "./page.ts";
 
+export type BrowserView = {
+	navigate(url: string): Promise<void>;
+	cdp(method: string, params?: JsonObject): Promise<JsonObject>;
+	evaluate(script: string): Promise<JsonValue | undefined>;
+	addEventListener(
+		type: `${string}.${string}`,
+		listener: (event: { data: JsonObject }) => void,
+	): void;
+	close(): void;
+};
+
+const chromeFlags = (
+	"--host-resolver-rules=MAP * ~NOTFOUND\0--no-first-run\0--no-default-browser-check\0" +
+	"--disable-background-networking\0--disable-component-update\0--disable-default-apps\0--disable-extensions\0--disable-sync\0--disable-quic\0--disable-breakpad\0" +
+	"--disable-features=ServiceWorker,SharedWorker,MediaRouter,OptimizationHints,Translate,Prerender2\0--metrics-recording-only\0--mute-audio\0--hide-scrollbars"
+).split("\0");
+
 const words = (input: string) => new Set(input.split(" "));
 const allowedTypes = words("Document Script Worker XHR Fetch Stylesheet");
-const mediaTypes = new Set(["Image", "Media"]);
 const fetchPatterns = ["http://*", "https://*"].map((urlPattern) => ({
 	urlPattern,
 	requestStage: "Request",
@@ -51,12 +59,7 @@ const sensitivePath =
 	/\/(?:captcha|checkout|log-in|login|paywall|register|sign-in|sign-up|signin|signup)(?:\/|$)/i;
 
 export type ChromiumRenderMetrics = {
-	launchMs: number;
 	renderMs: number;
-	blockedRequests: number;
-	fulfilledRequests: number;
-	relayedBytes: number;
-	mediaUrls: string[];
 	truncated: boolean;
 };
 
@@ -71,18 +74,15 @@ export type ChromiumRenderResult =
 
 type ChromiumOpenResult =
 	| { ok: true; renderer: ChromiumRenderer }
-	| { ok: false; error: string; launchMs: number };
+	| { ok: false; error: string };
 type Run = {
 	shell: FetchResult;
 	shellFulfillment?: { contentType?: string };
 	signal: AbortSignal;
-	media: Set<string>;
 	origins: Set<string>;
 	byteWaiters: Array<() => void>;
 	robots: Map<string, Promise<Robots | undefined>>;
 	scriptRequests: Set<string>;
-	blocked: number;
-	fulfilled: number;
 	inflight: number;
 	intercepted: number;
 	requests: number;
@@ -90,47 +90,67 @@ type Run = {
 	reservedBytes: number;
 	robotRules: number;
 	truncated: boolean;
+	frameId?: string;
 	document?: { url: string; status: number; contentType: string };
 };
 
 export async function openChromiumRenderer(
 	config: PipelineConfig,
 ): Promise<ChromiumOpenResult> {
-	const started = performance.now();
-	if (!chromeExists())
-		return {
-			ok: false,
-			error: `Chrome is not installed at ${chromePath}`,
-			launchMs: performance.now() - started,
-		};
-	let cdp: Cdp | undefined;
+	let view: Bun.WebView | undefined;
+	let renderer: ChromiumRenderer | undefined;
 	try {
-		cdp = new Cdp(chromePath);
-		await cdp.start();
-		return { ok: true, renderer: new ChromiumRenderer(cdp, config) };
+		const path = process.env["DOCSNAP_CHROME_PATH"];
+		view = new Bun.WebView({
+			backend: path
+				? { type: "chrome", url: false, path, argv: chromeFlags }
+				: { type: "chrome", url: false, argv: chromeFlags },
+			dataStore: "ephemeral",
+		});
+		await view.navigate("about:blank");
+		const current = view;
+		const browser: BrowserView = {
+			navigate: (url) => current.navigate(url),
+			cdp: (method, params) => current.cdp<JsonObject>(method, params),
+			evaluate: (script) => current.evaluate<JsonValue | undefined>(script),
+			addEventListener: (type, listener) =>
+				current.addEventListener(String(type), (event) => {
+					if (event instanceof MessageEvent && isJsonObject(event.data))
+						listener({ data: event.data });
+				}),
+			close: () => current.close(),
+		};
+		renderer = new ChromiumRenderer(browser, config);
+		await renderer.start();
+		return { ok: true, renderer };
 	} catch (error) {
-		await cdp?.close().catch(() => undefined);
+		if (renderer) await renderer.close();
+		else view?.close();
 		return {
 			ok: false,
 			error: message(error),
-			launchMs: performance.now() - started,
 		};
 	}
 }
 export class ChromiumRenderer {
-	private contextId: string | undefined;
-	private sessionId: string | undefined;
 	private run: Run | undefined;
 	private closed = false;
+	private ready: Promise<void> | undefined;
+	private queue: Promise<void> = Promise.resolve();
+	private readonly dirtyOrigins = new Set<string>();
 	private active = 0;
 	private readonly waiters: Array<() => void> = [];
 	private readonly signalHandlers = new Map<"SIGINT" | "SIGTERM", () => void>();
-
 	constructor(
-		private readonly cdp: CdpClient,
+		private readonly view: BrowserView,
 		private readonly config: PipelineConfig,
 	) {
-		cdp.onEvent = (event) => this.onEvent(event);
+		view.addEventListener("Network.requestWillBeSent", (event) =>
+			this.onRequest(event.data),
+		);
+		view.addEventListener("Fetch.requestPaused", (event) => {
+			void this.onPaused(event.data);
+		});
 		for (const signal of ["SIGINT", "SIGTERM"] as const) {
 			const handler = () => {
 				void this.close().finally(() => process.kill(process.pid, signal));
@@ -138,6 +158,11 @@ export class ChromiumRenderer {
 			this.signalHandlers.set(signal, handler);
 			process.once(signal, handler);
 		}
+	}
+
+	start() {
+		if (!this.ready) this.ready = this.configure();
+		return this.ready;
 	}
 
 	async renderPage(
@@ -165,11 +190,8 @@ export class ChromiumRenderer {
 		const run: Run = {
 			shell,
 			signal: AbortSignal.any(signals),
-			blocked: 0,
-			fulfilled: 0,
 			inflight: 0,
 			intercepted: 0,
-			media: new Set(),
 			origins: new Set(),
 			byteWaiters: [],
 			robots: new Map(),
@@ -183,13 +205,8 @@ export class ChromiumRenderer {
 		if (fulfillment) run.shellFulfillment = fulfillment;
 		this.run = run;
 		try {
-			await this.ensureContext(run.signal);
-			await this.cdp.send(
-				"Page.navigate",
-				{ url: startUrl },
-				this.sessionId,
-				run.signal,
-			);
+			await this.prepare(run.signal);
+			await awaitWithSignal(this.view.navigate(startUrl), run.signal);
 			await this.settle(run);
 			const page = renderedPageValue(
 				await this.evaluate(
@@ -251,10 +268,14 @@ export class ChromiumRenderer {
 			);
 		} finally {
 			controller.abort();
-			const disposed = await this.disposeContext();
 			for (let waits = 0; run.inflight > 0 && waits < 10; waits++)
 				await Bun.sleep(50);
-			if (!disposed) await this.close();
+			for (const origin of run.origins) this.dirtyOrigins.add(origin);
+			for (const url of [shell.finalUrl, startUrl]) {
+				const parsed = URL.parse(url);
+				if (parsed) this.dirtyOrigins.add(parsed.origin);
+			}
+			if (!(await this.reset())) await this.close();
 			if (this.run === run) this.run = undefined;
 		}
 	}
@@ -265,48 +286,38 @@ export class ChromiumRenderer {
 		for (const [signal, handler] of this.signalHandlers)
 			process.off(signal, handler);
 		this.signalHandlers.clear();
-		this.cdp.onEvent = undefined;
-		await this.disposeContext();
-		await this.cdp.close();
+		this.view.close();
 	}
 
-	private async onEvent(event: CdpEvent) {
-		if (event.method === "Target.attachedToTarget") {
-			await this.configureAttachedTarget(event);
-			return;
-		}
-		if (event.method === "Network.requestWillBeSent") {
-			if (event.params["type"] === "Script")
-				this.run?.scriptRequests.add(
-					requestKey(event.sessionId, String(event.params["requestId"])),
-				);
-			return;
-		}
-		if (event.method !== "Fetch.requestPaused") return;
+	private onRequest(params: JsonObject) {
+		if (params["type"] === "Script")
+			this.run?.scriptRequests.add(String(params["requestId"]));
+	}
+
+	private async onPaused(params: JsonObject) {
 		const run = this.run;
-		const requestId = String(event.params["requestId"]);
+		const requestId = String(params["requestId"]);
 		if (!run) {
-			await this.block(requestId, event.sessionId).catch(() => undefined);
+			await this.block(requestId).catch(() => undefined);
 			return;
 		}
-		const request = pausedRequest(event.params["request"]);
+		const request = pausedRequest(params["request"]);
 		if (!request) {
-			await this.block(requestId, event.sessionId, run.signal).catch(
-				() => undefined,
-			);
+			await this.block(requestId, run.signal).catch(() => undefined);
 			return;
 		}
-		const type = String(event.params["resourceType"] ?? "Other");
+		const type = String(params["resourceType"] ?? "Other");
+		if (type === "Document" && !run.frameId)
+			run.frameId = String(params["frameId"] ?? "");
 		const workerScript = run.scriptRequests.delete(
-			requestKey(event.sessionId, String(event.params["networkId"] ?? "")),
+			String(params["networkId"] ?? ""),
 		);
 		run.intercepted++;
 		run.inflight++;
 		try {
-			if (mediaTypes.has(type)) this.addMedia(run, request.url);
 			if (
 				run.shellFulfillment &&
-				event.sessionId === this.sessionId &&
+				params["frameId"] === run.frameId &&
 				type === "Document" &&
 				request.method === "GET" &&
 				request.url === run.shell.finalUrl
@@ -319,7 +330,7 @@ export class ChromiumRenderer {
 					status: run.shell.status,
 					contentType: run.shell.contentType,
 				};
-				await this.cdp.send(
+				await this.send(
 					"Fetch.fulfillRequest",
 					{
 						requestId,
@@ -327,10 +338,8 @@ export class ChromiumRenderer {
 						responseHeaders: responseHeaderList(headers, contentType),
 						body: Buffer.from(run.shell.body).toString("base64"),
 					},
-					event.sessionId,
 					run.signal,
 				);
-				run.fulfilled++;
 				return;
 			}
 			const parsed = URL.parse(request.url);
@@ -343,8 +352,7 @@ export class ChromiumRenderer {
 				sensitivePath.test(parsed.pathname)
 			) {
 				if (run.intercepted > maxInterceptedRequests) run.truncated = true;
-				run.blocked++;
-				return void (await this.block(requestId, event.sessionId, run.signal));
+				return void (await this.block(requestId, run.signal));
 			}
 			const headers = requestHeaders(request.headers, this.config.userAgent);
 			const response = await this.limited(run.signal, async () => {
@@ -387,11 +395,10 @@ export class ChromiumRenderer {
 					?.toLowerCase()
 					.includes("attachment")
 			) {
-				run.blocked++;
-				return void (await this.block(requestId, event.sessionId, run.signal));
+				return void (await this.block(requestId, run.signal));
 			}
 			if (
-				event.sessionId === this.sessionId &&
+				params["frameId"] === run.frameId &&
 				type === "Document" &&
 				(response.status < 300 || response.status > 399)
 			) {
@@ -402,7 +409,7 @@ export class ChromiumRenderer {
 						response.headers.get("content-type") ?? run.shell.contentType,
 				};
 			}
-			await this.cdp.send(
+			await this.send(
 				"Fetch.fulfillRequest",
 				{
 					requestId,
@@ -410,94 +417,41 @@ export class ChromiumRenderer {
 					responseHeaders: responseHeaderList(response.headers),
 					body: Buffer.from(response.body).toString("base64"),
 				},
-				event.sessionId,
 				run.signal,
 			);
-			run.fulfilled++;
 		} catch {
-			run.blocked++;
-			await this.block(requestId, event.sessionId, run.signal).catch(
-				() => undefined,
-			);
+			await this.block(requestId, run.signal).catch(() => undefined);
 		} finally {
 			run.inflight--;
 		}
 	}
 
-	private async configureAttachedTarget(event: CdpEvent) {
-		const run = this.run;
-		const sessionId = String(event.params["sessionId"] ?? "");
-		const targetInfo = event.params["targetInfo"];
-		const target = isJsonObject(targetInfo) ? targetInfo : undefined;
-		const targetId = String(target?.["targetId"] ?? "");
-		const type = String(target?.["type"] ?? "other");
-		const closeTarget = () =>
-			targetId
-				? this.cdp
-						.send(
-							"Target.closeTarget",
-							{ targetId },
-							undefined,
-							AbortSignal.timeout(1_000),
-						)
-						.catch(() => undefined)
-				: undefined;
-		if (!run || !sessionId) {
-			await closeTarget();
-			return;
-		}
-		try {
-			await this.configureTarget(sessionId, type, run.signal, true);
-		} catch {
-			run.blocked++;
-			run.truncated = true;
-			await closeTarget();
-		}
-	}
-
-	private async configureTarget(
-		sessionId: string,
-		type: string,
-		signal: AbortSignal,
-		resume = false,
-	) {
-		const send = (method: string, params: JsonObject = {}) =>
-			this.cdp.send(method, params, sessionId, signal);
-		const pageTarget = type === "page" || type === "iframe";
-		await Promise.all([
-			send("Network.enable"),
-			send("Network.setBlockedURLs", {
-				urls: [
-					"ws://*",
-					"wss://*",
-					"file://*",
-					"ftp://*",
-					...(pageTarget ? [] : ["http://*", "https://*"]),
-				],
-			}),
-			send("Network.setBypassServiceWorker", { bypass: true }),
-			send("Network.setUserAgentOverride", {
-				userAgent: this.config.userAgent,
-			}),
-			send("Target.setAutoAttach", {
-				autoAttach: true,
-				waitForDebuggerOnStart: true,
-				flatten: true,
-			}),
-			...(pageTarget
-				? [
-						send("Fetch.enable", { patterns: fetchPatterns }),
-						send("Page.enable"),
-						send("Page.addScriptToEvaluateOnNewDocument", {
-							source: blockerSource,
-						}),
-					]
-				: [
-						send("Runtime.enable"),
-						send("Runtime.evaluate", { expression: blockerSource }),
-					]),
-		]);
-		if (resume) await send("Runtime.runIfWaitingForDebugger");
+	private async configure() {
+		const signal = AbortSignal.timeout(15_000);
+		await this.send("Network.enable", {}, signal);
+		await this.send(
+			"Network.setBlockedURLs",
+			{ urls: ["ws://*", "wss://*", "file://*", "ftp://*"] },
+			signal,
+		);
+		await this.send("Network.setBypassServiceWorker", { bypass: true }, signal);
+		await this.send(
+			"Network.setUserAgentOverride",
+			{ userAgent: this.config.userAgent },
+			signal,
+		);
+		await this.send("Fetch.enable", { patterns: fetchPatterns }, signal);
+		await this.send("Page.enable", {}, signal);
+		await this.send(
+			"Page.addScriptToEvaluateOnNewDocument",
+			{ source: blockerSource },
+			signal,
+		);
+		await this.send(
+			"Browser.setDownloadBehavior",
+			{ behavior: "deny" },
+			signal,
+		);
 	}
 
 	private async limited<T>(
@@ -592,54 +546,39 @@ export class ChromiumRenderer {
 		return 0;
 	}
 
-	private block(requestId: string, sessionId?: string, signal?: AbortSignal) {
-		return this.cdp.send(
+	private block(requestId: string, signal?: AbortSignal) {
+		return this.send(
 			"Fetch.failRequest",
 			{ requestId, errorReason: "BlockedByClient" },
-			sessionId,
 			signal,
 		);
 	}
 
-	private async ensureContext(signal: AbortSignal) {
-		const send = (method: string, params: JsonObject) =>
-			this.cdp.send(method, params, undefined, signal);
-		this.contextId = cdpId(
-			await send("Target.createBrowserContext", { disposeOnDetach: true }),
-			"browserContextId",
-			"browser context",
+	private async prepare(signal: AbortSignal) {
+		await awaitWithSignal(this.start(), signal);
+		await this.send(
+			"Emulation.setVirtualTimePolicy",
+			{ policy: "advance" },
+			signal,
 		);
-		const targetId = cdpId(
-			await send("Target.createTarget", {
-				url: "about:blank",
-				browserContextId: this.contextId,
-			}),
-			"targetId",
-			"target",
-		);
-		this.sessionId = cdpId(
-			await send("Target.attachToTarget", { targetId, flatten: true }),
-			"sessionId",
-			"session",
-		);
-		await this.configureTarget(this.sessionId, "page", signal);
-		await send("Browser.setDownloadBehavior", {
-			behavior: "deny",
-			browserContextId: this.contextId,
-		});
+		await this.send("Network.clearBrowserCookies", {}, signal);
+		await this.send("Network.clearBrowserCache", {}, signal);
+		for (const origin of this.dirtyOrigins) {
+			await this.send(
+				"Storage.clearDataForOrigin",
+				{ origin, storageTypes: "all" },
+				signal,
+			);
+		}
+		this.dirtyOrigins.clear();
 	}
 
-	private async disposeContext() {
-		const contextId = this.contextId;
-		this.contextId = undefined;
-		this.sessionId = undefined;
-		if (!contextId) return true;
+	private async reset() {
+		if (this.closed) return false;
 		try {
-			await this.cdp.send(
-				"Target.disposeBrowserContext",
-				{ browserContextId: contextId },
-				undefined,
-				AbortSignal.timeout(1_000),
+			await awaitWithSignal(
+				this.view.navigate("about:blank"),
+				AbortSignal.timeout(2_000),
 			);
 			return true;
 		} catch {
@@ -682,14 +621,13 @@ export class ChromiumRenderer {
 			else substantiveSince = 0;
 			if (ready && !advanced && run.inflight === 0) {
 				advanced = true;
-				await this.cdp.send(
+				await this.send(
 					"Emulation.setVirtualTimePolicy",
 					{
 						policy: "pauseIfNetworkFetchesPending",
 						budget: 3_000,
 						maxVirtualTimeTaskStarvationCount: 100,
 					},
-					this.sessionId,
 					run.signal,
 				);
 				continue;
@@ -715,24 +653,32 @@ export class ChromiumRenderer {
 		expression: string,
 		signal: AbortSignal,
 	): Promise<JsonValue | undefined> {
-		const response = await this.cdp.send(
-			"Runtime.evaluate",
-			{ expression, returnByValue: true },
-			this.sessionId,
-			signal,
-		);
-		const result = response["result"];
-		return isJsonObject(result) ? result["value"] : undefined;
+		return this.enqueue(() => this.view.evaluate(expression), signal);
 	}
 
-	private addMedia(run: Run, raw: string) {
-		const url = artifactUrl(raw);
-		if (!url || validatePublicHttpUrl(url) || run.media.has(url)) return;
-		if (run.media.size >= maxGeneratedMediaUrls) {
-			run.truncated = true;
-			return;
-		}
-		run.media.add(url);
+	private async send(
+		method: string,
+		params: JsonObject = {},
+		signal?: AbortSignal,
+	): Promise<JsonObject> {
+		const value = await this.enqueue(
+			() => this.view.cdp(method, params),
+			signal,
+		);
+		if (!isJsonObject(value)) throw new Error(`CDP ${method}: invalid result`);
+		return value;
+	}
+
+	private async enqueue<T>(task: () => Promise<T>, signal?: AbortSignal) {
+		const pending = this.queue.then(task);
+		this.queue = pending.then(
+			() => undefined,
+			() => undefined,
+		);
+		return await awaitWithSignal(
+			pending,
+			signal ?? AbortSignal.timeout(15_000),
+		);
 	}
 
 	private failure(
@@ -751,12 +697,7 @@ export class ChromiumRenderer {
 
 	private metrics(renderMs: number, run = this.run): ChromiumRenderMetrics {
 		return {
-			launchMs: this.cdp.launchMs,
 			renderMs,
-			blockedRequests: run?.blocked ?? 0,
-			fulfilledRequests: run?.fulfilled ?? 0,
-			relayedBytes: run?.relayedBytes ?? 0,
-			mediaUrls: [...(run?.media ?? [])],
 			truncated: run?.truncated ?? false,
 		};
 	}
@@ -860,16 +801,6 @@ function shellFulfillment(
 	if (shell.body.includes("\uFFFD")) return;
 	const contentType = shell.contentType.split(";")[0]?.trim() || "text/html";
 	return { contentType: `${contentType}; charset=utf-8` };
-}
-
-function requestKey(sessionId: string | undefined, requestId: string) {
-	return `${sessionId ?? ""}\0${requestId}`;
-}
-
-function cdpId(response: JsonObject, key: string, label: string) {
-	const id = response[key];
-	if (!isJsonString(id)) throw new Error(`CDP omitted ${label} ID`);
-	return id;
 }
 
 function message(cause: unknown) {

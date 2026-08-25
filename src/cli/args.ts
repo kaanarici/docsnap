@@ -7,7 +7,7 @@ const maxListResults = 100;
 const minContextChars = 120;
 const maxContextChars = 1200;
 const fetchScopes = ["page", "site", "auto"] as const;
-const freshnessModes = ["auto", "reuse", "refresh", "force"] as const;
+const freshnessModes = ["reuse", "refresh", "force"] as const;
 const valueFlags = new Set([
 	"-o",
 	"--out",
@@ -39,7 +39,6 @@ Flags:
   --quiet                   suppress progress logs
   --stdin                   read the URL from stdin
   --user-agent <value>      custom User-Agent
-  --fail-on-low-quality     exit non-zero when low-quality pages are found
   --fail-on-injection-signal exit non-zero when injection signal pages are found
   -v, --version             show version
   -h, --help                show help
@@ -55,7 +54,7 @@ Flags:
   -m, --max <count>         max URLs; default 50, max ${maxGeneratedCapturePages}
   --concurrency <n>         fetch concurrency
   --no-cache                disable the shared fetch cache
-  --json                    include sources, errors, timing, and coverage limits
+  --json                    include sources, errors, and coverage limits
   --user-agent <value>      custom User-Agent`;
 
 const fetchUsage = `Usage:
@@ -65,9 +64,9 @@ Flags:
   -o, --out <dir>           local corpus dir; defaults to docsnap's normal slug
   -m, --max <count>         max pages for site captures; max ${maxGeneratedCapturePages}
   --scope <mode>            page, site, or auto; default auto
-  --freshness <mode>        auto, reuse, refresh, or force; default auto
-  --context-chars <count>   chars per cited snippet; default 500, max 1200
-  --include-injection       include injection-signal pages in ranked results
+  --freshness <mode>        reuse, refresh, or force; default refresh
+  --context-chars <count>   chars per cited snippet; default 400, max 1200
+  --include-injection       include concealed-injection pages in ranked results
   --no-cache                disable the shared fetch cache when capturing or refreshing
   --json                    print one machine-readable result
   --quiet                   suppress progress logs
@@ -98,10 +97,10 @@ const searchUsage = `Usage:
   docsnap search [root=./docsnap] <query> --all [flags]
 
 Flags:
-  --limit <count>           max matches; default 8, max 50
+  --limit <count>           max matches; default 5, max 50
   --glob <pattern>          restrict matches to output paths
   --all                     search every corpus under the given root
-  --include-injection       include injection-signal pages in ranked results
+  --include-injection       include concealed-injection pages in ranked results
   --json                    print one machine-readable result
 
 Put docsnap flags before --. Tokens after -- are literal query text.
@@ -191,7 +190,6 @@ export function parseArgs(argv: string[]): ParsedArgs {
 		else if (arg === "--json") cli.json = true;
 		else if (arg === "--quiet") cli.quiet = true;
 		else if (arg === "--user-agent") run.userAgent = readValue(argv, ++i, arg);
-		else if (arg === "--fail-on-low-quality") cli.failOnLowQuality = true;
 		else if (arg === "--fail-on-injection-signal")
 			cli.failOnInjectionSignal = true;
 		else throw new Error(`Unknown argument: ${arg}\n\n${usage}`);
@@ -247,8 +245,8 @@ function parseFetchArgs(argv: string[]): ParsedArgs {
 	const fetch: FetchInput = {
 		url: "",
 		scope: "auto",
-		freshness: "auto",
-		contextChars: 500,
+		freshness: "refresh",
+		contextChars: 400,
 		includeInjection: false,
 		cache: true,
 		json: false,
@@ -361,7 +359,7 @@ function parseSearchArgs(argv: string[]): ParsedArgs {
 	const search: SearchInput = {
 		outputDir: "",
 		query: "",
-		limit: 8,
+		limit: 5,
 		json: false,
 		all: false,
 		includeInjection: false,
@@ -425,7 +423,6 @@ function hasAllSearchRoot(positional: string[]) {
 const defaultCliOptions = (): CliOptions => ({
 	json: false,
 	quiet: false,
-	failOnLowQuality: false,
 	failOnInjectionSignal: false,
 });
 

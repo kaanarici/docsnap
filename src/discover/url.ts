@@ -8,7 +8,7 @@ import { canonicalUrlSearch, classifyDiscoveryResource } from "../core/url.ts";
 import { maxPublicUrlChars } from "../security/url.ts";
 
 export const ignoredExtension =
-	/\.(png|jpe?g|gif|svg|webp|ico|pdf|epub|zip|tar|gz|mp4|mp3|wav|woff2?|ttf|eot|css|js|mjs|map|rss|atom)$/i;
+	/\.(png|jpe?g|gif|svg|webp|ico|pdf|epub|zip|tar|tgz|gz|bz2|xz|zst|7z|rar|mp4|mp3|wav|woff2?|ttf|eot|css|js|mjs|map|rss|atom)$/i;
 const trackingParam =
 	/^(?:_ga|dclid|fbclid|gclid|mc_(?:cid|eid)|msclkid|utm(?:_.+)?)$/i;
 

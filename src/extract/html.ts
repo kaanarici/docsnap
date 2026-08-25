@@ -61,9 +61,8 @@ type HtmlClass =
 	| { kind: "blocked"; error: string };
 
 export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
-	const { metadata, result, source, wasSeed } = input;
-	const started = performance.now();
-	let resources: PageResources = { links: [], media: [] };
+	const { result, source, wasSeed } = input;
+	let resources: PageResources = { links: [] };
 	let kind: PageKind | undefined;
 	const page = (record: PageRecord): ExtractedPage => [
 		record,
@@ -75,7 +74,6 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 			failedRecord(
 				result,
 				source,
-				metadata,
 				result.error,
 				result.failureKind,
 				[],
@@ -84,11 +82,8 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 		);
 	if (result.document) {
 		kind = "binary";
-		const record = await extractDocument(input, started);
-		resources = {
-			links: record.links,
-			media: record.ok ? (record.media ?? []) : [],
-		};
+		const record = await extractDocument(input);
+		resources = { links: record.links };
 		return page(record);
 	}
 	if (shouldCheckFeedResponse(result) && isFeedResponse(result)) {
@@ -97,7 +92,6 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 			failedRecord(
 				result,
 				source,
-				metadata,
 				"feed resource used for discovery, not a content page",
 				"empty",
 				[],
@@ -122,7 +116,6 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 				recordFromExtracted(
 					input,
 					textAsset ? textAssetBody(result) : markdownAssetBody(result),
-					started,
 					signals,
 					kind,
 				),
@@ -134,7 +127,6 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 				failedRecord(
 					result,
 					source,
-					metadata,
 					"empty content",
 					"empty",
 					signals,
@@ -150,7 +142,6 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 				failedRecord(
 					result,
 					source,
-					metadata,
 					classified.error,
 					"blocked",
 					signals,
@@ -163,7 +154,6 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 				failedRecord(
 					result,
 					source,
-					metadata,
 					classified.error,
 					"empty",
 					signals,
@@ -177,7 +167,6 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 		const staticRecord = recordFromExtracted(
 			input,
 			extracted,
-			started,
 			signals,
 			classified.kind,
 		);
@@ -185,7 +174,6 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 			return page(staticRecord);
 		}
 		try {
-			const inlineStarted = performance.now();
 			const inline = extractInlineState(result.body, result.finalUrl, {
 				scripts,
 				title: extracted.title,
@@ -196,13 +184,11 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 				{
 					markdown: inline.markdown,
 					extractor: "inline-state",
-					inlineStateSource: inline.source,
 					title: titleFromMarkdown(
 						inline.markdown,
 						new URL(result.finalUrl).pathname,
 					),
 				},
-				inlineStarted,
 				signals,
 				classified.kind,
 			);
@@ -221,7 +207,6 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 			failedRecord(
 				result,
 				source,
-				metadata,
 				error instanceof Error ? error.message : String(error),
 				"extract",
 				signals,

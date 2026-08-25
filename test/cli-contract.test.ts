@@ -1,6 +1,22 @@
 import { expect, test } from "bun:test";
 import { parseArgs } from "../src/cli/args.ts";
 
+const entry = new URL("../src/entry.ts", import.meta.url).pathname;
+
+async function runCli(args: string[], env = process.env) {
+	const child = Bun.spawn([process.execPath, entry, ...args], {
+		env,
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [exitCode, stdout, stderr] = await Promise.all([
+		child.exited,
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+	]);
+	return { exitCode, stdout, stderr };
+}
+
 test("keeps tokens after -- as literal fetch question text", () => {
 	const parsed = parseArgs([
 		"fetch",
@@ -16,19 +32,9 @@ test("keeps tokens after -- as literal fetch question text", () => {
 });
 
 test("returns one JSON error and no stderr for an unsafe URL", async () => {
-	const child = Bun.spawn(
-		[
-			process.execPath,
-			new URL("../src/entry.ts", import.meta.url).pathname,
-			"http://127.0.0.1",
-			"--json",
-		],
-		{ stdout: "pipe", stderr: "pipe" },
-	);
-	const [exitCode, stdout, stderr] = await Promise.all([
-		child.exited,
-		new Response(child.stdout).text(),
-		new Response(child.stderr).text(),
+	const { exitCode, stdout, stderr } = await runCli([
+		"http://127.0.0.1",
+		"--json",
 	]);
 	expect(exitCode).toBe(1);
 	expect(stderr).toBe("");
@@ -51,26 +57,10 @@ test("quiet capture writes nothing", async () => {
 	});
 	const origin = new URL(server.url).origin;
 	try {
-		const child = Bun.spawn(
-			[
-				process.execPath,
-				new URL("../src/entry.ts", import.meta.url).pathname,
-				origin,
-				"--page",
-				"--dry-run",
-				"--quiet",
-			],
-			{
-				env: { ...process.env, DOCSNAP_ALLOW_TEST_HOST: origin },
-				stdout: "pipe",
-				stderr: "pipe",
-			},
+		const { exitCode, stdout, stderr } = await runCli(
+			[origin, "--page", "--dry-run", "--quiet"],
+			{ ...process.env, DOCSNAP_ALLOW_TEST_HOST: origin },
 		);
-		const [exitCode, stdout, stderr] = await Promise.all([
-			child.exited,
-			new Response(child.stdout).text(),
-			new Response(child.stderr).text(),
-		]);
 		expect(exitCode).toBe(0);
 		expect(stdout).toBe("");
 		expect(stderr).toBe("");

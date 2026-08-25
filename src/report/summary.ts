@@ -1,41 +1,25 @@
-import { cacheSummary } from "../cache/store.ts";
-import { captureSelectionHash } from "../core/config.ts";
-import { emptyRefreshSummary } from "../core/refresh.ts";
 import { type SnapshotStats, snapshotSchemaVersion } from "../core/snapshot.ts";
-import {
-	type DiscoveredUrl,
-	type DiscoveryResourceSeed,
-	type DiscoverySource,
-	type FailureKind,
-	type InjectionSignal,
-	type InlineStateSource,
-	injectionSignals,
-	inlineStateSources,
-	lowQualityConfidence,
-	type PageExtractor,
-	type PageKind,
-	type PageOutput,
-	type PageRecord,
-	type PipelineConfig,
-	pageKinds,
-	type RefreshSummary,
-	type RunSummary,
-	type SeedSummary,
+import type {
+	DiscoveryResourceSeed,
+	FailureKind,
+	PageOutput,
+	PageRecord,
+	PipelineConfig,
+	RefreshSummary,
+	RunSummary,
+	SeedSummary,
 } from "../core/types.ts";
 import { classifyDiscoveryResource } from "../core/url.ts";
+import { isLowQuality } from "../extract/quality.ts";
 
-const maxSummaryErrors = 20;
+const maxSummaryErrors = 3;
 
 export function buildSummary(
 	records: PageRecord[],
 	outputs: PageOutput[],
 	config: PipelineConfig,
-	attempted: DiscoveredUrl[],
-	deduped: number,
 	snapshot: SnapshotStats,
-	elapsedMs: number,
-	refresh: RefreshSummary = emptyRefreshSummary(),
-	cache = cacheSummary(config),
+	refresh?: RefreshSummary,
 	seedResource?: DiscoveryResourceSeed,
 	discoveryTruncated = false,
 	render?: RunSummary["render"],
@@ -47,35 +31,10 @@ export function buildSummary(
 	let lowQuality = 0;
 	let qualityWarnings = 0;
 	let injectionSignalPages = 0;
-	let hostRedirects = 0;
-	const redirectedHosts = new Map<
-		string,
-		{ from: string; to: string; count: number }
-	>();
-	const bySource = {
-		seed: 0,
-		llms: 0,
-		sitemap: 0,
-		feed: 0,
-		nav: 0,
-		crawl: 0,
-	} satisfies Record<DiscoverySource, number>;
-	const byExtractor = {
-		markdown: 0,
-		html: 0,
-		text: 0,
-		fallback: 0,
-		structured: 0,
-		"inline-state": 0,
-	} satisfies Record<PageExtractor, number>;
-	const byKind: Partial<Record<PageKind, number>> = {};
-	const byInlineStateSource: Partial<Record<InlineStateSource, number>> = {};
 	const byFailureKind: Partial<Record<FailureKind, number>> = {};
-	const byInjectionSignal: Partial<Record<InjectionSignal, number>> = {};
 	const errors: RunSummary["errors"] = [];
 
 	for (const record of records) {
-		bySource[record.source]++;
 		if (record.ok) {
 			if (config.maxExplicit || record.source !== "llms") maxEligible++;
 			continue;
@@ -92,33 +51,13 @@ export function buildSummary(
 	}
 
 	for (const record of outputs) {
-		byExtractor[record.extractor]++;
-		if (record.kind) {
-			byKind[record.kind] = (byKind[record.kind] ?? 0) + 1;
-		}
-		if (record.inlineStateSource) {
-			byInlineStateSource[record.inlineStateSource] =
-				(byInlineStateSource[record.inlineStateSource] ?? 0) + 1;
-		}
-		if (addRedirectedHosts(record, redirectedHosts)) hostRedirects++;
-		if (record.confidence < lowQualityConfidence) lowQuality++;
-		if (
-			record.qualityReasons.length &&
-			record.confidence >= lowQualityConfidence
-		)
-			qualityWarnings++;
-		if (record.injectionSignals.length) {
-			injectionSignalPages++;
-			for (const signal of record.injectionSignals) {
-				byInjectionSignal[signal] = (byInjectionSignal[signal] ?? 0) + 1;
-			}
-		}
+		if (isLowQuality(record.qualityReasons)) lowQuality++;
+		else if (record.qualityReasons.length) qualityWarnings++;
+		if (record.injectionSignals.length) injectionSignalPages++;
 	}
 	const reached = !config.pageOnly && maxEligible >= config.max;
-	const selectionHash = captureSelectionHash(config.topic);
 	const seed = seedSummary(records, outputs, config, seedResource);
 	const partial =
-		(failed > 0 && !reached) ||
 		!seed.included ||
 		lowQuality ||
 		stopReason !== undefined ||
@@ -142,42 +81,18 @@ export function buildSummary(
 		maxAppliesTo: config.maxExplicit ? "all" : "non-llms",
 		maxReached: reached,
 		discoveryTruncated,
-		discovered: attempted.length,
-		deduped,
 		written,
 		failed,
 		lowQuality,
 		qualityWarnings,
 		injectionSignalPages,
-		byInjectionSignal: orderedPartialCounts(
-			byInjectionSignal,
-			injectionSignals,
-		),
-		hostRedirects,
-		redirectedHosts: [...redirectedHosts.values()]
-			.sort((a, b) => b.count - a.count || a.from.localeCompare(b.from))
-			.slice(0, 10),
-		elapsedMs: Number(elapsedMs.toFixed(1)),
-		pagesPerSecond: Number(
-			(written / Math.max(elapsedMs / 1000, 0.001)).toFixed(2),
-		),
-		bySource,
-		byExtractor,
-		byInlineStateSource: orderedPartialCounts(
-			byInlineStateSource,
-			inlineStateSources,
-		),
 		byFailureKind,
 		errors,
-		refresh,
-		cache,
 	};
+	if (refresh?.enabled) summary.refresh = refresh;
 	if (failed > errors.length) summary.errorsOmitted = failed - errors.length;
 	if (stopReason) summary.stopReason = stopReason;
-	if (selectionHash) summary.selectionHash = selectionHash;
 	if (render) summary.render = render;
-	const countedByKind = orderedPartialCounts(byKind, pageKinds);
-	if (Object.keys(countedByKind).length) summary.byKind = countedByKind;
 	return summary;
 }
 function seedSummary(
@@ -289,42 +204,4 @@ function includedDiscoveryResourceSeed(
 		source: resource.source,
 		pagesWritten,
 	};
-}
-
-function addRedirectedHosts(
-	record: PageRecord,
-	pairs: Map<string, { from: string; to: string; count: number }>,
-) {
-	let changed = false;
-	for (const redirect of record.redirects) {
-		const from = hostKey(redirect.from);
-		const to = hostKey(redirect.to);
-		if (!from || !to || from === to) continue;
-		changed = true;
-		const key = `${from}\0${to}`;
-		const pair = pairs.get(key) ?? { from, to, count: 0 };
-		pair.count++;
-		pairs.set(key, pair);
-	}
-	return changed;
-}
-
-function hostKey(raw: string) {
-	try {
-		return new URL(raw).hostname.toLowerCase().replace(/^www\./, "");
-	} catch {
-		return "";
-	}
-}
-
-function orderedPartialCounts<T extends string>(
-	counts: Partial<Record<T, number>>,
-	keys: readonly T[],
-) {
-	const out: Partial<Record<T, number>> = {};
-	for (const key of keys) {
-		const count = counts[key];
-		if (count) out[key] = count;
-	}
-	return out;
 }

@@ -9,7 +9,6 @@ type RankedSnippet = {
 	contentHash: string;
 	extractor: string;
 	score: number;
-	confidence: number;
 	lineStart: number;
 	lineEnd: number;
 	text: string;
@@ -177,7 +176,6 @@ export function rankPages(
 			contentHash: doc.record.contentHash ?? hashContent(doc.body),
 			extractor: doc.record.extractor ?? "unknown",
 			score,
-			confidence: doc.record.confidence ?? 0,
 			lineStart: snippet.lineStart,
 			lineEnd: snippet.lineEnd,
 			text: snippet.text,
@@ -269,11 +267,7 @@ function scoreDoc(
 		const bodyScore = idf * ((tf * (bm25K1 + 1)) / (tf + norm));
 		score += bodyScore + idf * fieldHit;
 	}
-	if (score <= 0) return 0;
-	const confidence = doc.record.confidence ?? 0.5;
-	const confidencePenalty = 0.5 + 0.5 * clamp01(confidence);
-	const injectionPenalty = doc.record.injectionSignals.length > 0 ? 0.6 : 1;
-	return score * confidencePenalty * injectionPenalty;
+	return score;
 }
 
 function toPageDoc(record: PageRecord, source: string): PageDoc {
@@ -366,9 +360,4 @@ function splitFrontmatter(source: string): SplitFrontmatter {
 		},
 		body: source.slice(bodyStart),
 	};
-}
-
-function clamp01(value: number): number {
-	if (Number.isNaN(value)) return 0;
-	return Math.max(0, Math.min(1, value));
 }

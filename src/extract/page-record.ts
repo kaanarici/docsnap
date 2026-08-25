@@ -1,8 +1,5 @@
-import {
-	maxGeneratedCapturePages,
-	maxGeneratedMediaUrls,
-} from "../core/config.ts";
-import { markdownImageHrefs, markdownLinkHrefs } from "../core/markdown.ts";
+import { maxGeneratedCapturePages } from "../core/config.ts";
+import { markdownLinkHrefs } from "../core/markdown.ts";
 import { hashContent } from "../core/snapshot.ts";
 import { wordCount } from "../core/text.ts";
 import type {
@@ -10,7 +7,6 @@ import type {
 	FailureKind,
 	FetchedUrl,
 	FetchResult,
-	InlineStateSource,
 	PageExtractor,
 	PageKind,
 	PageRecord,
@@ -24,13 +20,12 @@ import {
 	reportedNotFoundError,
 } from "./app-shell.ts";
 import { cleanMarkdown } from "./markdown.ts";
-import { scoreMarkdown } from "./quality.ts";
+import { qualityReasons } from "./quality.ts";
 import { titleFromContent } from "./title.ts";
 
 export type ExtractedBody = {
 	markdown: string;
 	extractor: PageExtractor;
-	inlineStateSource?: InlineStateSource;
 	title?: string;
 	canonicalUrl?: string;
 	truncated?: boolean;
@@ -40,11 +35,10 @@ export type ExtractedBody = {
 export function recordFromExtracted(
 	input: FetchedUrl,
 	extracted: ExtractedBody,
-	started: number,
 	rawSignals: PageRecord["injectionSignals"],
 	kind: PageKind,
 ): PageRecord {
-	const { metadata, result, source, wasSeed } = input;
+	const { result, source, wasSeed } = input;
 	const markdown = cleanMarkdown(extracted.markdown);
 	const title = titleFromContent(markdown, extracted.title);
 	const shell = kind === "app-shell";
@@ -54,15 +48,7 @@ export function recordFromExtracted(
 		failureKind: FailureKind,
 		injectionSignals = rawSignals,
 	) =>
-		failedRecord(
-			result,
-			source,
-			metadata,
-			error,
-			failureKind,
-			injectionSignals,
-			wasSeed,
-		);
+		failedRecord(result, source, error, failureKind, injectionSignals, wasSeed);
 	if (!markdown) return fail(emptyError, "empty");
 	if (isLoadingShellPlaceholder(markdown, shell)) {
 		return fail(shellError, "empty");
@@ -84,31 +70,24 @@ export function recordFromExtracted(
 			(input) => (input ? scanMarkdownForInjectionSignals(input) : []),
 		),
 	]);
-	const quality = scoreMarkdown(markdown, title);
+	const quality = qualityReasons(markdown, title);
 	if (extracted.extractor === "inline-state") {
-		quality.confidence = Math.min(quality.confidence, 0.8);
-		quality.reasons.push("inline state may omit content");
+		quality.push("inline state may omit content");
 	}
 	if (extracted.truncated) {
-		quality.confidence = Math.min(quality.confidence, 0.55);
-		quality.reasons.push("truncated extraction");
+		quality.push("truncated extraction");
 	}
 	const links = publicHrefs(
 		markdownLinkHrefs(markdown, maxGeneratedCapturePages),
 		result.finalUrl,
 		maxGeneratedCapturePages,
 	);
-	const media = publicHrefs(
-		markdownImageHrefs(markdown, maxGeneratedMediaUrls),
-		result.finalUrl,
-		maxGeneratedMediaUrls,
-	);
 	if (
 		isChromeOnlyContent(
 			markdown,
 			title,
 			extracted.extractor,
-			quality,
+			{ reasons: quality },
 			links.length,
 		)
 	) {
@@ -117,14 +96,6 @@ export function recordFromExtracted(
 			"empty",
 			injectionSignals,
 		);
-	}
-	if (
-		(extracted.extractor === "fallback" ||
-			extracted.extractor === "structured") &&
-		wordCount(markdown) < 20 &&
-		quality.reasons.includes("thin content")
-	) {
-		quality.confidence = Math.min(quality.confidence, 0.55);
 	}
 	const page: Extract<PageRecord, { ok: true }> = {
 		ok: true,
@@ -138,26 +109,14 @@ export function recordFromExtracted(
 		status: result.status,
 		contentHash: hashContent(markdown),
 		extractor: extracted.extractor,
-		confidence: quality.confidence,
-		qualityReasons: quality.reasons,
+		qualityReasons: quality,
 		source,
-		timings: {
-			fetchMs: result.fetchMs,
-			extractMs: performance.now() - started,
-			writeMs: 0,
-		},
 	};
 	if (result.etag) page.etag = result.etag;
 	if (result.lastModified) page.lastModified = result.lastModified;
-	if (metadata?.publishedAt) page.publishedAt = metadata.publishedAt;
-	if (metadata?.updatedAt) page.updatedAt = metadata.updatedAt;
 	if (extracted.canonicalUrl) page.canonicalUrl = extracted.canonicalUrl;
 	if (title) page.title = title;
-	if (media.length) page.media = media;
 	if (wasSeed) page.wasSeed = true;
-	if (extracted.inlineStateSource) {
-		page.inlineStateSource = extracted.inlineStateSource;
-	}
 	page.kind = kind;
 	return page;
 }
@@ -199,7 +158,6 @@ function isChromeOnlyContent(
 export function failedRecord(
 	result: FetchResult,
 	source: DiscoverySource,
-	metadata: FetchedUrl["metadata"],
 	error: string,
 	failureKind: FailureKind = "extract",
 	injectionSignals: PageRecord["injectionSignals"] = [],
@@ -217,17 +175,13 @@ export function failedRecord(
 		status: result.status,
 		contentHash: "",
 		extractor: "none",
-		confidence: 0,
 		qualityReasons: [],
 		source,
 		error,
 		failureKind,
-		timings: { fetchMs: result.fetchMs, extractMs: 0, writeMs: 0 },
 	};
 	if (result.etag) page.etag = result.etag;
 	if (result.lastModified) page.lastModified = result.lastModified;
-	if (metadata?.publishedAt) page.publishedAt = metadata.publishedAt;
-	if (metadata?.updatedAt) page.updatedAt = metadata.updatedAt;
 	if (wasSeed) page.wasSeed = true;
 	return page;
 }

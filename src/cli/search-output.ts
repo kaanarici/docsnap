@@ -24,27 +24,23 @@ export function jsonSearchResult(input: SearchInput, result: SearchResult) {
 		matchCount: result.matches.length,
 		outputDir: input.outputDir,
 		query: input.query,
-		all: input.all,
-		corporaScanned: result.corporaScanned,
-		corporaSearched: result.corporaSearched,
-		corporaSkipped: result.corporaSkipped,
-		corporaTruncated: result.corporaTruncated,
-		injectionFiltered: result.injectionFiltered,
+		all: input.all || undefined,
+		corporaScanned: input.all ? result.corporaScanned : undefined,
+		corporaSearched: input.all ? result.corporaSearched : undefined,
+		corporaSkipped: input.all ? result.corporaSkipped : undefined,
+		corporaTruncated: input.all ? result.corporaTruncated : undefined,
+		injectionFiltered: result.injectionFiltered || undefined,
 		limited: result.limited,
 		truncated: result.truncated,
 		matches: result.matches.map(({ corpusDir, match }) => {
 			const item = {
 				citationId: displayCitation(input, corpusDir, match),
-				corpusDir,
+				corpusDir: input.all ? corpusDir : undefined,
 				path: match.record.outputPath,
 				url: match.record.url,
 				finalUrl: match.record.finalUrl,
 				lineStart: match.lineStart,
 				lineEnd: match.lineEnd,
-				score: roundScore(match.score),
-				confidence: match.confidence,
-				extractor: match.extractor,
-				contentHash: match.contentHash,
 				snippet: match.text,
 			};
 			const titled = match.record.title
@@ -81,7 +77,7 @@ export function textSearchResult(input: SearchInput, result: SearchResult) {
 	}
 	if (result.injectionFiltered) {
 		lines.push(
-			`docsnap: excluded ${countLabel(result.injectionFiltered, "injection-signal page")}`,
+			`docsnap: excluded ${countLabel(result.injectionFiltered, "concealed-injection page")}`,
 		);
 	}
 	for (const { corpusDir, match } of result.matches) {
@@ -123,8 +119,4 @@ function displayCitation(
 		match.contentHash,
 	);
 	return input.all ? `${corpusDir.replace(/\/+$/g, "")}/${id}` : id;
-}
-
-function roundScore(score: number) {
-	return Math.round(score * 1000) / 1000;
 }

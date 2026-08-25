@@ -6,14 +6,13 @@ import type { MapInput } from "./args.ts";
 
 export async function runMap(input: MapInput) {
 	const config = buildPipelineConfig(input.config);
-	const started = performance.now();
 	let discovery: Awaited<ReturnType<typeof discoverMap>>;
 	try {
 		discovery = await discoverMap(config);
 	} finally {
 		await pruneCache(config);
 	}
-	const errors = discovery.urls.flatMap((entry) =>
+	const failures = discovery.urls.flatMap((entry) =>
 		entry.fetched && !entry.fetched.ok
 			? [
 					{
@@ -24,6 +23,7 @@ export async function runMap(input: MapInput) {
 				]
 			: [],
 	);
+	const errors = failures.slice(0, 3);
 	const entries = discovery.urls
 		.filter((entry) => !entry.fetched || entry.fetched.ok)
 		.map(({ url, source }) => ({ url, source }));
@@ -36,7 +36,7 @@ export async function runMap(input: MapInput) {
 		maxReached: entries.length >= config.max,
 		entries,
 		errors,
-		elapsedMs: Number((performance.now() - started).toFixed(1)),
+		errorsOmitted: failures.length - errors.length || undefined,
 	};
 	const result = discovery.render
 		? { ...resultBase, render: discovery.render }

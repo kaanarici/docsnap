@@ -29,7 +29,7 @@ async function commitRemoval(prior: PriorState, root: string) {
 	const staged = await stagePages([], config);
 	try {
 		await stageStalePages(staged, prior, config);
-		const summary = buildSummary([], [], config, [], 0, snapshotStats([]), 1);
+		const summary = buildSummary([], [], config, snapshotStats([]));
 		await commitStagedOutput(staged, [], summary, config);
 	} finally {
 		await discardStagedOutput(staged);

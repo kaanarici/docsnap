@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { hashContent, snapshotStats } from "../src/core/snapshot.ts";
 import type {
 	FetchResult,
+	PageFailure,
 	PageOutput,
 	PathedPage,
 	PipelineConfig,
@@ -70,7 +71,6 @@ export function okFetch(
 		status: 200,
 		contentType: "text/html",
 		body,
-		fetchMs: 1,
 		redirects: [],
 		fetchedAt: "2026-01-01T00:00:00.000Z",
 		...overrides,
@@ -87,7 +87,6 @@ export function testPage(
 		status: 200,
 		source: "seed" as const,
 		wasSeed: true as const,
-		timings: { fetchMs: 1, extractMs: 1, writeMs: 0 },
 		redirects: [],
 		fetchedAt: "2026-01-01T00:00:00.000Z",
 		injectionSignals: [],
@@ -96,12 +95,32 @@ export function testPage(
 		links: [],
 		contentHash: hashContent(markdown),
 		extractor: "markdown" as const,
-		confidence: 1,
 		qualityReasons: [],
 		outputPath: "guide.md",
 	};
 	const rendered = renderPage(base);
 	return { ...base, rendered, outputHash: hashContent(rendered) };
+}
+
+export function testFailure(overrides: Partial<PageFailure> = {}): PageFailure {
+	return {
+		ok: false,
+		url: "https://docs.example.com/empty",
+		finalUrl: "https://docs.example.com/empty",
+		status: 200,
+		source: "crawl",
+		redirects: [],
+		fetchedAt: "2026-01-01T00:00:00.000Z",
+		injectionSignals: [],
+		markdown: "",
+		links: [],
+		contentHash: "",
+		extractor: "none",
+		qualityReasons: [],
+		error: "empty content",
+		failureKind: "empty",
+		...overrides,
+	};
 }
 
 export async function writeRunMetadata(
@@ -118,15 +137,7 @@ export async function writeValidCorpus(outputDir: string) {
 		{ path: page.outputPath, body: page.rendered },
 	]);
 	const config = testConfig(outputDir);
-	const summary = buildSummary(
-		[page],
-		[page],
-		config,
-		[{ url: page.url, source: "seed", wasSeed: true }],
-		0,
-		snapshot,
-		1,
-	);
+	const summary = buildSummary([page], [page], config, snapshot);
 	await commitRun([page], [page], summary, config);
 	return { config, page, summary };
 }

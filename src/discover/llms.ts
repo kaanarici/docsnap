@@ -195,7 +195,7 @@ function corpusLinks(
 		(a, b) =>
 			linkRank(a, base, requestedScope) - linkRank(b, base, requestedScope),
 	);
-	return orderByTopic(scopeRanked, base, requestedScope, config.topic);
+	return orderByTopic(scopeRanked, base, requestedScope);
 }
 
 function corpusEntryLinks(body: string, base: string, limit: number) {

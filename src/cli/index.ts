@@ -50,7 +50,7 @@ export async function runCli(argv: string[]): Promise<void> {
 		if (process.exitCode === 130 || process.exitCode === 143) return;
 		if (wantsJsonError(argv)) {
 			process.stdout.write(
-				`${JSON.stringify({ ok: false, status: "error", error: message })}\n`,
+				`${JSON.stringify({ ok: false, status: "error", error: message.split("\n", 1)[0] ?? message })}\n`,
 			);
 		} else {
 			process.stderr.write(`${terminalText(message)}\n`);

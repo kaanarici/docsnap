@@ -23,7 +23,6 @@ import {
 	byteSources,
 	discoverySources,
 	filterInjectionSignals,
-	inlineStateSources,
 	pageExtractors,
 	pageKinds,
 } from "../core/types.ts";
@@ -33,7 +32,7 @@ import { runFiles } from "./files.ts";
 
 export type PriorPage = Omit<
 	PageSuccess,
-	"fetchedAt" | "links" | "markdown" | "media" | "rendered" | "timings"
+	"fetchedAt" | "links" | "markdown" | "rendered"
 > & {
 	outputPath: string;
 	fetchedAt?: string;
@@ -41,7 +40,6 @@ export type PriorPage = Omit<
 	links?: string[];
 	linksCount?: number;
 	linksTruncated?: true;
-	media?: string[];
 };
 
 export type PriorState = {
@@ -100,7 +98,7 @@ export function conditionalRequestForPrior(
 	const record = prior.find(input);
 	if (
 		!record ||
-		record.render ||
+		record.byteSource === "chrome" ||
 		record.linksTruncated ||
 		(record.linksCount ?? 0) > (record.links?.length ?? 0) ||
 		(!record.etag && !record.lastModified)
@@ -119,7 +117,6 @@ export async function recoverPriorPage(
 	config: PipelineConfig,
 	prior: PriorPage,
 	updates: {
-		fetchMs: number;
 		etag?: string;
 		lastModified?: string;
 		fetchedAt?: string;
@@ -147,11 +144,6 @@ export async function recoverPriorPage(
 		markdown,
 		fetchedAt:
 			record.fetchedAt ?? updates.fetchedAt ?? new Date().toISOString(),
-		timings: {
-			fetchMs: updates.fetchMs,
-			extractMs: 0,
-			writeMs: 0,
-		},
 	};
 	if (updates.etag) recovered.etag = updates.etag;
 	if (updates.lastModified) recovered.lastModified = updates.lastModified;
@@ -244,7 +236,6 @@ export function parseReusablePrior(
 		resolveSafeRelativePath(config.outDir, value["outputPath"]) === undefined ||
 		!isJsonString(value["contentHash"]) ||
 		!isJsonNumber(value["status"]) ||
-		!isJsonNumber(value["confidence"]) ||
 		!source ||
 		!extractor ||
 		!redirects
@@ -258,7 +249,6 @@ export function parseReusablePrior(
 		outputPath: value["outputPath"],
 		contentHash: value["contentHash"],
 		status: value["status"],
-		confidence: value["confidence"],
 		source,
 		extractor,
 		redirects,
@@ -276,13 +266,11 @@ export function parseReusablePrior(
 		"title",
 		"etag",
 		"lastModified",
-		"publishedAt",
-		"updatedAt",
 	] as const) {
 		const item = value[key];
 		if (isJsonString(item)) record[key] = item;
 	}
-	for (const key of ["aliases", "links", "media"] as const) {
+	for (const key of ["aliases", "links"] as const) {
 		const items = stringArray(value[key]);
 		if (items) record[key] = items;
 	}
@@ -290,16 +278,6 @@ export function parseReusablePrior(
 	if (kind) record.kind = kind;
 	const byteSource = jsonEnum(value["byteSource"], byteSources);
 	if (byteSource) record.byteSource = byteSource;
-	const inlineStateSource = jsonEnum(
-		value["inlineStateSource"],
-		inlineStateSources,
-	);
-	if (inlineStateSource) record.inlineStateSource = inlineStateSource;
-	if (value["render"] !== undefined) {
-		const render = parseRender(value["render"]);
-		if (!render) return undefined;
-		record.render = render;
-	}
 	return record;
 }
 
@@ -333,31 +311,6 @@ function parseRedirect(value: JsonValue): RedirectHop | undefined {
 	};
 	if (isJsonNumber(value["status"])) redirect.status = value["status"];
 	return redirect;
-}
-
-function parseRender(
-	value: JsonValue | undefined,
-): NonNullable<PriorPage["render"]> | undefined {
-	if (
-		!isJsonObject(value) ||
-		value["renderer"] !== "chrome-cdp" ||
-		!isJsonNumber(value["renderMs"]) ||
-		!isJsonNumber(value["blockedRequests"]) ||
-		!isJsonNumber(value["fulfilledRequests"]) ||
-		!isJsonNumber(value["relayedBytes"]) ||
-		(value["truncated"] !== undefined && value["truncated"] !== true)
-	) {
-		return undefined;
-	}
-	const render: NonNullable<PriorPage["render"]> = {
-		renderer: "chrome-cdp",
-		renderMs: value["renderMs"],
-		blockedRequests: value["blockedRequests"],
-		fulfilledRequests: value["fulfilledRequests"],
-		relayedBytes: value["relayedBytes"],
-	};
-	if (value["truncated"] === true) render.truncated = true;
-	return render;
 }
 
 function stringArray(value: JsonValue | undefined): string[] | undefined {

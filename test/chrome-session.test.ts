@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import type { PageRecord } from "../src/core/types.ts";
 import {
-	chromeBudgetMs,
 	chromeStopped,
 	createChromeSession,
 	maxConsecutiveRenderMisses,
@@ -9,21 +8,13 @@ import {
 	needsChromeFetch,
 	skipChrome,
 } from "../src/render/session.ts";
-import { okFetch, testConfig } from "./fixtures.ts";
+import { okFetch } from "./fixtures.ts";
 
-test("gives rendered pages enough time without allowing unbounded runs", () => {
-	const config = testConfig("unused", { max: 10, timeoutMs: 10_000 });
-	expect(chromeBudgetMs(config)).toBe(50_000);
-	expect(chromeBudgetMs(config, 100)).toBe(120_000);
-});
-
-test("selects Chrome from app-shell kind and empty shell failures, not confidence", () => {
-	const shell = success({ kind: "app-shell", confidence: 0.95 });
+test("selects Chrome from app-shell kind and empty shell failures", () => {
+	const shell = success({ kind: "app-shell" });
 	expect(needsChrome(shell, false)).toBe(true);
-	expect(
-		needsChrome(success({ kind: "docs-html", confidence: 0.2 }), true),
-	).toBe(false);
-	expect(needsChrome(success({ confidence: 0.95 }), true)).toBe(true);
+	expect(needsChrome(success({ kind: "docs-html" }), true)).toBe(false);
+	expect(needsChrome(success(), true)).toBe(true);
 	expect(needsChrome(failure("empty"), true)).toBe(true);
 	expect(needsChrome(failure("empty"), false)).toBe(false);
 	expect(needsChrome(failure("blocked"), true)).toBe(false);
@@ -71,7 +62,6 @@ function success(
 		finalUrl: "https://docs.example.com/app",
 		status: 200,
 		source: "seed",
-		timings: { fetchMs: 1, extractMs: 1, writeMs: 0 },
 		redirects: [],
 		fetchedAt: "2026-01-01T00:00:00.000Z",
 		injectionSignals: [],
@@ -79,7 +69,6 @@ function success(
 		links: [],
 		contentHash: "hash",
 		extractor: "inline-state",
-		confidence: 0.9,
 		qualityReasons: [],
 		...overrides,
 	};
@@ -94,7 +83,6 @@ function failure(
 		finalUrl: "https://docs.example.com/app",
 		status: 200,
 		source: "seed",
-		timings: { fetchMs: 1, extractMs: 1, writeMs: 0 },
 		redirects: [],
 		fetchedAt: "2026-01-01T00:00:00.000Z",
 		injectionSignals: [],
@@ -102,7 +90,6 @@ function failure(
 		links: [],
 		contentHash: "",
 		extractor: "none",
-		confidence: 0,
 		qualityReasons: [],
 		error: "app shell without static text",
 		failureKind,

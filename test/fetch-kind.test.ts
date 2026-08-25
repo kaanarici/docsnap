@@ -143,7 +143,6 @@ test("failed records the caller kind instead of sniffing the error", () => {
 			"https://docs.example.com/page.md",
 			"https://docs.example.com/page",
 			404,
-			performance.now(),
 			"blocked by robots.txt",
 			"blocked",
 		),

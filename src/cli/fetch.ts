@@ -4,11 +4,6 @@ import {
 	buildRefreshConfig,
 	type ConfigInput,
 } from "../core/config.ts";
-import {
-	corpusFreshness,
-	corpusIsStale,
-	type FreshnessDecision,
-} from "../core/freshness.ts";
 import { identityKeys } from "../core/identity.ts";
 import { citationId, terminalText } from "../core/text.ts";
 import type { FailureKind, PipelineConfig, RunSummary } from "../core/types.ts";
@@ -27,10 +22,12 @@ import {
 	searchCorpus,
 } from "../corpus/index.ts";
 import { runFiles } from "../output/files.ts";
+import { hasConcealedInjection } from "../security/injection.ts";
 import type { FetchInput } from "./args.ts";
 import { logLine } from "./progress.ts";
 
 type FetchScope = "page" | "site";
+type FreshnessDecision = "captured" | "refreshed" | "reused";
 type FetchCounts = {
 	written: number;
 	failed: number;
@@ -47,7 +44,6 @@ type FetchBaseResult = {
 	seedUrl: string;
 	scope: FetchScope;
 	counts: FetchCounts;
-	memory: ReturnType<typeof corpusFreshness>;
 	maxPages: number;
 	maxReached: boolean;
 	stopReason?: RunSummary["stopReason"];
@@ -90,7 +86,7 @@ type LocatedCorpus = Corpus & { outputDir: string };
 
 const topPagesLimit = 10;
 const autoSiteCap = 25;
-const defaultSnippets = 8;
+const defaultSnippets = 5;
 
 export class CorpusMismatchError extends Error {
 	readonly failureKind = "corpus_mismatch";
@@ -142,15 +138,11 @@ async function fetchResult(input: FetchInput): Promise<FetchResult> {
 	const prior = existing?.summary ?? null;
 	const action: FreshnessDecision = !prior
 		? "captured"
-		: input.freshness === "auto"
-			? corpusIsStale(prior)
+		: input.freshness === "reuse"
+			? "reused"
+			: input.freshness === "refresh"
 				? "refreshed"
-				: "reused"
-			: input.freshness === "reuse"
-				? "reused"
-				: input.freshness === "refresh"
-					? "refreshed"
-					: "captured";
+				: "captured";
 	const progress = input.quiet || input.json ? undefined : logLine;
 	let corpus: Corpus | null = existing;
 	if (action !== "reused" || !corpus) {
@@ -181,7 +173,6 @@ async function fetchResult(input: FetchInput): Promise<FetchResult> {
 		seedUrl: summary.seedUrl,
 		scope: summary.captureMode,
 		counts: summaryCounts(summary),
-		memory: corpusFreshness(input.freshness, action, summary, prior),
 		maxPages: summary.max,
 		maxReached: summary.maxReached,
 		paths: {
@@ -210,7 +201,7 @@ async function fetchResult(input: FetchInput): Promise<FetchResult> {
 				(record) =>
 					record.ok &&
 					Boolean(record.outputPath) &&
-					record.injectionSignals.length > 0,
+					hasConcealedInjection(record.injectionSignals),
 			).length;
 	return {
 		...baseResult,
@@ -270,11 +261,6 @@ function textFetchResult(result: FetchResult): string {
 	if (result.status !== "ok" || issues.length) {
 		lines.push(
 			`docsnap: status ${result.status}${issues.length ? `; ${issues.join("; ")}` : ""}`,
-		);
-	}
-	if (result.memory.stale) {
-		lines.push(
-			`docsnap: reused stale corpus; age ${result.memory.ageSeconds}s`,
 		);
 	}
 	if (result.stopReason) lines.push(`docsnap: stopped ${result.stopReason}`);

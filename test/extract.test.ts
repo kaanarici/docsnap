@@ -26,8 +26,6 @@ test("classifies markdown and text assets onto dedicated plans", async () => {
 		extractor: "text",
 	});
 	expect(jsonShell).toBe(false);
-	if (!json.ok) throw new Error("json extract failed");
-	expect(json.confidence).toBeGreaterThan(0);
 });
 
 test("rejects a route fallback that reports a missing page", async () => {
@@ -97,12 +95,10 @@ test("skips Defuddle for app shells and recovers inline state only", async () =>
 		ok: true,
 		kind: "app-shell",
 		extractor: "inline-state",
-		inlineStateSource: "rsc",
 	});
 	expect(inlineShell).toBe(true);
 	if (!inline.ok) throw new Error("inline-state extract failed");
 	expect(inline.markdown).toContain("Install the command line package");
-	expect(inline.confidence).toBe(0.8);
 	expect(inline.qualityReasons).toContain("inline state may omit content");
 });
 
@@ -114,7 +110,7 @@ test("runs structured-only extract for docs HTML", async () => {
 			.map((letter) => `<a href="/${letter}">${letter}</a>`)
 			.join(
 				"",
-			)}</nav><main><h1>CLI</h1><h2>Install</h2><pre>bun add -g docsnap</pre><p>Run the capture command against a public documentation site and write local Markdown files.</p><p><a href="https://raw.githubusercontent.com/example/docs/main/config.yaml">Download the example configuration</a>.</p><h2>Search</h2><p>Rank local hits with source URLs, titles, and the recorded confidence for each captured page.</p></main></div></body></html>`,
+			)}</nav><main><h1>CLI</h1><h2>Install</h2><pre>bun add -g docsnap</pre><p>Run the capture command against a public documentation site and write local Markdown files.</p><p><a href="https://raw.githubusercontent.com/example/docs/main/config.yaml">Download the example configuration</a>.</p><h2>Search</h2><p>Rank local hits with source URLs, titles, and quality warnings for each captured page.</p></main></div></body></html>`,
 	);
 	expect(record).toMatchObject({
 		ok: true,
@@ -124,7 +120,6 @@ test("runs structured-only extract for docs HTML", async () => {
 	expect(shell).toBe(false);
 	if (!record.ok) throw new Error("docs extract failed");
 	expect(record.markdown).toContain("CLI");
-	expect(record.confidence).toBeGreaterThan(0);
 });
 
 test("uses the page heading instead of a shared site title", async () => {
@@ -180,7 +175,6 @@ test("runs Defuddle once for article HTML without swapping console", async () =>
 	expect(shell).toBe(false);
 	if (!record.ok) throw new Error("article extract failed");
 	expect(record.markdown).toContain("Hash-verified documentation");
-	expect(record.confidence).toBeGreaterThan(0);
 });
 
 test("keeps Defuddle article text when chrome-only recovery is thin", async () => {

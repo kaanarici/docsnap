@@ -26,7 +26,7 @@ function frontier(links: string[], attemptLimit = 4, truncated = false) {
 		allowResource: async () => true,
 		llmsOptions: { cache: new Map() },
 		seedResponse,
-		seedResources: { links, nav: [], media: [], truncated },
+		seedResources: { links, nav: [], truncated },
 		seedIsLanguageSelector: false,
 		finalSeed: seed,
 		indexUrls: [],

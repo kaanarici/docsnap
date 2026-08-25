@@ -34,7 +34,6 @@ test("captures a document URL through the normal corpus contract", async () => {
 		written: 1,
 		failed: 0,
 		injectionSignalPages: 1,
-		byExtractor: { markdown: 1 },
 	});
 	expect(page).toMatchObject({
 		ok: true,

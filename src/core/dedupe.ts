@@ -1,4 +1,4 @@
-import { maxGeneratedCapturePages, maxGeneratedMediaUrls } from "./config.ts";
+import { maxGeneratedCapturePages } from "./config.ts";
 import { identityKeys, identityUrls } from "./identity.ts";
 import { wordCount } from "./text.ts";
 import {
@@ -7,15 +7,9 @@ import {
 	type PageSuccess,
 } from "./types.ts";
 
-type DedupeResult = {
-	records: PageRecord[];
-	deduped: number;
-};
-
-export function dedupeRecords(records: PageRecord[]): DedupeResult {
+export function dedupeRecords(records: PageRecord[]) {
 	const out: PageRecord[] = [];
 	const byKey = new Map<string, PageSuccess>();
-	let deduped = 0;
 
 	for (const record of records) {
 		if (!record.ok) {
@@ -36,7 +30,6 @@ export function dedupeRecords(records: PageRecord[]): DedupeResult {
 			mergeRecord(survivor, duplicate);
 			if (survivor !== target) out[out.indexOf(target)] = survivor;
 			for (const key of identityKeys(survivor)) byKey.set(key, survivor);
-			deduped++;
 			continue;
 		}
 
@@ -48,7 +41,7 @@ export function dedupeRecords(records: PageRecord[]): DedupeResult {
 		if (record.ok || record.failureKind !== "empty") return true;
 		return !identityKeys(record).some((key) => byKey.has(key));
 	});
-	return { records: retained, deduped: deduped + out.length - retained.length };
+	return retained;
 }
 
 function mergeRecord(target: PageSuccess, duplicate: PageSuccess) {
@@ -62,17 +55,9 @@ function mergeRecord(target: PageSuccess, duplicate: PageSuccess) {
 	target.links = [...new Set([...target.links, ...duplicate.links])]
 		.slice(0, maxGeneratedCapturePages)
 		.sort();
-	const media = [
-		...new Set([...(target.media ?? []), ...(duplicate.media ?? [])]),
-	].slice(0, maxGeneratedMediaUrls);
-	if (media.length) target.media = media.sort();
 	target.injectionSignals = [
 		...new Set([...target.injectionSignals, ...duplicate.injectionSignals]),
 	];
-	if (!target.publishedAt && duplicate.publishedAt)
-		target.publishedAt = duplicate.publishedAt;
-	if (!target.updatedAt && duplicate.updatedAt)
-		target.updatedAt = duplicate.updatedAt;
 }
 
 function betterRecord(a: PageSuccess, b: PageSuccess) {
@@ -85,7 +70,6 @@ function recordScore(record: PageSuccess) {
 		extractorScore(record.extractor) * 10_000 +
 		discoverySourceScore(record.source) * 1_000 +
 		(record.wasSeed ? 500 : 0) +
-		record.confidence * 100 +
 		Math.min(wordCount(record.markdown), 2_000) / 100
 	);
 }

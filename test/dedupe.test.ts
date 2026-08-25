@@ -18,7 +18,7 @@ test("keeps the requested seed record on an identity collision", () => {
 		url: seedUrl,
 		finalUrl: seedUrl,
 	};
-	const [survivor] = dedupeRecords([category, seed]).records;
+	const [survivor] = dedupeRecords([category, seed]);
 
 	expect(survivor?.ok).toBe(true);
 	if (!survivor?.ok) return;
@@ -36,10 +36,7 @@ test("keeps the requested seed record on an identity collision", () => {
 		[output],
 		[output],
 		testConfig("unused", { seedUrl }),
-		[{ url: seedUrl, source: "seed", wasSeed: true }],
-		1,
 		snapshotStats([{ path: output.outputPath, body: output.rendered }]),
-		1,
 	);
 	expect(summary.seed.redirected).toBeUndefined();
 });

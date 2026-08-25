@@ -17,6 +17,7 @@ import {
 	buildRankInput,
 	rankPages,
 } from "../search/rank.ts";
+import { hasConcealedInjection } from "../security/injection.ts";
 import type { SearchInput } from "./args.ts";
 import {
 	jsonSearchResult,
@@ -24,7 +25,7 @@ import {
 	textSearchResult,
 } from "./search-output.ts";
 
-const snippetChars = 700;
+const snippetChars = 500;
 const allSearchConcurrency = 32;
 
 export async function runSearch(input: SearchInput): Promise<void> {
@@ -63,7 +64,8 @@ async function searchOne(input: SearchInput): Promise<SearchResult> {
 		corporaSearched: records.some(
 			(record) =>
 				searchableRecord(record, input) &&
-				(input.includeInjection || record.injectionSignals.length === 0),
+				(input.includeInjection ||
+					!hasConcealedInjection(record.injectionSignals)),
 		)
 			? 1
 			: 0,
@@ -74,7 +76,8 @@ async function searchOne(input: SearchInput): Promise<SearchResult> {
 			? 0
 			: records.filter(
 					(record) =>
-						searchableRecord(record, input) && record.injectionSignals.length,
+						searchableRecord(record, input) &&
+						hasConcealedInjection(record.injectionSignals),
 				).length,
 		corporaSkipped: 0,
 	};
@@ -189,7 +192,10 @@ async function dedupedCorpusRecords(
 			if (!record.ok || !record.outputPath) continue;
 			if (options.pathGlob && !globMatches(options.pathGlob, record.outputPath))
 				continue;
-			if (options.excludeInjection && record.injectionSignals.length) {
+			if (
+				options.excludeInjection &&
+				hasConcealedInjection(record.injectionSignals)
+			) {
 				injectionFiltered++;
 				continue;
 			}

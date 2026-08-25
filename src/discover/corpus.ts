@@ -51,7 +51,7 @@ export async function discoverLlmsCorpus(
 	const corpus = corpusTarget(seed, llmsUrls);
 	const out: DiscoveredUrl[] = [];
 	const seen = new Set<string>();
-	const rankedUrls = orderByTopic(llmsUrls, sourceSeed, scope, config.topic);
+	const rankedUrls = orderByTopic(llmsUrls, sourceSeed, scope);
 	for (const raw of rankedUrls) {
 		const url = normalizeUrl(raw);
 		if (

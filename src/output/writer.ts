@@ -110,7 +110,6 @@ export async function stagePages(
 	let skippedWrites = 0;
 	try {
 		for (const output of outputs) {
-			const started = performance.now();
 			const existing = config.clean
 				? undefined
 				: await readPriorOutput(config, output.outputPath);
@@ -131,13 +130,7 @@ export async function stagePages(
 					),
 				);
 			}
-			stagedOutputs.push({
-				...output,
-				timings: {
-					...output.timings,
-					writeMs: performance.now() - started,
-				},
-			});
+			stagedOutputs.push(output);
 		}
 		const staged: StagedPages = {
 			outputs: stagedOutputs,
@@ -234,21 +227,15 @@ function boundedRunFile(file: string, body: string, maxBytes: number) {
 
 function manifestRecord(record: RunRecord) {
 	if (record.ok) {
-		const {
-			markdown: _markdown,
-			timings: _timings,
-			rendered: _rendered,
-			...fields
-		} = record;
+		const { markdown: _markdown, rendered: _rendered, ...fields } = record;
 		return compactManifestFields(fields);
 	}
-	const { markdown: _markdown, timings: _timings, ...fields } = record;
+	const { markdown: _markdown, ...fields } = record;
 	return compactManifestFields(fields);
 }
 
 type ManifestCollections = {
 	links: string[];
-	media?: string[];
 	aliases?: string[];
 	redirects: RedirectHop[];
 	injectionSignals: InjectionSignal[];
@@ -258,7 +245,6 @@ type ManifestCollections = {
 function compactManifestFields<T extends ManifestCollections>(record: T) {
 	const {
 		links,
-		media = [],
 		aliases = [],
 		redirects,
 		injectionSignals,
@@ -266,9 +252,7 @@ function compactManifestFields<T extends ManifestCollections>(record: T) {
 		...fields
 	} = record;
 	const validLinks = publicManifestUrls(links);
-	const validMedia = publicManifestUrls(media);
 	const boundedLinks = boundedManifestUrls(validLinks);
-	const boundedMedia = boundedManifestUrls(validMedia);
 	return {
 		...fields,
 		links: boundedLinks,
@@ -276,13 +260,9 @@ function compactManifestFields<T extends ManifestCollections>(record: T) {
 		redirects: redirects.length ? redirects : undefined,
 		injectionSignals: injectionSignals.length ? injectionSignals : undefined,
 		qualityReasons: qualityReasons.length ? qualityReasons : undefined,
-		media: boundedMedia.length ? boundedMedia : undefined,
 		linksCount:
 			boundedLinks.length < validLinks.length ? validLinks.length : undefined,
 		linksTruncated: boundedLinks.length < validLinks.length ? true : undefined,
-		mediaCount:
-			boundedMedia.length < validMedia.length ? validMedia.length : undefined,
-		mediaTruncated: boundedMedia.length < validMedia.length ? true : undefined,
 	};
 }
 

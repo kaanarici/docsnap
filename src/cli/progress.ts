@@ -8,11 +8,10 @@ export function logLine(message: string): void {
 }
 
 export function printSummary(summary: RunSummary): void {
-	const seconds = (summary.elapsedMs / 1000).toFixed(2);
 	logLine(
-		`docsnap: ${countLabel(summary.written, "page")} ${summaryAction(summary)} in ${seconds}s`,
+		`docsnap: ${countLabel(summary.written, "page")} ${summaryAction(summary)}`,
 	);
-	if (summary.refresh.enabled) logLine(refreshLine(summary));
+	if (summary.refresh) logLine(refreshLine(summary.refresh));
 	if (summary.maxAppliesTo === "non-llms" && summary.written > summary.max) {
 		logLine(
 			`docsnap: llms.txt corpus included ${countLabel(summary.written, "page")}`,
@@ -47,11 +46,6 @@ export function printSummary(summary: RunSummary): void {
 			`docsnap: ${countLabel(summary.injectionSignalPages, "injection signal page", "injection signal pages")}`,
 		);
 	}
-	if (summary.hostRedirects) {
-		logLine(
-			`docsnap: ${countLabel(summary.hostRedirects, "page")} changed host via redirect`,
-		);
-	}
 	if (!summary.dryRun) {
 		logLine(`docsnap: summary ${join(outputDir(summary), runFiles.summary)}`);
 		logLine(`docsnap: manifest ${join(outputDir(summary), runFiles.manifest)}`);
@@ -77,13 +71,12 @@ function issueSummary(failed: number, notFound: number, lowQuality: number) {
 
 function summaryAction(summary: RunSummary) {
 	if (summary.dryRun) return "found";
-	if (summary.refresh.enabled) return `current in ${outputDir(summary)}`;
+	if (summary.refresh) return `current in ${outputDir(summary)}`;
 	return `written to ${outputDir(summary)}`;
 }
 
-function refreshLine(summary: RunSummary) {
-	const refresh = summary.refresh;
-	return `docsnap: refresh new=${refresh.new} changed=${refresh.changed} unchanged=${refresh.unchanged} removed=${refresh.removed} page_writes=${refresh.pageWrites} skipped_writes=${refresh.skippedWrites}`;
+function refreshLine(refresh: NonNullable<RunSummary["refresh"]>) {
+	return `docsnap: refresh new=${refresh.new} changed=${refresh.changed} unchanged=${refresh.unchanged} removed=${refresh.removed}`;
 }
 
 function failureSummary(summary: RunSummary) {

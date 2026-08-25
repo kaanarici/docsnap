@@ -439,7 +439,7 @@ async function discoverSitemapIndex(
 		allowResource,
 	});
 	const ranked = config.maxExplicit
-		? orderByTopic(sitemap.urls, seed, scope, config.topic)
+		? orderByTopic(sitemap.urls, seed, scope)
 		: sitemap.urls;
 	const pages: DiscoveredUrl[] = [];
 	const seen = new Set<string>();

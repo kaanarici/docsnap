@@ -74,7 +74,6 @@ export async function fetchText(
 	allowUrl?: FetchUrlGate,
 	options?: FetchTextOptions,
 ): Promise<FetchResult> {
-	const started = performance.now();
 	const signal = deadlineSignal(options?.signal, config.timeoutMs);
 	const fetchOptions = { ...options, signal };
 	const uncached: UncachedFetch = (...args) =>
@@ -86,7 +85,7 @@ export async function fetchText(
 		);
 	} catch (error) {
 		if (signal.aborted) {
-			return fail(url, url, 0, started, "request timed out", "timeout", []);
+			return fail(url, url, 0, "request timed out", "timeout", []);
 		}
 		throw error;
 	}
@@ -105,7 +104,6 @@ export async function fetchTextUncached(
 		config.maxBytes,
 		options.maxBytes ?? config.maxBytes,
 	);
-	const started = performance.now();
 	let currentUrl = url;
 	let redirects: RedirectHop[] = [];
 	const triedRouteFallbacks = new Set<string>();
@@ -117,7 +115,6 @@ export async function fetchTextUncached(
 			config,
 			accept,
 			conditional,
-			started,
 			redirects,
 			allowUrl,
 			signal,
@@ -131,15 +128,7 @@ export async function fetchTextUncached(
 			redirects = result.redirects ?? redirects;
 			if (!(await urlAllowed(fallback, allowUrl, signal))) {
 				const [error, kind] = deniedUrl(fallback, signal);
-				return fail(
-					url,
-					fallback,
-					result.status,
-					started,
-					error,
-					kind,
-					redirects,
-				);
+				return fail(url, fallback, result.status, error, kind, redirects);
 			}
 			triedRouteFallbacks.add(fallback);
 			currentUrl = fallback;
@@ -152,7 +141,7 @@ export async function fetchTextUncached(
 		if (hop) redirects.push(hop);
 		if (!(await urlAllowed(next, allowUrl, signal))) {
 			const [error, kind] = deniedUrl(next, signal);
-			return fail(url, next, result.status, started, error, kind, redirects);
+			return fail(url, next, result.status, error, kind, redirects);
 		}
 		seenRefreshes.add(next);
 		currentUrl = next;
@@ -161,7 +150,6 @@ export async function fetchTextUncached(
 		url,
 		currentUrl,
 		0,
-		started,
 		"too many meta refresh redirects",
 		"fetch",
 		redirects,
@@ -179,7 +167,6 @@ async function fetchOnce(
 	config: PipelineConfig,
 	accept: string,
 	conditional: ConditionalRequest | undefined,
-	started: number,
 	redirectsSoFar: RedirectHop[],
 	allowUrl: FetchUrlGate | undefined,
 	signal: AbortSignal | undefined,
@@ -192,7 +179,7 @@ async function fetchOnce(
 		status: number,
 		error: string,
 		kind: FailureKind,
-	) => fail(url, finalUrl, status, started, error, kind, redirects);
+	) => fail(url, finalUrl, status, error, kind, redirects);
 	const seenRedirects = new Set<string>();
 	const cookies: Cookie[] = [];
 	let cookieTainted = false;
@@ -279,7 +266,6 @@ async function fetchOnce(
 				status: response.status,
 				contentType: response.headers.get("content-type") ?? "",
 				body: "",
-				fetchMs: performance.now() - started,
 				redirects,
 				...responseMetadata(response, requestStarted, fetchedAt, cookieTainted),
 			};
@@ -336,7 +322,7 @@ async function fetchOnce(
 			);
 		}
 	}
-	return fail(url, currentUrl, 0, started, "fetch failed", "fetch", redirects);
+	return fail(url, currentUrl, 0, "fetch failed", "fetch", redirects);
 }
 
 async function urlAllowed(
@@ -471,7 +457,6 @@ function fail(
 	url: string,
 	finalUrl: string,
 	status: number,
-	started: number,
 	error: string,
 	kind: FailureKind,
 	redirects: RedirectHop[],
@@ -480,7 +465,6 @@ function fail(
 		url,
 		artifactFinalUrl(finalUrl, url),
 		status,
-		started,
 		error,
 		kind,
 		redirects,
@@ -538,26 +522,106 @@ export function fetchMany(
 			perOrigin: config.perOrigin,
 			key: (item) => new URL(item.url).origin,
 		},
-		async (item): Promise<FetchedUrl> => {
-			const discovery: FetchDiscovery = {
-				source: item.source,
-			};
-			if (item.wasSeed) discovery.wasSeed = true;
-			if (item.metadata) discovery.metadata = item.metadata;
-			if (
-				item.fetched &&
-				!item.fetched.ok &&
-				item.fetched.error === "blocked by robots.txt"
-			) {
-				return { ...discovery, result: item.fetched };
-			}
-			const conditional = conditionalFor?.(item);
-			const accept =
-				config.pageOnly && item.wasSeed ? preferredMarkdownAccept : undefined;
-			const result =
-				item.fetched ??
-				(await fetchText(item.url, config, accept, conditional, allowUrl));
-			return { ...discovery, result };
-		},
+		(item) => fetchDiscovered(item, config, conditionalFor, allowUrl),
 	);
+}
+
+type CompletedFetch = {
+	id: number;
+	result: FetchedUrl;
+	origin: string;
+};
+
+export async function* fetchBatches(
+	urls: DiscoveredUrl[],
+	config: PipelineConfig,
+	conditionalFor?: (item: DiscoveredUrl) => ConditionalRequest | undefined,
+	allowUrl?: FetchUrlGate,
+): AsyncGenerator<FetchedUrl[]> {
+	const queue = [...urls];
+	const active = new Map<number, Promise<CompletedFetch>>();
+	const activeByOrigin = new Map<string, number>();
+	const controller = new AbortController();
+	const batchSize = Math.min(64, config.concurrency);
+	let nextId = 0;
+
+	try {
+		fill();
+		let batch: FetchedUrl[] = [];
+		while (active.size > 0) {
+			const completed = await Promise.race(active.values());
+			active.delete(completed.id);
+			const count = (activeByOrigin.get(completed.origin) ?? 1) - 1;
+			if (count) activeByOrigin.set(completed.origin, count);
+			else activeByOrigin.delete(completed.origin);
+			batch.push(completed.result);
+			fill();
+			if (batch.length === batchSize) {
+				yield batch;
+				batch = [];
+			}
+		}
+		if (batch.length) yield batch;
+	} finally {
+		controller.abort();
+		await Promise.allSettled(active.values());
+	}
+
+	function fill() {
+		while (active.size < config.concurrency) {
+			const index = queue.findIndex((item) => {
+				const origin = new URL(item.url).origin;
+				return (activeByOrigin.get(origin) ?? 0) < config.perOrigin;
+			});
+			if (index < 0) return;
+			const [item] = queue.splice(index, 1);
+			if (!item) return;
+			const origin = new URL(item.url).origin;
+			activeByOrigin.set(origin, (activeByOrigin.get(origin) ?? 0) + 1);
+			const id = nextId++;
+			active.set(
+				id,
+				fetchDiscovered(
+					item,
+					config,
+					conditionalFor,
+					allowUrl,
+					controller.signal,
+				).then((result) => ({ id, result, origin })),
+			);
+		}
+	}
+}
+
+async function fetchDiscovered(
+	item: DiscoveredUrl,
+	config: PipelineConfig,
+	conditionalFor?: (item: DiscoveredUrl) => ConditionalRequest | undefined,
+	allowUrl?: FetchUrlGate,
+	signal?: AbortSignal,
+): Promise<FetchedUrl> {
+	const discovery: FetchDiscovery = { source: item.source };
+	if (item.wasSeed) discovery.wasSeed = true;
+	if (item.metadata) discovery.metadata = item.metadata;
+	if (
+		item.fetched &&
+		!item.fetched.ok &&
+		item.fetched.error === "blocked by robots.txt"
+	) {
+		return { ...discovery, result: item.fetched };
+	}
+	const conditional = conditionalFor?.(item);
+	const accept =
+		config.pageOnly && item.wasSeed ? preferredMarkdownAccept : undefined;
+	const result =
+		item.fetched ??
+		(await fetchText(
+			item.url,
+			config,
+			accept,
+			conditional,
+			allowUrl,
+			signal ? { signal } : undefined,
+		));
+	return { ...discovery, result };
 }

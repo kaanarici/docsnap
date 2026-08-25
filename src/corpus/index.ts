@@ -25,18 +25,17 @@ import {
 	failureKinds,
 	filterInjectionSignals,
 	type InjectionSignal,
-	injectionSignals,
-	inlineStateSources,
 	type PageExtractor,
 	type PageKind,
-	pageExtractors,
-	pageKinds,
 	type RunSummary,
 } from "../core/types.ts";
 import { runFiles } from "../output/files.ts";
 import { markdownFromRendered, parseReusablePrior } from "../output/prior.ts";
 import { buildRankInput, rankPages } from "../search/rank.ts";
-import { scanMarkdownForInjectionSignals } from "../security/injection.ts";
+import {
+	hasConcealedInjection,
+	scanMarkdownForInjectionSignals,
+} from "../security/injection.ts";
 import { maxPublicUrlChars } from "../security/url.ts";
 import {
 	corpusLimits,
@@ -58,7 +57,6 @@ export type CorpusPage = {
 	outputPath?: string;
 	title?: string;
 	source?: DiscoverySource;
-	confidence?: number;
 	qualityReasons?: string[];
 	failureKind?: FailureKind;
 	error?: string;
@@ -106,41 +104,20 @@ export async function readSummary(outputDir: string): Promise<RunSummary> {
 const summaryCounterFields = [
 	"corpusFiles",
 	"corpusBytes",
-	"discovered",
-	"deduped",
 	"written",
 	"failed",
 	"lowQuality",
 	"qualityWarnings",
 	"injectionSignalPages",
-	"hostRedirects",
 ] as const;
 
 const refreshCounterFields = [
-	"priorRecords",
-	"checked",
-	"notModified",
-	"reused",
-	"fallbackRefetches",
-	"pageWrites",
-	"skippedWrites",
 	"new",
 	"changed",
 	"unchanged",
 	"removed",
 ] as const;
 
-const cacheCounterFields = [
-	"hits",
-	"misses",
-	"stale",
-	"revalidated",
-	"written",
-	"notStored",
-	"bytesRead",
-	"bytesWritten",
-	"evictedBytes",
-] as const;
 const omissionReasons = [
 	"not_discovered",
 	"failed",
@@ -170,22 +147,6 @@ function isRunSummary(value: JsonValue): value is JsonObject & RunSummary {
 		(value.discoveryTruncated === undefined ||
 			isJsonBoolean(value.discoveryTruncated)) &&
 		optionalEnum(value.stopReason, ["rate_limited"]) &&
-		(value.selectionHash === undefined || isSha256(value.selectionHash)) &&
-		isCountRecord(value.byInjectionSignal, injectionSignals) &&
-		isObjectArray(
-			value.redirectedHosts,
-			(item) =>
-				isJsonString(item["from"]) &&
-				isJsonString(item["to"]) &&
-				isNonNegativeInteger(item["count"]),
-		) &&
-		isNonNegativeFinite(value.elapsedMs) &&
-		isNonNegativeFinite(value.pagesPerSecond) &&
-		isCountRecord(value.bySource, discoverySources, true) &&
-		isCountRecord(value.byExtractor, pageExtractors, true) &&
-		(value.byKind === undefined ||
-			isCountRecord(value.byKind, pageKinds, false)) &&
-		isCountRecord(value.byInlineStateSource, inlineStateSources) &&
 		isCountRecord(value.byFailureKind, failureKinds) &&
 		isObjectArray(
 			value.errors,
@@ -196,8 +157,7 @@ function isRunSummary(value: JsonValue): value is JsonObject & RunSummary {
 		) &&
 		(value.errorsOmitted === undefined ||
 			isNonNegativeInteger(value.errorsOmitted)) &&
-		isRefreshSummary(value.refresh) &&
-		isCacheSummary(value.cache) &&
+		(value.refresh === undefined || isRefreshSummary(value.refresh)) &&
 		(value.render === undefined || isRenderSummary(value.render))
 	);
 }
@@ -222,17 +182,17 @@ function isSeedSummary(value: JsonValue | undefined): boolean {
 }
 
 function isRefreshSummary(value: JsonValue | undefined): boolean {
+	if (!isJsonObject(value)) return false;
 	return (
-		isCorpusFields<RunSummary["refresh"]>(value) &&
-		isJsonBoolean(value.enabled) &&
-		optionalEnum(value.reason, [
+		isJsonBoolean(value["enabled"]) &&
+		optionalEnum(value["reason"], [
 			"clean",
 			"missing_manifest",
 			"invalid_manifest",
 		]) &&
 		countersAreValid(value, refreshCounterFields) &&
 		isObjectArray(
-			value.changedPages,
+			value["changedPages"],
 			(page) =>
 				enumIncludes(["new", "changed", "removed"], page["change"]) &&
 				isBoundedString(page["url"], maxPublicUrlChars) &&
@@ -243,30 +203,10 @@ function isRefreshSummary(value: JsonValue | undefined): boolean {
 	);
 }
 
-function isCacheSummary(value: JsonValue | undefined): boolean {
-	return (
-		isCorpusFields<RunSummary["cache"]>(value) &&
-		isJsonBoolean(value.enabled) &&
-		(value.dir === null || isJsonString(value.dir)) &&
-		countersAreValid(value, cacheCounterFields)
-	);
-}
-
 function isRenderSummary(value: JsonValue | undefined) {
-	if (!isJsonObject(value) || value["renderer"] !== "chrome-cdp") return false;
+	if (!isJsonObject(value)) return false;
 	return (
-		countersAreValid(value, [
-			"attempted",
-			"rendered",
-			"recovered",
-			"failed",
-			"blockedRequests",
-			"fulfilledRequests",
-			"relayedBytes",
-			"skipped",
-		]) &&
-		isNonNegativeFinite(value["launchMs"]) &&
-		isNonNegativeFinite(value["renderMs"]) &&
+		countersAreValid(value, ["recovered", "failed", "skipped"]) &&
 		isJsonBoolean(value["truncated"]) &&
 		optionalEnum(value["stopReason"], ["budget", "no_recovery"]) &&
 		optionalString(value["unavailable"])
@@ -296,10 +236,6 @@ function isCountRecord(
 
 function isTimestamp(value: JsonValue | undefined): value is string {
 	return isBoundedString(value, 64) && Number.isFinite(Date.parse(value));
-}
-
-function isNonNegativeFinite(value: JsonValue | undefined): value is number {
-	return isJsonNumber(value) && value >= 0;
 }
 
 function isBoundedString(
@@ -466,7 +402,7 @@ export async function searchCorpus(outputDir: string, options: SearchOptions) {
 			record.outputPath &&
 			(!options.pathGlob || globMatches(options.pathGlob, record.outputPath)) &&
 			(options.excludeInjection !== true ||
-				record.injectionSignals.length === 0),
+				!hasConcealedInjection(record.injectionSignals)),
 	);
 	const realOutputDir = await realpath(outputDir);
 	const { input, truncated } = await buildRankInput(

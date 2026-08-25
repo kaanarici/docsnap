@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
 	chmod,
 	mkdir,
@@ -103,7 +103,7 @@ export function cacheRequest(
 }
 
 export function cacheKey(request: CacheRequest): string {
-	const hash = createHash("sha256");
+	const hash = new Bun.CryptoHasher("sha256");
 	for (const part of [
 		schemaVersion,
 		normalizeCacheUrl(request.url),
@@ -263,7 +263,7 @@ export async function refreshCacheEntry(
 	const { key } = lock;
 	const now = new Date().toISOString();
 	const cacheControl = result.cacheControl ?? entry.cacheControl;
-	const refreshResult = cachedFetchResult(entry, "", 0);
+	const refreshResult = cachedFetchResult(entry, "");
 	if (cacheControl) refreshResult.cacheControl = cacheControl;
 	if (result.ageSeconds) refreshResult.ageSeconds = result.ageSeconds;
 	if (result.vary) refreshResult.vary = result.vary;
@@ -312,7 +312,6 @@ export async function acquireCacheWriteLock(
 export function cachedFetchResult(
 	entry: CacheEntry,
 	body: string,
-	fetchMs: number,
 	requestUrl = entry.requestUrl,
 ): FetchResult {
 	const result: FetchResult = {
@@ -321,7 +320,6 @@ export function cachedFetchResult(
 		status: entry.status,
 		contentType: entry.contentType,
 		body,
-		fetchMs,
 		redirects: entry.redirects,
 		fetchedAt: entry.fetchedAt,
 		ok: true,
@@ -582,7 +580,7 @@ async function touch(path: string) {
 }
 
 function sha256(body: string) {
-	return createHash("sha256").update(body).digest("hex");
+	return Bun.CryptoHasher.hash("sha256", body, "hex");
 }
 
 function byteLength(body: string) {

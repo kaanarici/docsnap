@@ -195,7 +195,6 @@ function notModified(): FetchResult {
 		status: 304,
 		contentType: "text/html",
 		body: "",
-		fetchMs: 1,
 		redirects: [],
 		fetchedAt: "2026-01-01T00:00:00.000Z",
 		cacheControl: "max-age=60",

@@ -7,6 +7,7 @@ import type { InjectionSignal } from "../core/types.ts";
 type SignalPattern = readonly [InjectionSignal, RegExp];
 
 const invisibleTextGlobalPattern = new RegExp(invisibleTextPattern, "gu");
+const invisibleTextSinglePattern = new RegExp(invisibleTextPattern, "u");
 const maxCommentBlocks = 64;
 const maxCommentScanChars = 16 * 1024;
 const maxStyleBlocks = 32;
@@ -16,6 +17,20 @@ const maxCssDeclarationChars = 16 * 1024;
 const maxEncodedCandidateChars = 16 * 1024;
 const maxEncodedCandidates = 64;
 const rawSkipTags = new Set(["script", "style", "noscript", "template", "svg"]);
+const concealedSignals = new Set<InjectionSignal>([
+	"zero-width-text",
+	"unicode-tag-text",
+	"bidi-control",
+	"mixed-script-confusable",
+	"hidden-html-text",
+	"html-comment-instruction",
+	"unsafe-link-scheme",
+	"encoded-injection-blob",
+]);
+
+export function hasConcealedInjection(signals: readonly InjectionSignal[]) {
+	return signals.some((signal) => concealedSignals.has(signal));
+}
 
 const unicodePatterns: SignalPattern[] = [
 	["unicode-tag-text", /[\u{e0000}-\u{e007f}]/u],
@@ -161,15 +176,26 @@ export function scanRawHtmlForInjectionSignals(
 ): InjectionSignal[] {
 	const signals = new Set<InjectionSignal>();
 	for (const signal of htmlCommentSignals(html)) signals.add(signal);
+	const suspiciousUnicode =
+		invisibleTextSinglePattern.test(html) ||
+		unicodePatterns.some(([, pattern]) => pattern.test(html)) ||
+		confusablePattern.test(html);
+	const suspiciousInstructions =
+		roleActionPattern.test(html) && roleTargetPattern.test(html);
+	if (!suspiciousUnicode && !suspiciousInstructions) return [...signals];
 	try {
 		const document = parsedDocument ?? parseHTML(html).document;
 		const hidden = new Set(hiddenElements(document));
-		addSignals(signals, visibleUnicodeSignals(document, hidden));
-		for (const element of hidden) {
-			const phraseSignals = instructionSignals(element.textContent ?? "");
-			if (phraseSignals.size === 0) continue;
-			signals.add("hidden-html-text");
-			for (const signal of phraseSignals) signals.add(signal);
+		if (suspiciousUnicode) {
+			addSignals(signals, visibleUnicodeSignals(document, hidden));
+		}
+		if (suspiciousInstructions) {
+			for (const element of hidden) {
+				const phraseSignals = instructionSignals(element.textContent ?? "");
+				if (phraseSignals.size === 0) continue;
+				signals.add("hidden-html-text");
+				for (const signal of phraseSignals) signals.add(signal);
+			}
 		}
 	} catch {}
 	return [...signals];

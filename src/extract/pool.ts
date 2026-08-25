@@ -19,13 +19,10 @@ const workerByteThreshold = 8 * 1024 * 1024;
 export function createExtractionPool(): ExtractionPool {
 	const workers: Worker[] = [];
 	let activeReject: ((error: Error) => void) | undefined;
-	let closed = false;
 
 	return { extractMany, close };
 
 	async function extractMany(inputs: FetchedUrl[]): Promise<ExtractedPage[]> {
-		if (closed) throw new Error("Extraction pool is closed");
-		if (activeReject) throw new Error("Extraction pool is already running");
 		if (!("Worker" in globalThis))
 			return Promise.all(inputs.map(safeExtractPage));
 
@@ -102,19 +99,12 @@ export function createExtractionPool(): ExtractionPool {
 		worker.onerror = (event) => {
 			const reject = activeReject;
 			activeReject = undefined;
-			closed = true;
-			for (const active of workers) active.terminate();
 			reject?.(event.error ?? new Error("extract worker crashed"));
 		};
 		return worker;
 	}
 
 	async function close() {
-		if (closed) return;
-		closed = true;
-		const reject = activeReject;
-		activeReject = undefined;
-		reject?.(new Error("Extraction pool closed while running"));
 		await Promise.all(workers.map((worker) => worker.terminate()));
 	}
 }
@@ -133,13 +123,12 @@ function failedExtraction(input: FetchedUrl, cause: unknown): ExtractedPage {
 		failedRecord(
 			input.result,
 			input.source,
-			input.metadata,
 			message,
 			"extract",
 			[],
 			input.wasSeed,
 		),
-		{ links: [], media: [] },
+		{ links: [] },
 		false,
 	];
 }

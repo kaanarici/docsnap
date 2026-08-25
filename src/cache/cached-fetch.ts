@@ -49,11 +49,10 @@ export async function fetchWithCache(
 		await writeThroughCache(url, config, accept, result);
 		return result;
 	}
-	const started = performance.now();
 	const request = cacheRequest(url, config, accept);
 	const first = await readCache(config, request);
 	if (first.state === "fresh") {
-		const hit = await freshHit(url, first, started, allowUrl);
+		const hit = await freshHit(url, first, allowUrl);
 		if (hit) return hit;
 	}
 	if (first.state === "disabled")
@@ -90,12 +89,11 @@ async function fillCold(
 	uncached: UncachedFetch,
 	allowUrl: UrlGate | undefined,
 ): Promise<FetchResult> {
-	const started = performance.now();
 	const lock = await acquireCacheWriteLock(config, request);
 	if (!lock) {
 		const afterWait = await readCache(config, request);
 		if (afterWait.state === "fresh") {
-			const hit = await freshHit(url, afterWait, started, allowUrl);
+			const hit = await freshHit(url, afterWait, allowUrl);
 			if (hit) return hit;
 		}
 		return uncached(url, config, accept, undefined, allowUrl);
@@ -103,7 +101,7 @@ async function fillCold(
 	try {
 		const latest = await readCache(config, request, { count: false });
 		if (latest.state === "fresh") {
-			const hit = await freshHit(url, latest, started, allowUrl);
+			const hit = await freshHit(url, latest, allowUrl);
 			if (hit) return hit;
 		}
 		const stale =
@@ -121,12 +119,7 @@ async function fillCold(
 		);
 		if (isNotModifiedResult(result) && stale) {
 			const entry = await refreshCacheEntry(config, lock, stale.entry, result);
-			return cachedFetchResult(
-				entry,
-				stale.body,
-				performance.now() - started,
-				url,
-			);
+			return cachedFetchResult(entry, stale.body, url);
 		}
 		await writeCacheResult(config, lock, result);
 		return result;
@@ -138,15 +131,9 @@ async function fillCold(
 async function freshHit(
 	url: string,
 	lookup: Extract<CacheLookup, { body: string }>,
-	started: number,
 	allowUrl: UrlGate | undefined,
 ): Promise<FetchResult | undefined> {
-	const result = cachedFetchResult(
-		lookup.entry,
-		lookup.body,
-		performance.now() - started,
-		url,
-	);
+	const result = cachedFetchResult(lookup.entry, lookup.body, url);
 	if (!allowUrl) return result;
 	if (result.url === result.finalUrl && (result.redirects?.length ?? 0) === 0)
 		return result;

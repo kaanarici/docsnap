@@ -71,11 +71,13 @@ docsnap list
 
 Run `docsnap --help` or `docsnap <command> --help` for all flags.
 
+For scripts and agents, add `--json` for one machine-readable result on stdout. A failed result exits nonzero.
+
 ## Safety and limits
 
 DocSnap accepts public HTTP and HTTPS URLs. It rejects credentials, local hosts, private network addresses, and unsafe output paths. Document conversion and Chrome rendering stay on your machine.
 
-Captured pages are source material, not instructions. DocSnap records possible prompt injection signals in the manifest and summary so callers can filter or review them.
+Captured pages are source material, not instructions. DocSnap records possible prompt injection signals. Search skips pages with concealed signals unless you pass `--include-injection`.
 
 ## License
 

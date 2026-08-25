@@ -22,11 +22,7 @@ export type ChromeSession = {
 	rendered: number;
 	recovered: number;
 	failed: number;
-	launchMs: number;
 	renderMs: number;
-	blockedRequests: number;
-	fulfilledRequests: number;
-	relayedBytes: number;
 	skipped: number;
 	truncated: boolean;
 	stopReason?: ChromeStopReason;
@@ -42,11 +38,7 @@ export function createChromeSession(): ChromeSession {
 		rendered: 0,
 		recovered: 0,
 		failed: 0,
-		launchMs: 0,
 		renderMs: 0,
-		blockedRequests: 0,
-		fulfilledRequests: 0,
-		relayedBytes: 0,
 		skipped: 0,
 		truncated: false,
 		misses: 0,
@@ -115,11 +107,7 @@ export async function renderChromePage(
 			Math.max(1, Math.min(config.timeoutMs, Math.ceil(remainingMs))),
 		),
 	});
-	session.launchMs ||= rendered.metrics.launchMs;
 	session.renderMs += rendered.metrics.renderMs;
-	session.blockedRequests += rendered.metrics.blockedRequests;
-	session.fulfilledRequests += rendered.metrics.fulfilledRequests;
-	session.relayedBytes += rendered.metrics.relayedBytes;
 	session.truncated ||= rendered.metrics.truncated;
 	return rendered;
 }
@@ -133,16 +121,8 @@ export function chromeRunSummary(
 			? session.stopReason
 			: undefined;
 	const summary: NonNullable<PipelineResult["summary"]["render"]> = {
-		renderer: "chrome-cdp",
-		attempted: session.attempted,
-		rendered: session.rendered,
 		recovered: session.recovered,
 		failed: session.failed,
-		launchMs: Number(session.launchMs.toFixed(1)),
-		renderMs: Number(session.renderMs.toFixed(1)),
-		blockedRequests: session.blockedRequests,
-		fulfilledRequests: session.fulfilledRequests,
-		relayedBytes: session.relayedBytes,
 		skipped: session.skipped,
 		truncated: session.truncated,
 	};
@@ -158,7 +138,6 @@ async function ensureChrome(session: ChromeSession, config: PipelineConfig) {
 	if (!opened.ok) {
 		session.attempted++;
 		session.failed++;
-		session.launchMs = opened.launchMs;
 		session.unavailable = opened.error;
 		return false;
 	}

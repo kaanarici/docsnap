@@ -1,10 +1,6 @@
 import { parseHTML } from "linkedom";
-import {
-	maxGeneratedCapturePages,
-	maxGeneratedMediaUrls,
-} from "../core/config.ts";
+import { maxGeneratedCapturePages } from "../core/config.ts";
 import type { FetchResult } from "../core/types.ts";
-import { validatePublicHttpUrl } from "../security/url.ts";
 import {
 	normalizeDiscoveryResourceUrl,
 	normalizeUrl,
@@ -23,7 +19,6 @@ const maxDiscoveryHtmlChars = 1_000_000;
 
 export type PageResources = {
 	links: string[];
-	media: string[];
 	next?: string;
 	nav?: string[];
 	feeds?: string[];
@@ -49,17 +44,6 @@ export function discoverPageResources(
 		const url = normalizeUrl(link.getAttribute("href") ?? "", base);
 		if (url) links.add(url);
 	}
-	const media = new Set<string>();
-	for (const node of document.querySelectorAll(
-		"img[src],img[srcset],source[src],source[srcset],video[src],video[poster],audio[src],track[src],meta[property='og:image'][content]",
-	)) {
-		for (const value of mediaValues(node)) {
-			const url = normalizeMediaUrl(value, base);
-			if (url) media.add(url);
-			if (media.size >= maxGeneratedMediaUrls) break;
-		}
-		if (media.size >= maxGeneratedMediaUrls) break;
-	}
 	let next: string | undefined;
 	const feeds = new Set<string>();
 	for (const link of document.querySelectorAll("link[rel][href]")) {
@@ -71,10 +55,7 @@ export function discoverPageResources(
 			feeds.add(url);
 		}
 	}
-	const resources: PageResources = {
-		links: [...links],
-		media: [...media],
-	};
+	const resources: PageResources = { links: [...links] };
 	if (next) resources.next = next;
 	if (seed) {
 		resources.nav = discoverLinks(document, base);
@@ -107,10 +88,9 @@ export function discoverFetchedResources(
 				result.finalUrl,
 				maxGeneratedCapturePages,
 			),
-			media: [],
 		};
 	}
-	return { links: [], media: [] };
+	return { links: [] };
 }
 
 export function isHtmlResponse(result: FetchResult) {
@@ -162,16 +142,6 @@ function isControlLink(link: Element) {
 	);
 }
 
-function mediaValues(node: Element) {
-	const values = ["src", "poster", "content"].flatMap((name) => {
-		const value = node.getAttribute(name);
-		return value ? [value] : [];
-	});
-	const srcset = node.getAttribute("srcset");
-	if (srcset) values.push(...srcsetCandidates(srcset).map(({ url }) => url));
-	return values;
-}
-
 export function srcsetCandidates(input: string, limit = 100) {
 	const out: Array<{ url: string; descriptor: string }> = [];
 	const whitespace = (char: string) => /[\t\n\f\r ]/.test(char);
@@ -212,16 +182,6 @@ export function srcsetCandidates(input: string, limit = 100) {
 		});
 	}
 	return out;
-}
-
-function normalizeMediaUrl(raw: string, base: string) {
-	try {
-		const url = new URL(raw, base);
-		url.hash = "";
-		return validatePublicHttpUrl(url.href) ? undefined : url.href;
-	} catch {
-		return;
-	}
 }
 
 function discoverMarkdownTextLinks(html: string, base: string) {

@@ -1,4 +1,3 @@
-import { captureSelectionTerms } from "../core/config.ts";
 import type { PipelineConfig } from "../core/types.ts";
 import { isLlmsResourcePath } from "../core/url.ts";
 import { pathInScope } from "./url.ts";
@@ -11,29 +10,18 @@ export function candidateWindow(
 	return Math.max(limit * 4, 32);
 }
 
-export function orderByTopic(
-	items: string[],
-	seed: string,
-	scope: string,
-	intent?: string,
-) {
-	const intentTokens = new Set(captureSelectionTerms(intent));
+export function orderByTopic(items: string[], seed: string, scope: string) {
 	return items
 		.map((item, index) => ({
 			item,
 			index,
-			score: topicScore(item, seed, scope, intentTokens),
+			score: topicScore(item, seed, scope),
 		}))
 		.sort((a, b) => a.score - b.score || a.index - b.index)
 		.map(({ item }) => item);
 }
 
-function topicScore(
-	raw: string,
-	seed: string,
-	scope: string,
-	intentTokens: Set<string>,
-) {
+function topicScore(raw: string, seed: string, scope: string) {
 	try {
 		const url = new URL(raw);
 		const base = new URL(seed);
@@ -44,28 +32,19 @@ function topicScore(
 		const commonBonus = commonSegments(url.pathname, base.pathname) * 4;
 		const topic = topicPrefix(base.pathname);
 		const topicBonus = sharedTopicTokenCount(url.pathname, base.pathname) * 4;
-		const intentBonus = sharedTokenCount(url.pathname, intentTokens) * 20;
-		if (url.origin !== base.origin)
-			return 200 - commonBonus + penalty - intentBonus;
+		if (url.origin !== base.origin) return 200 - commonBonus + penalty;
 		if (pathInScope(url.pathname, topic))
-			return 10 - commonBonus + penalty - topicBonus - intentBonus;
+			return 10 - commonBonus + penalty - topicBonus;
 		if (pathInScope(url.pathname, parentScope(base.pathname)))
-			return 20 - commonBonus + penalty - topicBonus - intentBonus;
+			return 20 - commonBonus + penalty - topicBonus;
 		if (pathInScope(url.pathname, scope))
-			return 60 - commonBonus + penalty - topicBonus - intentBonus;
-		return 100 - commonBonus + penalty - topicBonus - intentBonus;
+			return 60 - commonBonus + penalty - topicBonus;
+		return 100 - commonBonus + penalty - topicBonus;
 	} catch {
 		return 1_000;
 	}
 }
 
-function sharedTokenCount(pathname: string, intentTokens: Set<string>) {
-	if (intentTokens.size === 0) return 0;
-	const pathTokens = new Set(captureSelectionTerms(pathname));
-	let count = 0;
-	for (const token of intentTokens) if (pathTokens.has(token)) count++;
-	return count;
-}
 function topicPrefix(pathname: string) {
 	if (pathname.endsWith("/")) return pathname;
 	if (/\.[a-z0-9]+$/i.test(pathname))

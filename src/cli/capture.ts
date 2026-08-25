@@ -5,7 +5,6 @@ import {
 	type ConfigInput,
 } from "../core/config.ts";
 import { runPipeline } from "../core/pipeline.ts";
-import { assertRefreshSelection } from "../core/refresh.ts";
 import {
 	type CliOptions,
 	type PipelineConfig,
@@ -23,7 +22,6 @@ export async function runCapture(input: ConfigInput, cli: CliOptions) {
 
 export async function runRefresh(input: RefreshInput, cli: CliOptions) {
 	const prior = await readSummary(input.outputDir);
-	assertRefreshSelection(prior);
 	await runConfiguredCapture(
 		buildRefreshConfig(prior, {
 			outDir: input.outputDir,
@@ -40,7 +38,6 @@ async function runConfiguredCapture(config: PipelineConfig, cli: CliOptions) {
 	const { summary } = await runPipeline(config, progress);
 	const ok =
 		runSucceeded(summary) &&
-		(!cli.failOnLowQuality || summary.lowQuality === 0) &&
 		(!cli.failOnInjectionSignal || summary.injectionSignalPages === 0);
 	if (cli.json) {
 		process.stdout.write(`${JSON.stringify(captureResult(summary, ok))}\n`);
@@ -49,31 +46,8 @@ async function runConfiguredCapture(config: PipelineConfig, cli: CliOptions) {
 	if (!ok) process.exitCode = 1;
 }
 
-type CaptureResult = {
-	ok: boolean;
-	status: RunSummary["status"];
-	seedUrl: string;
-	outputDir: string;
-	written: number;
-	failed: number;
-	lowQuality: number;
-	maxReached: boolean;
-	discoveryTruncated?: true;
-	stopReason?: RunSummary["stopReason"];
-	qualityWarnings?: number;
-	injectionSignalPages?: number;
-	byFailureKind?: RunSummary["byFailureKind"];
-	errors?: RunSummary["errors"];
-	errorsOmitted?: number;
-	elapsedMs: number;
-	paths?: { summary: string; manifest: string };
-};
-
-function captureResult(summary: RunSummary, ok: boolean): CaptureResult {
-	const errors = summary.errors.slice(0, 3);
-	const errorsOmitted =
-		(summary.errorsOmitted ?? 0) + summary.errors.length - errors.length;
-	const result: CaptureResult = {
+function captureResult(summary: RunSummary, ok: boolean) {
+	return {
 		ok,
 		status: summary.status,
 		seedUrl: summary.seedUrl,
@@ -82,22 +56,21 @@ function captureResult(summary: RunSummary, ok: boolean): CaptureResult {
 		failed: summary.failed,
 		lowQuality: summary.lowQuality,
 		maxReached: summary.maxReached,
-		elapsedMs: summary.elapsedMs,
+		discoveryTruncated: summary.discoveryTruncated || undefined,
+		stopReason: summary.stopReason,
+		qualityWarnings: summary.qualityWarnings || undefined,
+		injectionSignalPages: summary.injectionSignalPages || undefined,
+		byFailureKind:
+			Object.keys(summary.byFailureKind).length > 0
+				? summary.byFailureKind
+				: undefined,
+		errors: summary.errors.length ? summary.errors : undefined,
+		errorsOmitted: summary.errorsOmitted,
+		paths: summary.dryRun
+			? undefined
+			: {
+					summary: join(summary.outDir, runFiles.summary),
+					manifest: join(summary.outDir, runFiles.manifest),
+				},
 	};
-	if (summary.discoveryTruncated) result.discoveryTruncated = true;
-	if (summary.stopReason) result.stopReason = summary.stopReason;
-	if (summary.qualityWarnings) result.qualityWarnings = summary.qualityWarnings;
-	if (summary.injectionSignalPages)
-		result.injectionSignalPages = summary.injectionSignalPages;
-	if (Object.keys(summary.byFailureKind).length)
-		result.byFailureKind = summary.byFailureKind;
-	if (errors.length) result.errors = errors;
-	if (errorsOmitted) result.errorsOmitted = errorsOmitted;
-	if (!summary.dryRun) {
-		result.paths = {
-			summary: join(summary.outDir, runFiles.summary),
-			manifest: join(summary.outDir, runFiles.manifest),
-		};
-	}
-	return result;
 }

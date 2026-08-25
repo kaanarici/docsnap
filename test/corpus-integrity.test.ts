@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import { readFile, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { snapshotStats } from "../src/core/snapshot.ts";
-import type { PageRecord } from "../src/core/types.ts";
 import { corpusLimits } from "../src/corpus/access.ts";
 import { readCorpus, readSummary, searchCorpus } from "../src/corpus/index.ts";
 import { runFiles } from "../src/output/files.ts";
@@ -12,6 +11,7 @@ import {
 	commitRun,
 	tempDir,
 	testConfig,
+	testFailure,
 	testPage,
 	writeRunMetadata,
 	writeValidCorpus,
@@ -24,82 +24,27 @@ describe("corpus integrity", () => {
 		expect(page.rendered).not.toContain("contentHash:");
 		expect(page.rendered).not.toContain("fetchedAt:");
 		expect(page.rendered).not.toContain("extractor:");
-		expect(page.rendered).not.toContain("confidence:");
 		expect(page.rendered).not.toContain("redirects:");
 	});
 
 	test("bounds summary failure examples", () => {
-		const failures: PageRecord[] = Array.from({ length: 25 }, (_, index) => ({
-			ok: false,
-			url: `https://docs.example.com/${index}`,
-			finalUrl: `https://docs.example.com/${index}`,
-			status: 429,
-			source: "crawl",
-			timings: { fetchMs: 1, extractMs: 0, writeMs: 0 },
-			redirects: [],
-			fetchedAt: "2026-01-01T00:00:00.000Z",
-			injectionSignals: [],
-			markdown: "",
-			links: [],
-			contentHash: "",
-			extractor: "none",
-			confidence: 0,
-			qualityReasons: [],
-			error: "HTTP 429",
-			failureKind: "blocked",
-		}));
+		const failures = Array.from({ length: 25 }, (_, index) =>
+			testFailure({
+				url: `https://docs.example.com/${index}`,
+				finalUrl: `https://docs.example.com/${index}`,
+				status: 429,
+				error: "HTTP 429",
+				failureKind: "blocked",
+			}),
+		);
 		const summary = buildSummary(
 			failures,
 			[],
 			testConfig("unused", { pageOnly: false, max: 25 }),
-			failures.map((record) => ({ url: record.url, source: "crawl" })),
-			0,
 			snapshotStats([]),
-			1,
 		);
-		expect(summary.errors).toHaveLength(20);
-		expect(summary.errorsOmitted).toBe(5);
-	});
-
-	test("succeeds when failures do not prevent the requested page count", () => {
-		const page = testPage();
-		const failure: PageRecord = {
-			ok: false,
-			url: "https://docs.example.com/empty",
-			finalUrl: "https://docs.example.com/empty",
-			status: 200,
-			source: "sitemap",
-			timings: { fetchMs: 1, extractMs: 0, writeMs: 0 },
-			redirects: [],
-			fetchedAt: "2026-01-01T00:00:00.000Z",
-			injectionSignals: [],
-			markdown: "",
-			links: [],
-			contentHash: "",
-			extractor: "none",
-			confidence: 0,
-			qualityReasons: [],
-			error: "empty content",
-			failureKind: "empty",
-		};
-		const summary = buildSummary(
-			[page, failure],
-			[page],
-			testConfig("unused", { pageOnly: false }),
-			[
-				{ url: page.url, source: "seed", wasSeed: true },
-				{ url: failure.url, source: "sitemap" },
-			],
-			0,
-			snapshotStats([{ path: page.outputPath, body: page.rendered }]),
-			1,
-		);
-		expect(summary).toMatchObject({
-			status: "ok",
-			maxReached: true,
-			written: 1,
-			failed: 1,
-		});
+		expect(summary.errors).toHaveLength(3);
+		expect(summary.errorsOmitted).toBe(22);
 	});
 
 	test("keeps a successfully redirected seed successful", () => {
@@ -117,10 +62,7 @@ describe("corpus integrity", () => {
 			[page],
 			[page],
 			testConfig("unused", { seedUrl }),
-			[{ url: seedUrl, source: "seed", wasSeed: true }],
-			0,
 			snapshotStats([{ path: page.outputPath, body: page.rendered }]),
-			1,
 		);
 		expect(summary.status).toBe("ok");
 		expect(summary.seed).toMatchObject({
@@ -184,24 +126,6 @@ describe("corpus integrity", () => {
 		await expect(readCorpus(root)).rejects.toThrow("not inside output_dir");
 	});
 
-	test("rejects published pre-0.2 summary fields", async () => {
-		const root = await tempDir("pre02-summary");
-		await writeFile(
-			join(root, "summary.json"),
-			JSON.stringify({
-				seedUrl: "https://docs.example.com/",
-				written: 1,
-				snapshotVersion: 1,
-				rootHash: "a".repeat(64),
-				renderedFiles: 1,
-				renderedBytes: 10,
-				errors: [],
-				byFailureKind: {},
-			}),
-		);
-		await expect(readSummary(root)).rejects.toThrow("Invalid summary.json");
-	});
-
 	test("reads optional page kind from the manifest", async () => {
 		const root = await tempDir("corpus-kind");
 		const page = { ...testPage(), kind: "docs-html" as const };
@@ -209,34 +133,10 @@ describe("corpus integrity", () => {
 			{ path: page.outputPath, body: page.rendered },
 		]);
 		const config = testConfig(root);
-		const summary = buildSummary(
-			[page],
-			[page],
-			config,
-			[{ url: page.url, source: "seed", wasSeed: true }],
-			0,
-			snapshot,
-			1,
-		);
+		const summary = buildSummary([page], [page], config, snapshot);
 		await commitRun([page], [page], summary, config);
 		const corpus = await readCorpus(root);
 		expect(corpus.records[0]?.kind).toBe("docs-html");
-	});
-
-	test("rejects the pre-0.2 asset source", async () => {
-		const root = await tempDir("pre02-asset");
-		await writeValidCorpus(root);
-		const path = join(root, runFiles.manifest);
-		await writeFile(
-			path,
-			(await readFile(path, "utf8")).replace(
-				'"source":"seed"',
-				'"source":"asset"',
-			),
-		);
-		await expect(readCorpus(root)).rejects.toThrow(
-			`Invalid ${runFiles.manifest} in corpus`,
-		);
 	});
 
 	test("keeps manifest resource indexes public", async () => {
@@ -245,14 +145,12 @@ describe("corpus integrity", () => {
 		const page = {
 			...testPage(),
 			links: ["https://docs.example.com/public", "http://localhost:3000/"],
-			media: ["https://cdn.example.com/image.png", "http://127.0.0.1/a.png"],
 		};
 		await writeRunMetadata([page], summary, testConfig(root));
 		const entry = JSON.parse(
 			(await readFile(join(root, runFiles.manifest), "utf8")).trim(),
 		);
 		expect(entry.links).toEqual(["https://docs.example.com/public"]);
-		expect(entry.media).toEqual(["https://cdn.example.com/image.png"]);
 	});
 
 	test("refetches pages whose persisted discovery links were truncated", async () => {
@@ -267,10 +165,7 @@ describe("corpus integrity", () => {
 			[page],
 			[page],
 			config,
-			[{ url: page.url, source: "seed", wasSeed: true }],
-			0,
 			snapshotStats([{ path: page.outputPath, body: page.rendered }]),
-			1,
 		);
 		await writeRunMetadata([page], summary, config);
 		const prior = await loadPrior(config);
@@ -292,7 +187,6 @@ describe("corpus integrity", () => {
 			finalUrl: `https://docs.example.com/${index}`,
 			outputPath: `${index}.md`,
 			links,
-			media: links,
 		}));
 		const { summary } = await writeValidCorpus(root);
 		await writeRunMetadata(records, summary, testConfig(root, { max: 2_000 }));
@@ -306,8 +200,6 @@ describe("corpus integrity", () => {
 		expect(entry).toMatchObject({
 			linksCount: links.length,
 			linksTruncated: true,
-			mediaCount: links.length,
-			mediaTruncated: true,
 		});
 	});
 
@@ -364,7 +256,6 @@ describe("corpus integrity", () => {
 	});
 
 	test.each([
-		["redirect", { redirectedHosts: [42] }],
 		["error", { errors: [42] }],
 		["render summary", { render: {} }],
 	] as const)("rejects malformed nested %s data", async (_, invalid) => {
@@ -388,10 +279,7 @@ describe("corpus integrity", () => {
 			[page],
 			[page],
 			config,
-			[{ url: page.url, source: "seed", wasSeed: true }],
-			0,
 			snapshotStats([{ path: page.outputPath, body: page.rendered }]),
-			1,
 		);
 		await writeRunMetadata([page], summary, config);
 		await expect(readCorpus(root)).rejects.toThrow(

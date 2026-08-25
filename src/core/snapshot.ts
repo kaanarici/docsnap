@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 export const snapshotSchemaVersion = 1;
 
 type SnapshotFile = {
@@ -22,7 +21,7 @@ export function byteLength(value: string): number {
 }
 
 export function hashContent(value: string): string {
-	return createHash("sha256").update(value).digest("hex");
+	return Bun.CryptoHasher.hash("sha256", value, "hex");
 }
 
 export function snapshotStats(files: SnapshotFile[]): SnapshotStats {
@@ -67,7 +66,7 @@ export function snapshotStatsFromLeaves(
 }
 
 function hashParts(...parts: string[]): string {
-	const hash = createHash("sha256");
+	const hash = new Bun.CryptoHasher("sha256");
 	for (const part of parts) {
 		hash.update(part);
 		hash.update("\0");

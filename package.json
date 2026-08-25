@@ -39,11 +39,10 @@
 	],
 	"scripts": {
 		"build": "bun scripts/build.ts",
-		"check": "bun run lint && bun run typecheck && bun run test && bun run size && bun run build",
+		"check": "bun run lint && bun run typecheck && bun run test && bun run build",
 		"lint": "biome check . && oxlint .",
 		"test": "bun test --max-concurrency=1",
 		"typecheck": "tsc --noEmit",
-		"size": "bun scripts/size.ts",
 		"prepack": "bun run build",
 		"publish:dry": "bun pm pack --dry-run"
 	},
@@ -54,8 +53,7 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.13",
-		"@oxlint/plugins": "1.78.0",
-		"@types/bun": "1.4.0",
+		"bun-types": "1.4.0",
 		"oxlint": "1.78.0",
 		"typescript": "^5.9.3"
 	}

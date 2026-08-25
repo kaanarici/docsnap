@@ -74,9 +74,7 @@ export function createDiscoveryFrontier(
 		inScope(url, input.seed, input.scope) && input.robots.allowed(url);
 	const prioritize = (urls: string[]) =>
 		diversityFirst(
-			config.maxExplicit
-				? orderByTopic(urls, input.seed, input.scope, config.topic)
-				: urls,
+			config.maxExplicit ? orderByTopic(urls, input.seed, input.scope) : urls,
 		);
 	const seedUrls = prioritize(input.seedResources.links);
 	const nav = prioritize(input.seedResources.nav ?? []);

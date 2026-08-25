@@ -109,8 +109,6 @@ export function filterInjectionSignals(
 		: [];
 }
 
-export const lowQualityConfidence = 0.6;
-
 export type HeaderMap = {
 	get(name: string): string | null;
 	getSetCookie?(): string[];
@@ -138,13 +136,11 @@ export type PipelineConfig = {
 	userAgent: string;
 	timeoutMs: number;
 	maxBytes: number;
-	topic?: string;
 };
 
 export type CliOptions = {
 	json: boolean;
 	quiet: boolean;
-	failOnLowQuality: boolean;
 	failOnInjectionSignal: boolean;
 };
 
@@ -155,7 +151,6 @@ type FetchBase = {
 	contentType: string;
 	body: string;
 	document?: Uint8Array;
-	fetchMs: number;
 	redirects?: RedirectHop[];
 	etag?: string;
 	lastModified?: string;
@@ -219,29 +214,17 @@ export type FetchedUrl = {
 	metadata?: DiscoveryMetadata;
 };
 
-type RenderMetrics = {
-	renderer: "chrome-cdp";
-	renderMs: number;
-	blockedRequests: number;
-	fulfilledRequests: number;
-	relayedBytes: number;
-};
-
 type PageBase = {
 	url: string;
 	finalUrl: string;
 	status: number;
 	source: DiscoverySource;
 	wasSeed?: true;
-	timings: { fetchMs: number; extractMs: number; writeMs: number };
 	redirects: RedirectHop[];
 	etag?: string;
 	lastModified?: string;
 	fetchedAt: string;
 	injectionSignals: InjectionSignal[];
-	render?: RenderMetrics & { truncated?: true };
-	publishedAt?: string;
-	updatedAt?: string;
 };
 
 export type PageSuccess = PageBase & {
@@ -251,13 +234,10 @@ export type PageSuccess = PageBase & {
 	title?: string;
 	markdown: string;
 	links: string[];
-	media?: string[];
 	contentHash: string;
 	extractor: PageExtractor;
 	kind?: PageKind;
 	byteSource?: ByteSource;
-	inlineStateSource?: InlineStateSource;
-	confidence: number;
 	qualityReasons: string[];
 };
 
@@ -269,10 +249,8 @@ export type PageFailure = PageBase & {
 	ok: false;
 	markdown: "";
 	links: [];
-	media?: string[];
 	contentHash: "";
 	extractor: "none";
-	confidence: 0;
 	qualityReasons: [];
 	error: string;
 	failureKind: FailureKind;
@@ -300,39 +278,23 @@ export type RunSummary = {
 	maxReached: boolean;
 	discoveryTruncated?: boolean;
 	stopReason?: "rate_limited";
-	selectionHash?: string;
-	discovered: number;
-	deduped: number;
 	written: number;
 	failed: number;
 	lowQuality: number;
 	qualityWarnings: number;
 	injectionSignalPages: number;
-	byInjectionSignal: Partial<Record<InjectionSignal, number>>;
-	hostRedirects: number;
-	redirectedHosts: Array<{ from: string; to: string; count: number }>;
-	elapsedMs: number;
-	pagesPerSecond: number;
-	bySource: Record<DiscoverySource, number>;
-	byExtractor: Record<PageExtractor, number>;
-	byKind?: Partial<Record<PageKind, number>>;
-	byInlineStateSource: Partial<Record<InlineStateSource, number>>;
 	byFailureKind: Partial<Record<FailureKind, number>>;
 	errors: Array<{ url: string; error: string; failureKind: FailureKind }>;
 	errorsOmitted?: number;
-	render?: RenderMetrics & {
-		attempted: number;
-		rendered: number;
+	render?: {
 		recovered: number;
 		failed: number;
-		launchMs: number;
 		skipped: number;
 		truncated: boolean;
 		stopReason?: "budget" | "no_recovery";
 		unavailable?: string;
 	};
-	refresh: RefreshSummary;
-	cache: CacheSummary;
+	refresh?: RefreshSummary;
 };
 
 export function runSucceeded(
@@ -389,13 +351,6 @@ export type RefreshChangedPage = {
 export type RefreshSummary = {
 	enabled: boolean;
 	reason?: "clean" | "missing_manifest" | "invalid_manifest";
-	priorRecords: number;
-	checked: number;
-	notModified: number;
-	reused: number;
-	fallbackRefetches: number;
-	pageWrites: number;
-	skippedWrites: number;
 	new: number;
 	changed: number;
 	unchanged: number;

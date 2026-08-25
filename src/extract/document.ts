@@ -2,7 +2,7 @@ import type { FetchedUrl } from "../core/types.ts";
 import { failedRecord, recordFromExtracted } from "./page-record.ts";
 import { titleFromMarkdown } from "./title.ts";
 
-export async function extractDocument(input: FetchedUrl, started: number) {
+export async function extractDocument(input: FetchedUrl) {
 	const { result } = input;
 	const bytes = result.document;
 	if (!bytes) throw new Error("missing document payload");
@@ -23,7 +23,6 @@ export async function extractDocument(input: FetchedUrl, started: number) {
 				extractor: "markdown",
 				title: titleFromMarkdown(markdown, path.replace(/\.[^./]+$/, "")),
 			},
-			started,
 			[],
 			"binary",
 		);
@@ -33,7 +32,6 @@ export async function extractDocument(input: FetchedUrl, started: number) {
 		return failedRecord(
 			result,
 			input.source,
-			input.metadata,
 			documentError(failure, path),
 			"code" in failure && failure.code === "resourceLimit"
 				? "too_large"

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { relative } from "node:path";
 import { identityUrls } from "../core/identity.ts";
 import { safeDecode } from "../core/text.ts";
@@ -115,5 +114,5 @@ function slug(value: string) {
 }
 
 function shortHash(value: string) {
-	return createHash("sha256").update(value).digest("hex").slice(0, 8);
+	return Bun.CryptoHasher.hash("sha256", value, "hex").slice(0, 8);
 }

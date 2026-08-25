@@ -5,7 +5,6 @@ export function failed(
 	url: string,
 	finalUrl: string,
 	status: number,
-	started: number,
 	error: string,
 	kind: FailureKind,
 	redirects: RedirectHop[] = [],
@@ -17,7 +16,6 @@ export function failed(
 		contentType: "",
 		body: "",
 		ok: false,
-		fetchMs: performance.now() - started,
 		redirects,
 		fetchedAt: new Date().toISOString(),
 		error: normalizeFailureError(error),
@@ -82,7 +80,6 @@ function failureFields(
 			status: 0,
 			contentType: "",
 			body: "",
-			fetchMs: 0,
 		};
 	}
 	const fields: FailedFetchFields = {
@@ -92,7 +89,6 @@ function failureFields(
 		status: input.status,
 		contentType: input.contentType,
 		body: "",
-		fetchMs: input.fetchMs,
 	};
 	if (includeValidators && input.etag) fields.etag = input.etag;
 	if (includeValidators && input.lastModified) {
