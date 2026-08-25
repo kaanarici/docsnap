@@ -167,6 +167,46 @@ describe("corpus integrity", () => {
 		expect(result.matches[0]?.text).not.toContain("url:");
 	});
 
+	test("finds a multi-concept question without requiring every long word", async () => {
+		const root = await tempDir("search-question");
+		const page = testPage(`
+# File Types
+
+Bun uses the file extension to pick the built-in loader that parses the file.
+Every loader has a name, such as json. These names are used when building
+plugins that extend Bun with custom loaders.
+
+${"Background information about other supported file types.\n".repeat(30)}
+
+### json
+
+The JSON loader is the default for the .json file extension.
+`);
+		const config = testConfig(root);
+		const summary = buildSummary(
+			[page],
+			[page],
+			config,
+			snapshotStats([{ path: page.outputPath, body: page.rendered }]),
+		);
+		await commitRun([page], [page], summary, config);
+		const { records } = await readCorpus(root);
+		const result = await searchCorpus(root, {
+			query:
+				"Which file extensions use the JSON loader, and how are plugin loader names used?",
+			maxResults: 5,
+			snippetChars: 300,
+			records,
+		});
+		expect(result.matches).toHaveLength(2);
+		expect(result.matches.map((match) => match.text).join("\n")).toContain(
+			"custom loaders",
+		);
+		expect(result.matches.map((match) => match.text).join("\n")).toContain(
+			"default for the .json",
+		);
+	});
+
 	test("rejects a corpus page symlinked outside its real root", async () => {
 		const root = await tempDir("corpus-symlink");
 		const outside = await tempDir("corpus-symlink-outside");

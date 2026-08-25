@@ -1,6 +1,6 @@
 import { hashContent } from "../core/snapshot.ts";
 import type { CorpusPage } from "../corpus/index.ts";
-import { docSnippet, lineNumberAt } from "./snippets.ts";
+import { docSnippets, lineNumberAt } from "./snippets.ts";
 
 type PageRecord = CorpusPage & { outputPath: string };
 
@@ -146,7 +146,6 @@ export function rankPages(
 	const requiredTerms = meaningfulQueryTerms(queryTerms);
 	const snippetSource = requiredTerms.length ? requiredTerms : queryTerms;
 	const snippetTerms = new Set(snippetSource);
-	const distinctiveTerms = requiredTerms.filter((term) => term.length >= 8);
 	const literalTerms = queryLiteralTerms(query);
 	const strictHits = minRequiredHits(requiredTerms.length);
 	const requiredHits =
@@ -155,38 +154,41 @@ export function rankPages(
 			? 1
 			: strictHits;
 	const scored: RankedSnippet[] = [];
+	const supplemental: RankedSnippet[] = [];
 	for (const doc of input.pages) {
 		const hitCount = countTermHits(doc, requiredTerms);
 		if (requiredHits > 0 && hitCount < requiredHits) continue;
-		if (distinctiveTerms.length && !countTermHits(doc, distinctiveTerms))
-			continue;
 		const score =
 			scoreDoc(input, doc, queryTerms) *
 			literalTermBoost(doc, literalTerms) *
 			preferredPageBoost(doc, options.preferredOutputPaths);
 		if (score <= 0) continue;
-		const snippet = docSnippet(
+		const snippets = docSnippets(
 			doc,
 			snippetTerms,
 			options.snippetChars,
 			literalTerms,
 		);
-		scored.push({
-			record: doc.record,
-			contentHash: doc.record.contentHash ?? hashContent(doc.body),
-			extractor: doc.record.extractor ?? "unknown",
-			score,
-			lineStart: snippet.lineStart,
-			lineEnd: snippet.lineEnd,
-			text: snippet.text,
-		});
+		for (let index = 0; index < snippets.length; index++) {
+			const snippet = snippets[index]!;
+			(index === 0 ? scored : supplemental).push({
+				record: doc.record,
+				contentHash: doc.record.contentHash ?? hashContent(doc.body),
+				extractor: doc.record.extractor ?? "unknown",
+				score,
+				lineStart: snippet.lineStart,
+				lineEnd: snippet.lineEnd,
+				text: snippet.text,
+			});
+		}
 	}
-	scored.sort(
-		(a, b) =>
-			b.score - a.score ||
-			a.record.outputPath.localeCompare(b.record.outputPath),
-	);
-	return scored.slice(0, options.maxResults);
+	const byScore = (a: RankedSnippet, b: RankedSnippet) =>
+		b.score - a.score ||
+		a.record.outputPath.localeCompare(b.record.outputPath) ||
+		a.lineStart - b.lineStart;
+	scored.sort(byScore);
+	supplemental.sort(byScore);
+	return [...scored, ...supplemental].slice(0, options.maxResults);
 }
 
 function preferredPageBoost(

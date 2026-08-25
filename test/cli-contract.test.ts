@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
 import { parseArgs } from "../src/cli/args.ts";
+import { snapshotStats } from "../src/core/snapshot.ts";
+import { buildSummary } from "../src/report/summary.ts";
+import { commitRun, tempDir, testConfig, testPage } from "./fixtures.ts";
 
 const entry = new URL("../src/entry.ts", import.meta.url).pathname;
 
@@ -99,4 +102,39 @@ test("quiet capture still returns one structured result", async () => {
 	} finally {
 		server.stop(true);
 	}
+});
+
+test("explicit reuse keeps a usable corpus with quality warnings", async () => {
+	const outputDir = await tempDir("fetch-reuse");
+	const page = { ...testPage(), qualityReasons: ["thin content"] };
+	const config = testConfig(outputDir);
+	const summary = buildSummary(
+		[page],
+		[page],
+		config,
+		snapshotStats([{ path: page.outputPath, body: page.rendered }]),
+	);
+	await commitRun([page], [page], summary, config);
+
+	const { exitCode, stdout, stderr } = await runCli([
+		"fetch",
+		config.seedUrl,
+		"documentation",
+		"--out",
+		outputDir,
+		"--freshness",
+		"reuse",
+		"--quiet",
+	]);
+	const result = JSON.parse(stdout);
+	expect(exitCode).toBe(0);
+	expect(stderr).toBe("");
+	expect(result).toMatchObject({
+		ok: true,
+		data: {
+			action: "reused",
+			counts: { written: 1, lowQuality: 1 },
+		},
+		warnings: ["1 page is low quality."],
+	});
 });

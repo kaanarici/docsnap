@@ -138,7 +138,7 @@ async function fetchResult(input: FetchInput): Promise<FetchResult> {
 	const requested =
 		input.freshness === "reuse" ? { ...base, maxExplicit: false } : base;
 	const requestedOutputDir = input.outputDir ?? base.outDir;
-	const existing = await loadReusableCorpus(
+	const existing = await loadExistingCorpus(
 		requested,
 		requestedOutputDir,
 		input,
@@ -241,7 +241,7 @@ async function fetchResult(input: FetchInput): Promise<FetchResult> {
 		...baseResult,
 		message: citations.length
 			? `Found ${citations.length} matching passage${citations.length === 1 ? "" : "s"} in a ${summary.written}-page corpus.`
-			: `Captured ${summary.written} pages, but found no matching passages.`,
+			: `Captured ${summary.written} page${summary.written === 1 ? "" : "s"}, but found no matching passages.`,
 		next: citations.length
 			? "Use the cited passages. Search the corpus again only if they do not answer the question."
 			: "Search the corpus with different terms; the capture succeeded but this query found no relevant passage.",
@@ -295,13 +295,13 @@ function writeMismatch(error: CorpusMismatchError): void {
 	process.exitCode = 1;
 }
 
-async function loadReusableCorpus(
+async function loadExistingCorpus(
 	requested: PipelineConfig,
 	requestedOutputDir: string,
 	input: FetchInput,
 ): Promise<LocatedCorpus | null> {
 	if (!input.outputDir && input.freshness !== "force") {
-		const library = await reusableLibraryCorpus(requested);
+		const library = await libraryCorpus(requested);
 		if (library) return library;
 	}
 	const existing = await existingCorpus(
@@ -312,7 +312,7 @@ async function loadReusableCorpus(
 	return existing ? { outputDir: requestedOutputDir, ...existing } : null;
 }
 
-async function reusableLibraryCorpus(
+async function libraryCorpus(
 	requested: PipelineConfig,
 ): Promise<LocatedCorpus | null> {
 	let latest: LocatedCorpus | null = null;
@@ -326,7 +326,7 @@ async function reusableLibraryCorpus(
 		try {
 			const verified = await readCorpus(output_dir);
 			const { summary } = verified;
-			if (canReuseCorpus(summary, requested, verified.records)) {
+			if (matchesRequest(summary, requested, verified.records)) {
 				const candidate = { outputDir: output_dir, ...verified };
 				if (
 					!latest ||
@@ -355,7 +355,6 @@ async function existingCorpus(
 	}
 	const replaceable =
 		allowReplace ||
-		!summaryCanBeReused(summary) ||
 		(summary.seedUrl === requested.seedUrl &&
 			summary.captureMode === (requested.pageOnly ? "page" : "site"));
 	let verified: Corpus;
@@ -365,7 +364,7 @@ async function existingCorpus(
 		if (replaceable) return null;
 		throw new Error(`Invalid manifest in existing corpus: ${outputDir}`);
 	}
-	if (canReuseCorpus(summary, requested, verified.records)) return verified;
+	if (matchesRequest(summary, requested, verified.records)) return verified;
 	if (replaceable) return null;
 	throw new CorpusMismatchError(
 		outputDir,
@@ -375,16 +374,12 @@ async function existingCorpus(
 	);
 }
 
-function canReuseCorpus(
+function matchesRequest(
 	summary: RunSummary,
 	requested: PipelineConfig,
 	records: CorpusPage[],
 ): boolean {
-	const enoughPages =
-		!summary.maxReached ||
-		!requested.maxExplicit ||
-		requested.max <= summary.max;
-	if (!summaryCanBeReused(summary) || !enoughPages) return false;
+	if (!runSucceeded(summary) || !summary.seed.included) return false;
 	if (!manifestMatchesSummary(summary, records)) return false;
 	const resource = classifyDiscoveryResource(requested.seedUrl);
 	if (
@@ -410,17 +405,6 @@ function canReuseCorpus(
 		return true;
 	}
 	return matchingOutputPaths(records, requested.seedUrl).length > 0;
-}
-
-function summaryCanBeReused(summary: RunSummary) {
-	return (
-		summary.ok &&
-		summary.seed.included &&
-		summary.lowQuality === 0 &&
-		!summary.stopReason &&
-		(!summary.discoveryTruncated || summary.maxReached) &&
-		!summary.render?.truncated
-	);
 }
 
 function fetchData(result: FetchResult) {

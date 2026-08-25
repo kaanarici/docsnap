@@ -1,4 +1,5 @@
 type Snippet = { lineStart: number; lineEnd: number; text: string };
+type LocatedSnippet = Snippet & { start: number; end: number };
 
 type SnippetDoc = {
 	body: string;
@@ -8,29 +9,69 @@ type SnippetDoc = {
 const maxSnippetHits = 2_000;
 const clipMarker = "...";
 
-export function docSnippet(
+export function docSnippets(
 	doc: SnippetDoc,
 	queryTerms: Set<string>,
 	snippetChars: number,
 	literalTerms: string[] = [],
-): Snippet {
-	const body = bestSnippet(doc.body, queryTerms, snippetChars, literalTerms);
-	return {
-		...body,
-		lineStart: body.lineStart + doc.bodyLineOffset,
-		lineEnd: body.lineEnd + doc.bodyLineOffset,
-	};
+): Snippet[] {
+	const firstHit = bestHit(doc.body, queryTerms, snippetChars, literalTerms);
+	const first = snippetAt(doc, firstHit, snippetChars);
+	if (firstHit < 0) return [publicSnippet(first)];
+	const blockedStart = Math.max(0, first.start - snippetChars * 3);
+	const blockedEnd = Math.min(doc.body.length, first.end + snippetChars * 3);
+	const masked =
+		doc.body.slice(0, blockedStart) +
+		doc.body.slice(blockedStart, blockedEnd).replace(/[^\n]/g, " ") +
+		doc.body.slice(blockedEnd);
+	const secondHit =
+		headingHit(masked, queryTerms) ??
+		bestHit(masked, queryTerms, snippetChars, literalTerms);
+	return secondHit < 0
+		? [publicSnippet(first)]
+		: [
+				publicSnippet(first),
+				publicSnippet(snippetAt(doc, secondHit, snippetChars)),
+			];
 }
 
-function bestSnippet(
+function headingHit(body: string, queryTerms: Set<string>) {
+	let best: { terms: number; offset: number } | undefined;
+	let lineStart = 0;
+	let headings = 0;
+	while (lineStart < body.length && headings < 500) {
+		let lineEnd = body.indexOf("\n", lineStart);
+		if (lineEnd < 0) lineEnd = body.length;
+		if (body[lineStart] === "#") {
+			const hits = queryHits(body.slice(lineStart, lineEnd), queryTerms);
+			const terms = new Set(hits.map((hit) => hit.term)).size;
+			if (terms && (!best || terms > best.terms)) {
+				best = { terms, offset: lineStart + hits[0]!.offset };
+			}
+			headings++;
+		}
+		lineStart = lineEnd + 1;
+	}
+	return best?.offset;
+}
+
+function bestHit(
 	body: string,
 	queryTerms: Set<string>,
 	snippetChars: number,
 	literalTerms: string[] = [],
-): Snippet {
-	const hit =
-		literalHit(body, literalTerms) ??
-		densestHit(body, queryTerms, snippetChars);
+): number {
+	return (
+		literalHit(body, literalTerms) ?? densestHit(body, queryTerms, snippetChars)
+	);
+}
+
+function snippetAt(
+	doc: SnippetDoc,
+	hit: number,
+	snippetChars: number,
+): LocatedSnippet {
+	const body = doc.body;
 	const center = hit >= 0 ? hit : 0;
 	const half = Math.floor(snippetChars / 2);
 	let start = Math.max(0, center - half);
@@ -45,9 +86,19 @@ function bestSnippet(
 	}
 	const clip = readableClip(body, start, end, snippetChars);
 	return {
-		lineStart: lineNumberAt(body, clip.start),
-		lineEnd: lineNumberAt(body, clip.end),
+		start: clip.start,
+		end: clip.end,
+		lineStart: lineNumberAt(body, clip.start) + doc.bodyLineOffset,
+		lineEnd: lineNumberAt(body, clip.end) + doc.bodyLineOffset,
 		text: clip.text,
+	};
+}
+
+function publicSnippet(snippet: LocatedSnippet): Snippet {
+	return {
+		lineStart: snippet.lineStart,
+		lineEnd: snippet.lineEnd,
+		text: snippet.text,
 	};
 }
 
