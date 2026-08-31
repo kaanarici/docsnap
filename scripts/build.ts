@@ -21,33 +21,41 @@ if (!result.success)
 	throw new Error(result.logs.map((message) => message.message).join("\n"));
 await chmod(join(outdir, "entry.ts"), 0o755);
 
-// The bin is a Node-compatible launcher: under Bun it imports the CLI
-// directly; under Node it re-execs through Bun or fails with a JSON error.
-const launcher = `#!/usr/bin/env node
+// The bin is a sh/JS polyglot. Shebang execution (bun or npm installs on
+// POSIX) execs Bun in place, so signals reach the CLI directly and Node is
+// never required. Windows shims and direct \`node docsnap.cjs\` runs take the
+// JS path, which re-runs through Bun or fails with a structured error.
+const bunRequired = JSON.stringify({
+	ok: false,
+	message: "DocSnap requires the Bun runtime, and bun was not found on PATH.",
+	next: "Install Bun from https://bun.sh, then rerun this command.",
+	data: null,
+	error: { code: "BUN_REQUIRED", retryable: false },
+	warnings: [],
+});
+const launcher = `#!/bin/sh
+// 2>/dev/null; if command -v bun >/dev/null 2>&1; then exec bun "$0" "$@"; fi; echo '${bunRequired}' >&2; exit 1
 "use strict";
 const { join } = require("node:path");
 const entry = join(__dirname, "entry.ts");
 if (typeof Bun !== "undefined") {
 	import(entry);
 } else {
-	const { spawnSync } = require("node:child_process");
-	const run = spawnSync("bun", [entry, ...process.argv.slice(2)], {
+	const { spawn } = require("node:child_process");
+	const child = spawn("bun", [entry, ...process.argv.slice(2)], {
 		stdio: "inherit",
 	});
-	if (run.error && run.error.code === "ENOENT") {
-		console.error(
-			JSON.stringify({
-				ok: false,
-				message: "DocSnap requires the Bun runtime, and bun was not found on PATH.",
-				next: "Install Bun from https://bun.sh, then rerun this command.",
-				data: null,
-				error: { code: "BUN_REQUIRED", retryable: false },
-				warnings: [],
-			}),
-		);
+	child.on("error", (error) => {
+		if (error.code !== "ENOENT") throw error;
+		console.error(${JSON.stringify(bunRequired)});
 		process.exit(1);
+	});
+	for (const signal of ["SIGINT", "SIGTERM"]) {
+		process.on(signal, () => child.kill(signal));
 	}
-	process.exit(run.status === null ? 1 : run.status);
+	child.on("close", (code, signal) => {
+		process.exit(signal === "SIGINT" ? 130 : signal ? 143 : (code ?? 1));
+	});
 }
 `;
 await Bun.write(join(outdir, "docsnap.cjs"), launcher);
