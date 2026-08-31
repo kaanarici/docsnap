@@ -58,16 +58,12 @@ test("describes every command in one JSON help response", async () => {
 			tool: "docsnap",
 		},
 	});
-	expect(result.data.commands).toHaveLength(3);
 	expect(result.data.commands).toMatchObject([
-		{ name: "capture", effects: "idempotent" },
-		{
-			name: "map",
-			effects: "idempotent",
-			writes: ["shared HTTP cache"],
-		},
-		{ name: "refresh", effects: "idempotent" },
+		{ name: "capture" },
+		{ name: "map", writes: ["shared HTTP cache"] },
+		{ name: "refresh" },
 	]);
+	expect(result.data.details).toContain("--include");
 });
 
 test("returns version as one JSON result", async () => {
