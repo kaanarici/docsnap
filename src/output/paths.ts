@@ -1,17 +1,18 @@
-import { createHash } from "node:crypto";
 import { relative } from "node:path";
+import { identityUrls } from "../core/identity.ts";
 import { safeDecode } from "../core/text.ts";
 import type { PageSuccess, PathedPage } from "../core/types.ts";
-import { urlWithoutFragmentAndQuery } from "../core/url.ts";
+import { urlWithoutFragment } from "../core/url.ts";
 
-// Pure stage transition: each input success becomes a new PathedPage carrying its
-// assigned outputPath. The source records are never mutated, so a reference held
-// before this call still sees a PageSuccess without an outputPath.
 export function assignOutputPaths(records: PageSuccess[]): PathedPage[] {
-	const prefix = pathPrefix(records);
+	if (records.length === 1) return [{ ...records[0]!, outputPath: "index.md" }];
+	const prefix = commonPrefix(
+		records.map((record) => outputSegments(record.finalUrl)),
+	);
 	const byBase = new Map<string, PageSuccess[]>();
 	for (const record of records) {
-		const base = basePath(record.finalUrl, prefix);
+		const parts = stripPrefix(outputSegments(record.finalUrl), prefix);
+		const base = `${parts.join("/") || "index"}.md`;
 		const group = byBase.get(base) ?? [];
 		group.push(record);
 		byBase.set(base, group);
@@ -25,7 +26,9 @@ export function assignOutputPaths(records: PageSuccess[]): PathedPage[] {
 		for (const record of sorted) {
 			paths.set(
 				record,
-				group.length === 1 ? base : withSuffix(base, shortHash(record.url)),
+				group.length === 1
+					? base
+					: base.replace(/\.md$/, `-${shortHash(record.url)}.md`),
 			);
 		}
 	}
@@ -37,21 +40,29 @@ export function assignOutputPaths(records: PageSuccess[]): PathedPage[] {
 
 export function pathMap(records: PathedPage[]): Map<string, string> {
 	const map = new Map<string, string>();
+	const ambiguous = new Set<string>();
 	for (const record of records) {
-		for (const url of urlAliases(record)) {
-			map.set(urlWithoutFragmentAndQuery(url), record.outputPath);
+		for (const url of identityUrls(record)) {
+			addPathKey(map, ambiguous, urlWithoutFragment(url), record.outputPath);
 		}
 	}
+	for (const key of ambiguous) map.delete(key);
 	return map;
 }
 
-function urlAliases(record: PageSuccess) {
-	return [
-		record.url,
-		record.finalUrl,
-		record.canonicalUrl,
-		...(record.aliases ?? []),
-	].filter((value): value is string => Boolean(value));
+function addPathKey(
+	map: Map<string, string>,
+	ambiguous: Set<string>,
+	key: string,
+	outputPath: string,
+) {
+	if (ambiguous.has(key)) return;
+	const current = map.get(key);
+	if (!current || current === outputPath) map.set(key, outputPath);
+	else {
+		map.delete(key);
+		ambiguous.add(key);
+	}
 }
 
 export function relativeMarkdownLink(fromPath: string, toPath: string): string {
@@ -61,15 +72,6 @@ export function relativeMarkdownLink(fromPath: string, toPath: string): string {
 	);
 	if (!link.startsWith(".")) link = `./${link}`;
 	return link;
-}
-
-function basePath(raw: string, prefix: string[]) {
-	const parts = stripPrefix(outputSegments(raw), prefix);
-	return `${parts.join("/") || "index"}.md`;
-}
-
-function pathPrefix(records: PageSuccess[]) {
-	return commonPrefix(records.map((record) => outputSegments(record.finalUrl)));
 }
 
 function outputSegments(raw: string) {
@@ -96,13 +98,6 @@ function startsWith(path: string[], prefix: string[]) {
 	return prefix.every((part, index) => path[index] === part);
 }
 
-function withSuffix(path: string, suffix: string) {
-	return path.replace(/\.md$/, `-${suffix}.md`);
-}
-
-// keep each path segment well under the common 255-byte filesystem component
-// limit; long segments are truncated with a stable hash suffix so distinct
-// long URLs still map to distinct, writable filenames
 const maxSlugChars = 120;
 
 function slug(value: string) {
@@ -119,5 +114,5 @@ function slug(value: string) {
 }
 
 function shortHash(value: string) {
-	return createHash("sha256").update(value).digest("hex").slice(0, 8);
+	return Bun.CryptoHasher.hash("sha256", value, "hex").slice(0, 8);
 }

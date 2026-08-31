@@ -1,418 +1,303 @@
-import { describe, expect, test } from "bun:test";
-import {
-	type DiscoverySource,
-	type FetchedUrl,
-	lowQualityConfidence,
-} from "../src/core/types.ts";
+import { expect, test } from "bun:test";
+import { parseHTML } from "linkedom";
 import { extractPage } from "../src/extract/html.ts";
 import { cleanMarkdown } from "../src/extract/markdown.ts";
-import { scoreMarkdown } from "../src/extract/quality.ts";
+import { qualityReasons } from "../src/extract/quality.ts";
+import { structuredFallback } from "../src/extract/structured-fallback.ts";
+import { okFetch } from "./fixtures.ts";
 
-type Extracted = Awaited<ReturnType<typeof extractPage>>;
-type Success = Extract<Extracted, { ok: true }>;
-type Failure = Extract<Extracted, { ok: false }>;
+test("classifies markdown and text assets onto dedicated plans", async () => {
+	const [markdown, , markdownShell] = await extractSeed(
+		"https://docs.example.com/guide.md",
+		"# Guide\n\nHash-verified documentation content for local agents.",
+		{ contentType: "text/markdown" },
+	);
+	expect(markdown).toMatchObject({
+		ok: true,
+		kind: "markdown",
+		extractor: "markdown",
+	});
+	expect(markdownShell).toBe(false);
 
-function extractFrom({
-	body,
-	contentType = "text/html",
-	finalUrl,
-	source = "seed",
-	url,
-}: {
-	body: string;
-	contentType?: string;
-	finalUrl?: string;
-	source?: DiscoverySource;
-	url: string;
-}): Promise<Extracted> {
+	const [json, , jsonShell] = await extractSeed(
+		"https://docs.example.com/config.json",
+		'{"name":"docsnap"}',
+		{ contentType: "application/json" },
+	);
+	expect(json).toMatchObject({
+		ok: true,
+		kind: "markdown",
+		extractor: "text",
+	});
+	expect(jsonShell).toBe(false);
+});
+
+test("keeps script assets intact as fenced source", async () => {
+	const [record] = await extractSeed(
+		"https://docs.example.com/install.sh",
+		"#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' docsnap",
+		{ contentType: "text/x-shellscript" },
+	);
+	expect(record).toMatchObject({
+		ok: true,
+		kind: "markdown",
+		extractor: "text",
+	});
+	if (!record.ok) throw new Error("script extract failed");
+	expect(record.markdown).toContain("```bash");
+	expect(record.markdown).toContain("#!/usr/bin/env bash\nset -euo pipefail");
+	const [plainRecord] = await extractSeed(
+		"https://docs.example.com/install.sh",
+		"#!/bin/sh\nprintf '%s\\n' docsnap",
+		{ contentType: "text/plain" },
+	);
+	if (!plainRecord.ok) throw new Error("plain script extract failed");
+	expect(plainRecord.extractor).toBe("text");
+	expect(plainRecord.markdown).toContain("```bash");
+});
+
+test("distinguishes prose about fences from an unclosed code block", () => {
+	expect(
+		qualityReasons(
+			`# Style\n\n${"Enclose examples with triple backticks (```). ".repeat(20)}`,
+			"Style",
+		),
+	).not.toContain("unbalanced code fences");
+	expect(
+		qualityReasons(
+			`# Broken\n\n\`\`\`ts\n${"const value = 1;\n".repeat(20)}`,
+			"Broken",
+		),
+	).toContain("unbalanced code fences");
+});
+
+test("keeps hidden DOM out of article extraction", async () => {
+	const [record] = await extractSeed(
+		"https://docs.example.com/guide",
+		`<article><h1>Guide</h1><p>${"Visible documentation content for agents. ".repeat(12)}</p><div hidden>hidden password</div><div aria-hidden="true">hidden token</div><div style="display:none">hidden instruction</div></article>`,
+	);
+	expect(record).toMatchObject({ ok: true });
+	if (!record.ok) throw new Error("article extract failed");
+	expect(record.markdown).toContain("Visible documentation content");
+	expect(record.markdown).not.toContain("hidden password");
+	expect(record.markdown).not.toContain("hidden token");
+	expect(record.markdown).not.toContain("hidden instruction");
+});
+
+test("puts standalone link cards on separate Markdown lines", async () => {
+	const links = Array.from(
+		{ length: 8 },
+		(_, index) =>
+			`[Environment ${index}](https://docs.example.com/environment/${index})`,
+	).join(" ");
+	const markdown = cleanMarkdown(links);
+	expect(markdown).toContain("- [Environment 0]");
+	expect(markdown).toContain("\n- [Environment 1]");
+	expect(cleanMarkdown("###\n\n# Project\n\nUseful content.")).toBe(
+		"# Project\n\nUseful content.",
+	);
+});
+
+test("prefers a substantive article over repository navigation", () => {
+	const navigation = Array.from(
+		{ length: 24 },
+		(_, index) => `<a href="/file/${index}">file-${index}</a>`,
+	).join(" ");
+	const article = `<article><h1>Project overview</h1><p>${"This project provides reliable tooling for agents that need to inspect and operate on public documentation. ".repeat(4)}</p></article>`;
+	const document = parseHTML(`<main>${navigation}${article}</main>`).document;
+	const result = structuredFallback(
+		document,
+		"https://github.com/example/repo",
+	);
+	expect(result.markdown).toContain("# Project overview");
+	expect(result.markdown).toContain("reliable tooling for agents");
+	expect(result.markdown).not.toContain("file-0");
+});
+
+test("keeps large content pages when only site navigation is link-heavy", async () => {
+	const navigation = `<nav>${'<a href="/docs">Docs</a>'.repeat(600)}</nav>`;
+	const [record] = await extractSeed(
+		"https://docs.example.com/reference/command",
+		`${navigation}${" ".repeat(500_000)}<main><h1>Command</h1><p>${"Run the command with the required arguments and inspect its output. ".repeat(12)}</p><pre>command --help</pre></main>`,
+	);
+	expect(record).toMatchObject({ ok: true });
+	if (!record.ok) throw new Error("large content extract failed");
+	expect(record.markdown).toContain("command --help");
+	expect(record.markdown).not.toContain("Page Outline");
+});
+
+test("rejects a route fallback that reports a missing page", async () => {
+	const [record] = await extractSeed(
+		"https://docs.example.com/missing.md",
+		"# Page Not Found\n\nThe requested URL does not exist.",
+		{ contentType: "text/markdown" },
+	);
+	expect(record).toMatchObject({
+		ok: false,
+		failureKind: "not_found",
+		error: "page reported not found",
+	});
+});
+
+test("fails feed, empty, and blocked pages before HTML extract", async () => {
+	const [feed, , feedShell] = await extractSeed(
+		"https://docs.example.com/feed.xml",
+		`<?xml version="1.0"?><rss version="2.0"><channel><title>Docs</title></channel></rss>`,
+		{ contentType: "application/rss+xml" },
+	);
+	expect(feed).toMatchObject({
+		ok: false,
+		failureKind: "empty",
+		error: "feed resource, not a content page",
+	});
+	expect(feedShell).toBe(false);
+
+	const [language, , languageShell] = await extractSeed(
+		"https://docs.example.com/select-language",
+		`<html><body class="path-select-language ecl-splash-page__language"></body></html>`,
+	);
+	expect(language).toMatchObject({
+		ok: false,
+		failureKind: "empty",
+		error: "language selector without article content",
+	});
+	expect(languageShell).toBe(false);
+
+	const [blocked, , blockedShell] = await extractSeed(
+		"https://docs.example.com/login",
+		`<html><head><title>Sign in</title></head><body><h1>Sign in</h1><p>Please sign in to continue.</p><form><input type="email"><input type="password"></form></body></html>`,
+	);
+	expect(blocked).toMatchObject({ ok: false, failureKind: "blocked" });
+	expect(blockedShell).toBe(false);
+});
+
+test("skips Defuddle for app shells and recovers inline state only", async () => {
+	const [empty, , emptyShell] = await extractSeed(
+		"https://docs.example.com/app",
+		`<html><head><title>Docs</title></head><body><div id="__next"></div><script src="/app.js"></script></body></html>`,
+	);
+	expect(empty).toMatchObject({ ok: false, failureKind: "empty" });
+	expect(emptyShell).toBe(true);
+
+	const paragraphs = [
+		"Install the command line package and configure the project before capturing your first documentation site.",
+		"The capture command follows public links, records failures, and writes clean Markdown files with source metadata.",
+		"Review the generated summary and manifest to verify page counts, redirects, content hashes, and quality warnings.",
+	];
+	const payload = paragraphs.map((text) => JSON.stringify(text)).join(",");
+	const [inline, , inlineShell] = await extractSeed(
+		"https://docs.example.com/guide",
+		`<html><head><title>Docs</title></head><body><div id="__next"></div><script>self.__next_f.push([1,${JSON.stringify(payload)}])</script></body></html>`,
+	);
+	expect(inline).toMatchObject({
+		ok: true,
+		kind: "app-shell",
+		extractor: "inline-state",
+	});
+	expect(inlineShell).toBe(true);
+	if (!inline.ok) throw new Error("inline-state extract failed");
+	expect(inline.markdown).toContain("Install the command line package");
+	expect(inline.qualityReasons).toContain("inline state may omit content");
+});
+
+test("runs structured-only extract for docs HTML", async () => {
+	const [record, , shell] = await extractSeed(
+		"https://docs.example.com/cli",
+		`<html><head><title>CLI</title><meta name="generator" content="Docusaurus"></head><body><div id="__docusaurus"><nav>${"abcdefghijklmnopqrstuvwxyz"
+			.split("")
+			.map((letter) => `<a href="/${letter}">${letter}</a>`)
+			.join(
+				"",
+			)}</nav><main><h1>CLI</h1><h2>Install</h2><pre>bun add -g docsnap</pre><p>Run the capture command against a public documentation site and write local Markdown files.</p><p><a href="https://raw.githubusercontent.com/example/docs/main/config.yaml">Download the example configuration</a>.</p><h2>Output</h2><p>Write clean Markdown with source URLs and titles for each captured page.</p></main></div></body></html>`,
+	);
+	expect(record).toMatchObject({
+		ok: true,
+		kind: "docs-html",
+		extractor: "structured",
+	});
+	expect(shell).toBe(false);
+	if (!record.ok) throw new Error("docs extract failed");
+	expect(record.markdown).toContain("CLI");
+});
+
+test("uses the page heading instead of a shared site title", async () => {
+	const [record] = await extractSeed(
+		"https://docs.example.com/install",
+		`<html><head><title>Transformers</title></head><body><main><h1>Installation</h1><p>${"Install and configure the library before loading a model. ".repeat(12)}</p></main></body></html>`,
+	);
+	expect(record).toMatchObject({ ok: true, title: "Installation" });
+});
+
+test("keeps paragraphs separated through nested custom elements", async () => {
+	const first = "The first paragraph explains how to configure access safely.";
+	const second = "The second paragraph explains how to verify the result.";
+	const [record] = await extractSeed(
+		"https://docs.example.com/access",
+		`<main><docs-root><docs-layout><docs-content><h1>Access</h1><p>${first}</p><p>${second}</p></docs-content></docs-layout></docs-root></main>`,
+	);
+	if (!record.ok) throw new Error("nested documentation extract failed");
+	expect(record.markdown).toContain(`${first}\n\n${second}`);
+});
+
+test("renders documentation tables as Markdown", async () => {
+	const [record] = await extractSeed(
+		"https://docs.example.com/errors",
+		"<main><h1>Errors</h1><p>Error reference content for agents.</p><table><thead><tr><th>Code</th><th>Meaning</th></tr></thead><tbody><tr><td>400</td><td>Bad request</td></tr><tr><td>403</td><td>Access denied</td></tr></tbody></table></main>",
+	);
+	expect(record).toMatchObject({
+		ok: true,
+		kind: "docs-html",
+		extractor: "structured",
+	});
+	if (!record.ok) throw new Error("documentation table extract failed");
+	expect(record.markdown).toContain("| Code | Meaning |");
+	expect(record.markdown).not.toContain("<table>");
+});
+
+test("runs Defuddle once for article HTML without swapping console", async () => {
+	const error = console.error;
+	const warn = console.warn;
+	const stderr = process.stderr.write;
+	const [record, , shell] = await extractSeed(
+		"https://blog.example.com/hashing",
+		`<html><head><title>Why hashing matters</title><script type="application/ld+json">{broken</script></head><body><article><h1>Why hashing matters</h1><p>Hash-verified documentation lets agents trust a local corpus after a capture run. Each page records a content hash so later refreshes can detect drift without rereading every file.</p><p>When a page changes, the writer replaces that Markdown file and updates the manifest. Unchanged pages keep their previous output path, title, and hash so local references stay stable.</p></article></body></html>`,
+	);
+	expect(console.error).toBe(error);
+	expect(console.warn).toBe(warn);
+	expect(process.stderr.write).toBe(stderr);
+	expect(record).toMatchObject({
+		ok: true,
+		kind: "article-html",
+		extractor: "html",
+	});
+	expect(shell).toBe(false);
+	if (!record.ok) throw new Error("article extract failed");
+	expect(record.markdown).toContain("Hash-verified documentation");
+});
+
+test("keeps Defuddle article text when chrome-only recovery is thin", async () => {
+	const [record, , shell] = await extractSeed(
+		"https://docs.example.com/docs/hub",
+		`<main><h1>Hub</h1><p>Hub documentation.</p><a href="/docs/a">A</a><a href="/docs/b">B</a></main>`,
+	);
+	expect(record).toMatchObject({
+		ok: true,
+		kind: "article-html",
+		extractor: "html",
+	});
+	expect(shell).toBe(false);
+	if (!record.ok) throw new Error("hub extract failed");
+	expect(record.markdown).toContain("Hub documentation");
+});
+
+function extractSeed(
+	url: string,
+	body: string,
+	overrides?: Parameters<typeof okFetch>[2],
+) {
 	return extractPage({
-		source,
-		result: {
-			ok: true,
-			url,
-			finalUrl: finalUrl ?? url,
-			status: 200,
-			contentType,
-			body,
-			fetchMs: 1,
-		},
-	} satisfies FetchedUrl);
+		source: "seed",
+		wasSeed: true,
+		result: okFetch(url, body, overrides),
+	});
 }
-
-function expectOk(record: Extracted): Success {
-	expect(record.ok).toBe(true);
-	if (!record.ok) throw new Error(record.error);
-	return record;
-}
-
-function expectEmpty(record: Extracted): Failure {
-	expect(record.ok).toBe(false);
-	if (record.ok) throw new Error("expected empty failure");
-	expect(record.failureKind).toBe("empty");
-	return record;
-}
-
-describe("markdown quality scoring", () => {
-	test.each([
-		[
-			`Enable JavaScript for an interactive summary table of WebKit's standards positions. Failing that, browse the [standards-positions GitHub repository](https://github.com/WebKit/standards-positions) directly.`,
-			"Standards Positions",
-		],
-		[
-			`A declarative, efficient and flexible JavaScript library for building user interfaces.\n\nSolid is a purely reactive library. It was designed from the ground up with a reactive core. It's influenced by reactive principles developed by previous libraries.`,
-			"SolidJS",
-		],
-		[
-			`Sinatra is a DSL for quickly creating web applications in Ruby with minimal effort:\n\n\`\`\`ruby\nrequire 'sinatra'\nget '/frank-says' do\n  'Put this in your pipe & smoke it!'\nend\n\`\`\``,
-			"Sinatra",
-		],
-		[
-			`Docs.rs no longer has its own badges. Consider using [shields.io](https://shields.io/) instead.`,
-			"Badges",
-		],
-	])("accepts concise real docs: %s", (markdown, title) => {
-		expect(scoreMarkdown(markdown, title).confidence).toBeGreaterThanOrEqual(
-			lowQualityConfidence,
-		);
-	});
-});
-
-describe("app shells fail honestly", () => {
-	test.each([
-		[
-			"docusaurus root",
-			`<div id="__docusaurus"></div><script src="/assets/main.js"></script>`,
-		],
-		[
-			"empty main with config",
-			`<main></main><script>var zdWebClientConfig={"siteURL":"docs.example.com"}</script>`,
-		],
-		[
-			"catalog app",
-			`<title>Client Docs</title><body><catalog-app unresolved></catalog-app></body>`,
-		],
-		[
-			"app root",
-			`<title>Unreal Engine 5.7 Documentation</title><body><app-root class="app-root"></app-root><script src="main.js" type="module"></script></body>`,
-		],
-		[
-			"empty app mount",
-			`<title>Apply to Xavier</title><main><h1>Apply to Xavier</h1><nav>Xavier Home Apply to Xavier</nav><div id="app"></div></main>`,
-		],
-		[
-			"script-loaded css data",
-			`<title>CSS Status</title><main>properties</main><script>var loadCSSProperties = xhrPromise("https://raw.githubusercontent.com/example/project/main/data.json");</script>`,
-		],
-		[
-			"search-only docusaurus",
-			`<title>Plugins</title><div id="__docusaurus"><main><form><input type="search" placeholder="Search"><button>Search</button></form><h1></h1></main></div>`,
-		],
-	])("%s", async (_label, body) => {
-		const appShell = expectEmpty(
-			await extractFrom({
-				url: "https://docs.example.com/docs/",
-				body,
-			}),
-		);
-		expect(appShell.error).toBe("app shell without static text");
-	});
-
-	test("keeps a short static page with script assets", async () => {
-		const shortStaticPage = expectOk(
-			await extractFrom({
-				url: "https://docs.example.com/install",
-				body: `<html><head><title>Install</title><link rel="stylesheet" href="/site.css"></head><body><main><h1>Install</h1><p>Install docsnap with Bun.</p></main><script src="/app.js"></script></body></html>`,
-			}),
-		);
-		expect(shortStaticPage.markdown).toContain("Install docsnap with Bun.");
-	});
-
-	test("does not blank a short page whose title is a body substring", async () => {
-		const shortPageWithAppMount = expectOk(
-			await extractFrom({
-				url: "https://docs.example.com/api",
-				body: `<html><head><title>API</title></head><body><main><p>The API supports JSON and XML responses.</p></main><div id="app"></div></body></html>`,
-			}),
-		);
-		expect(shortPageWithAppMount.markdown).toContain(
-			"The API supports JSON and XML responses.",
-		);
-	});
-
-	test("blanks a genuine title-only SPA shell", async () => {
-		const titleOnlyShell = expectEmpty(
-			await extractFrom({
-				url: "https://app.example.com/",
-				body: `<html><head><title>My App</title></head><body><h1>My App</h1><div id="app"></div></body></html>`,
-			}),
-		);
-		expect(titleOnlyShell.failureKind).toBe("empty");
-	});
-
-	test("blanks a language selector without article content", async () => {
-		const languageSelector = expectEmpty(
-			await extractFrom({
-				url: "https://ec.example.com/",
-				finalUrl:
-					"https://commission.example.com/select-language?destination=/node/1",
-				body: `<html><head><title>Language selection</title></head><body class="path-select-language"><ul class="ecl-splash-page__language-list"><li><a href="/index_en"><span>en</span><span>English</span></a></li><li><a href="/index_fr"><span>fr</span><span>français</span></a></li></ul><script type="application/json">{"currentPath":"select-language"}</script></body></html>`,
-			}),
-		);
-		expect(languageSelector.error).toBe(
-			"language selector without article content",
-		);
-	});
-});
-
-describe("feeds and text-like assets", () => {
-	test("excludes an atom feed reached as a crawl link", async () => {
-		const atomFeed = expectEmpty(
-			await extractFrom({
-				source: "crawl",
-				url: "https://example.com/atom/everything/",
-				contentType: "application/atom+xml; charset=utf-8",
-				body: `<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title>Example Weblog</title><entry><title>Post one</title><link href="https://example.com/2026/post-one/"/><summary>First post summary.</summary></entry></feed>`,
-			}),
-		);
-		expect(atomFeed.error).toBe(
-			"feed resource used for discovery, not a content page",
-		);
-	});
-
-	test("excludes a text/plain rss feed", async () => {
-		const textPlainRssFeed = expectEmpty(
-			await extractFrom({
-				source: "crawl",
-				url: "https://example.com/feed.txt",
-				contentType: "text/plain",
-				body: `<?xml version="1.0"?><rss version="2.0"><channel><title>Example</title><item><title>One</title><link>https://example.com/one</link></item></channel></rss>`,
-			}),
-		);
-		expect(textPlainRssFeed.failureKind).toBe("empty");
-	});
-
-	test("captures plain markdown text", async () => {
-		const plainMarkdown = expectOk(
-			await extractFrom({
-				url: "https://example.com/readme.txt",
-				contentType: "text/plain",
-				body: "# Plain docs\n\nInstall the command line tool, configure the output directory, and inspect the generated Markdown corpus.",
-			}),
-		);
-		expect(plainMarkdown.extractor).toBe("markdown");
-	});
-
-	test("excludes an application/xml rss feed", async () => {
-		const rssFeed = expectEmpty(
-			await extractFrom({
-				source: "crawl",
-				url: "https://example.com/feed.xml",
-				contentType: "application/xml",
-				body: `<?xml version="1.0"?><rss version="2.0"><channel><title>Example</title><item><title>One</title><link>https://example.com/one</link></item></channel></rss>`,
-			}),
-		);
-		expect(rssFeed.failureKind).toBe("empty");
-	});
-
-	test("captures a non-feed xml asset as text", async () => {
-		const xmlConfig = expectOk(
-			await extractFrom({
-				url: "https://example.com/config.xml",
-				contentType: "application/xml",
-				body: `<?xml version="1.0"?><configuration><setting name="theme">dark mode preference for the public documentation viewer surface</setting></configuration>`,
-			}),
-		);
-		expect(xmlConfig.extractor).toBe("text");
-	});
-
-	test("excludes an rss 1.0 rdf feed", async () => {
-		const rdfFeed = expectEmpty(
-			await extractFrom({
-				source: "crawl",
-				url: "https://example.com/rdf",
-				contentType: "application/xml",
-				body: `<?xml version="1.0"?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/"><channel><title>Example</title></channel><item><title>One</title><link>https://example.com/one</link></item></rdf:RDF>`,
-			}),
-		);
-		expect(rdfFeed.failureKind).toBe("empty");
-	});
-
-	test("captures xhtml content without raw text fencing", async () => {
-		const xhtml = expectOk(
-			await extractFrom({
-				url: "https://example.com/page",
-				contentType: "application/xhtml+xml",
-				body: `<html xmlns="http://www.w3.org/1999/xhtml"><head><title>XHTML Page</title></head><body><main><h1>XHTML Page</h1><p>This is a real public documentation content page served as xhtml, not a feed, so it must be captured.</p></main></body></html>`,
-			}),
-		);
-		expect(xhtml.extractor).toBe("html");
-		expect(xhtml.markdown).toContain("real public documentation content page");
-		expect(xhtml.markdown).not.toContain("```");
-	});
-
-	test("fences a structured text asset with more backticks than its body run", async () => {
-		const backtickAsset = expectOk(
-			await extractFrom({
-				url: "https://example.com/snippet.json",
-				contentType: "application/json",
-				body: '{"snippet": "use ````` to fence a block"}',
-			}),
-		);
-		expect(backtickAsset.extractor).toBe("text");
-		const assetFences = backtickAsset.markdown.match(/^`{3,}/gm) ?? [];
-		expect(assetFences).toHaveLength(2);
-		expect(assetFences[0]!.length).toBeGreaterThanOrEqual(6);
-		expect(backtickAsset.markdown).toContain("use ````` to fence");
-	});
-});
-
-describe("html extraction recovery", () => {
-	test("uses meta og title for confidence scoring", async () => {
-		const metaTitlePage = expectOk(
-			await extractFrom({
-				url: "https://solid.example.com/",
-				body: `<html><head><meta name="og:title" content="SolidJS"></head><body><main><p>A declarative, efficient and flexible JavaScript library for building user interfaces.</p><p>Solid is a purely reactive library. It was designed from the ground up with a reactive core. It's influenced by reactive principles developed by previous libraries.</p></main></body></html>`,
-			}),
-		);
-		expect(metaTitlePage.title).toBe("SolidJS");
-		expect(metaTitlePage.confidence).toBeGreaterThanOrEqual(
-			lowQualityConfidence,
-		);
-	});
-
-	test("recovers link-heavy structured content without nav chrome", async () => {
-		const linkOnlyRecovery = expectOk(
-			await extractFrom({
-				url: "https://docs.example.com/docs/",
-				body: `<html><head><title>Grommet</title></head><body><div><a href="/">grommet</a><a href="/docs">docs</a><a href="/components">components</a></div><div><h1>Docs</h1><h2>you got questions, we got some answers. something missing? hit us up on <a href="https://slack.example.com">slack</a>, or open an <a href="https://github.com/example/issues">issue</a>.</h2><h3><a href="/starter">getting started with grommet</a></h3><h3><a href="/functions">functions</a></h3><h3><a href="/resources">resources</a></h3><h3><a href="/browsers">browser support</a></h3></div></body></html>`,
-			}),
-		);
-		expect(linkOnlyRecovery.extractor).toBe("structured");
-		expect(linkOnlyRecovery.markdown).toContain("# Docs");
-		expect(linkOnlyRecovery.markdown).toContain("## you got questions");
-		expect(linkOnlyRecovery.markdown).not.toContain("grommet docs components");
-	});
-
-	test("recovers media-heavy structured content", async () => {
-		const mediaOnlyRecovery = expectOk(
-			await extractFrom({
-				url: "https://developer.example.com/",
-				body: `<html><head><title>Apple Developer</title></head><body><main><article><img src="hero.png"><img src="icon.png"></article><div><h1>Develop for Apple platforms</h1><p>There has never been a better time to develop for Apple platforms.</p><p>Explore tools, documentation, sessions, and pathways for building apps.</p></div></main></body></html>`,
-			}),
-		);
-		expect(mediaOnlyRecovery.extractor).toBe("structured");
-		expect(mediaOnlyRecovery.markdown).toContain("Develop for Apple platforms");
-	});
-
-	test("recovers content from chrome-heavy structured pages", async () => {
-		const chromeOnlyRecovery = expectOk(
-			await extractFrom({
-				url: "https://example.edu/academics/programs/",
-				body: `<html><head><title>Degree Programs</title></head><body><main><article><img src="hero.jpg"><a href="/">Home</a> &gt; <a href="/academics/">Academics</a> &gt; Programs</article><section><h1>Degree Programs</h1><p>Choose from undergraduate, graduate, online, and international programs across many areas of study.</p><p>Explore academic paths, admissions options, financial aid, and campus resources.</p></section></main></body></html>`,
-			}),
-		);
-		expect(chromeOnlyRecovery.extractor).toBe("structured");
-		expect(chromeOnlyRecovery.markdown).toContain("Choose from undergraduate");
-		expect(chromeOnlyRecovery.markdown).not.toContain("Home");
-	});
-
-	test("falls back to a page outline for a very large reference page", async () => {
-		const largeOutline = expectOk(
-			await extractFrom({
-				url: "https://developer.example.com/api/reference/",
-				body: `<html><head><title>API Reference</title><meta name="description" content="Complete API endpoint reference."></head><body>${Array.from(
-					{ length: 520 },
-					(_, index) => `<a href="#endpoint-${index}">Endpoint ${index}</a>`,
-				).join(
-					"",
-				)}<h1>API Reference</h1><h2>Payment Transactions</h2><h3>Charge a Credit Card</h3><h3>Refund a Transaction</h3><h3>Void a Transaction</h3>${"x".repeat(2_000_000)}</body></html>`,
-			}),
-		);
-		expect(largeOutline.extractor).toBe("fallback");
-		expect(largeOutline.markdown).toContain("## Page Outline");
-		expect(largeOutline.markdown).toContain("Payment Transactions");
-		expect(largeOutline.markdown).not.toContain("Endpoint 519");
-	});
-});
-
-describe("markdown cleanup", () => {
-	test("collapses and caps multi-line stock-photo caption alt text", () => {
-		const captionAlt = `${"Mandatory Credit Photo by agency. A view of a building that serves a purpose. ".repeat(8)}`;
-		const cappedImage = cleanMarkdown(
-			`![${captionAlt.replace(/\. /g, ".\n\t")}](https://cdn.example/img.jpg)`,
-		);
-		const cappedAltText = cappedImage.match(/!\[([^\]]*)\]/)?.[1] ?? "";
-		expect(cappedAltText.length).toBeLessThanOrEqual(250);
-		expect(cappedAltText).not.toContain("\n");
-		expect(cappedAltText.endsWith("…")).toBe(true);
-		expect(cappedImage).toContain("](https://cdn.example/img.jpg)");
-		const shortImage = cleanMarkdown("![fetch then extract diagram](/x.png)");
-		expect(shortImage).toContain("![fetch then extract diagram](/x.png)");
-	});
-
-	test("drops standalone ad-slot labels but keeps headings and in-sentence use", () => {
-		const adStripped = cleanMarkdown(
-			"## How to tie a tie\n\nFirst step.\n\nAdvertisement\n\nSecond step.\n\nSPONSORED\n\nDone.",
-		);
-		expect(adStripped).not.toMatch(/^advertisement$/im);
-		expect(adStripped).not.toMatch(/^sponsored$/im);
-		expect(adStripped).toContain("First step.");
-		expect(adStripped).toContain("Second step.");
-		const adKept = cleanMarkdown(
-			"## Advertisement\n\nThe advertisement industry is large.",
-		);
-		expect(adKept).toContain("## Advertisement");
-		expect(adKept).toContain("The advertisement industry is large.");
-	});
-
-	test("drops standalone chrome labels but keeps semantic uses", () => {
-		const chromeLabels = [
-			"Accept all cookies",
-			"Accept cookies",
-			"We use cookies",
-			"Cookie Policy",
-			"Manage cookies",
-			"Got it",
-			"Share this",
-			"Share",
-			"Tweet",
-			"Follow us",
-			"Back to top",
-			"Skip to content",
-			"Skip to main content",
-			"Print this page",
-			"Most read",
-			"Most popular",
-			"Related articles",
-			"Related stories",
-			"Read more",
-			"Sign up",
-			"Subscribe",
-			"Newsletter",
-		];
-		const chromeStripped = cleanMarkdown(
-			["First paragraph.", ...chromeLabels, "Last paragraph."].join("\n\n"),
-		);
-		expect(chromeStripped).toContain("First paragraph.");
-		expect(chromeStripped).toContain("Last paragraph.");
-		const chromeLines = chromeStripped
-			.split("\n")
-			.map((line) => line.trim().toLowerCase());
-		for (const label of chromeLabels) {
-			expect(chromeLines).not.toContain(label.toLowerCase());
-		}
-		expect(
-			cleanMarkdown("Intro.\n\nAccept   all cookies\n\nDone."),
-		).not.toContain("Accept");
-
-		const chromeKept = cleanMarkdown(
-			"## Cookie Policy\n\nThe guide explains how you can subscribe to release updates.\n\n- Subscribe\n\n> Share",
-		);
-		expect(chromeKept).toContain("## Cookie Policy");
-		expect(chromeKept).toContain(
-			"The guide explains how you can subscribe to release updates.",
-		);
-		expect(chromeKept).toContain("- Subscribe");
-		expect(chromeKept).toContain("> Share");
-	});
-});

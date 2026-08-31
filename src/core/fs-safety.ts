@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs";
-import { realpath } from "node:fs/promises";
-import { homedir } from "node:os";
+import { lstat, realpath, stat } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import {
 	basename,
 	dirname,
@@ -11,8 +11,6 @@ import {
 	resolve,
 } from "node:path";
 
-// Top-level directories under $HOME that hold user data, not docsnap artifacts.
-// A cache or output root may not BE the filesystem root, $HOME, or one of these.
 const protectedHomeDirs = new Set([
 	"Applications",
 	"Desktop",
@@ -30,21 +28,17 @@ export function isInsideOrSame(parent: string, child: string): boolean {
 	return path === "" || (!path.startsWith("..") && !parse(path).root);
 }
 
-export function isInsideRoot(root: string, target: string): boolean {
-	return isInsideOrSame(resolve(root), resolve(target));
-}
-
 export function assertInsideRoot(
 	root: string,
 	target: string,
 	message: string,
 ): string {
 	const next = resolve(target);
-	if (!isInsideRoot(root, next)) throw new Error(message);
+	if (!isInsideOrSame(resolve(root), next)) throw new Error(message);
 	return next;
 }
 
-export function isSafeRelativePath(path: string): boolean {
+function isSafeRelativePath(path: string): boolean {
 	return (
 		path.trim() !== "" &&
 		!isAbsolute(path) &&
@@ -89,13 +83,74 @@ export async function assertRealPathInside(
 	if (!(await realPathIsInside(root, target))) throw new Error(message);
 }
 
-export function isWindowsAbsolute(path: string): boolean {
+export async function assertTrustedMutationPath(
+	dir: string,
+	message: string,
+): Promise<void> {
+	const uid = process.getuid?.();
+	if (uid === undefined) return;
+	const resolved = resolve(dir);
+	const existing = await nearestExistingPath(resolved);
+	const real = await realpath(existing);
+	const ownsRoot = existing === resolved;
+	await assertTrustedAncestors(existing, uid, message, ownsRoot);
+	if (real !== existing)
+		await assertTrustedAncestors(real, uid, message, ownsRoot);
+}
+
+async function assertTrustedAncestors(
+	path: string,
+	uid: number,
+	message: string,
+	ownsRoot: boolean,
+) {
+	const root = await stat(path);
+	if (
+		!root.isDirectory() ||
+		(root.uid !== uid && root.uid !== 0) ||
+		(ownsRoot && (root.uid !== uid || (root.mode & 0o022) !== 0)) ||
+		(!ownsRoot && (root.mode & 0o022) !== 0 && (root.mode & 0o1000) === 0)
+	) {
+		throw new Error(`${message} (untrusted directory: ${path})`);
+	}
+	let child = resolve(path);
+	for (
+		let parent = dirname(child);
+		;
+		child = parent, parent = dirname(parent)
+	) {
+		const info = await stat(parent);
+		if (!info.isDirectory() || (info.uid !== uid && info.uid !== 0)) {
+			throw new Error(`${message} (untrusted directory: ${parent})`);
+		}
+		if ((info.mode & 0o022) !== 0) {
+			const entry = await lstat(child);
+			if ((info.mode & 0o1000) === 0 || entry.uid !== uid) {
+				throw new Error(
+					`${message} (group- or world-writable directory: ${parent})`,
+				);
+			}
+		}
+		if (parent === dirname(parent)) return;
+	}
+}
+
+async function nearestExistingPath(path: string): Promise<string> {
+	for (let current = path; ; current = dirname(current)) {
+		try {
+			await lstat(current);
+			return current;
+		} catch (error) {
+			if (!(error instanceof Error) || !("code" in error)) throw error;
+			if (error.code !== "ENOENT" || current === dirname(current)) throw error;
+		}
+	}
+}
+
+function isWindowsAbsolute(path: string): boolean {
 	return /^[a-zA-Z]:[\\/]/.test(path) || path.startsWith("\\\\");
 }
 
-// Reject roots that are the filesystem root, $HOME, or a protected $HOME child.
-// Checks the resolved path AND its realpath so a symlink cannot disguise an
-// unsafe destination as a benign-looking root.
 export function assertSafeRoot(dir: string, message: string): void {
 	const resolved = resolve(dir);
 	if (isUnsafeRoot(resolved) || isUnsafeRoot(realRoot(resolved))) {
@@ -108,13 +163,19 @@ function isUnsafeRoot(dir: string): boolean {
 	const home = resolve(homedir());
 	const isProtectedHomeDir =
 		dirname(dir) === home && protectedHomeDirs.has(basename(dir));
-	return dir === root || dir === home || isProtectedHomeDir;
+	return dir === root || dir === home || isTempRoot(dir) || isProtectedHomeDir;
 }
 
-// Resolve symlinks on the existing portion of the path while preserving the
-// not-yet-created tail (the cache/output dir is often created after validation),
-// so a fresh path like ~/proj/out stays itself instead of collapsing onto its
-// nearest existing ancestor ($HOME) and being wrongly rejected.
+function isTempRoot(dir: string): boolean {
+	return [
+		resolve(tmpdir()),
+		realRoot(resolve(tmpdir())),
+		resolve("/tmp"),
+		realRoot(resolve("/tmp")),
+		resolve("/private/tmp"),
+	].includes(dir);
+}
+
 function realRoot(dir: string): string {
 	const tail: string[] = [];
 	let current = dir;

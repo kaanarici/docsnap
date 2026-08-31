@@ -1,45 +1,55 @@
 import { markdownLinkCount } from "../core/markdown.ts";
 import { wordCount } from "../core/text.ts";
 
-type MarkdownQuality = {
-	confidence: number;
-	reasons: string[];
-};
-
-export function scoreMarkdown(
-	markdown: string,
-	title?: string,
-): MarkdownQuality {
+export function qualityReasons(markdown: string, title?: string) {
 	const words = wordCount(markdown);
-	const headings = (markdown.match(/^#{1,6}\s+/gm) ?? []).length;
-	const codeBlocks = (markdown.match(/```/g) ?? []).length / 2;
+	const codeBlocks = fencedBlockCount(markdown);
 	const links = markdownLinkCount(markdown);
 	const reasons: string[] = [];
-	let score = 1;
 
-	if (!title) {
-		score -= 0.15;
-		reasons.push("missing title");
-	}
+	if (!title) reasons.push("missing title");
 	if (words < 40) {
-		score -= 0.35;
 		reasons.push("thin content");
 	}
-	if (headings === 0) score -= 0.1;
-	if (links > Math.max(20, words / 8)) {
-		score -= 0.2;
-		reasons.push("high link density");
-	}
 	if (codeBlocks % 1 !== 0) {
-		score -= 0.1;
 		reasons.push("unbalanced code fences");
 	}
 	if (isUsefulShortPage(markdown, words, links, codeBlocks, Boolean(title))) {
-		score = Math.max(score, 0.65);
 		const thin = reasons.indexOf("thin content");
 		if (thin >= 0) reasons.splice(thin, 1);
 	}
-	return { confidence: Math.max(0, Number(score.toFixed(2))), reasons };
+	return reasons;
+}
+
+function fencedBlockCount(markdown: string) {
+	let open: { marker: string; length: number } | undefined;
+	let blocks = 0;
+	for (const line of markdown.split("\n")) {
+		const match = line.match(/^ {0,3}(`{3,}|~{3,})/);
+		if (!match) continue;
+		const fence = match[1]!;
+		if (!open) {
+			open = { marker: fence[0]!, length: fence.length };
+			continue;
+		}
+		const trimmed = line.trim();
+		const marker = open.marker;
+		if (
+			fence[0] === marker &&
+			fence.length >= open.length &&
+			[...trimmed].every((char) => char === marker)
+		) {
+			blocks++;
+			open = undefined;
+		}
+	}
+	return open ? blocks + 0.5 : blocks;
+}
+
+export function isLowQuality(reasons: readonly string[]) {
+	return (
+		reasons.includes("thin content") || reasons.includes("truncated extraction")
+	);
 }
 
 function isUsefulShortPage(
@@ -59,10 +69,6 @@ function isUsefulShortPage(
 		(hasTitle &&
 			words >= 10 &&
 			markdown.length >= 80 &&
-			(links > 0 || /[.!?]/.test(markdown))) ||
-		(hasTitle &&
-			words >= 24 &&
-			markdown.length >= 180 &&
-			/[.!?]\s/.test(markdown))
+			(links > 0 || /[.!?]/.test(markdown)))
 	);
 }

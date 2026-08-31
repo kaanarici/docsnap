@@ -1,140 +1,87 @@
-import { cpus } from "node:os";
-import type {
-	CliOptions,
-	FetchTransport,
-	PipelineConfig,
-} from "../core/types.ts";
-import { validatePublicHttpUrl } from "../security/url.ts";
+import { type ConfigInput, maxGeneratedCapturePages } from "../core/config.ts";
+import { InputError } from "../core/input-error.ts";
 
-const cpuCount = cpus().length;
-const defaultConcurrency = Math.min(64, Math.max(16, cpuCount * 6));
-const defaultPerOrigin = Math.min(defaultConcurrency, 8);
-const defaultUserAgent =
-	"Mozilla/5.0 (compatible; docsnap; +https://npmjs.com/package/docsnap)";
 const valueFlags = new Set([
 	"-o",
 	"--out",
 	"-m",
 	"--max",
 	"--concurrency",
+	"--include",
+	"--exclude",
 	"--user-agent",
 ]);
 
 const usage = `Usage:
   docsnap <url> [flags]
-  docsnap mcp                  run local stdio MCP server
+  docsnap capture <url> [flags]
+  docsnap map <url> [flags]
+  docsnap refresh <corpus-dir> [flags]
 
 Flags:
-  -o, --out <dir>           output dir; relative paths must stay under the current directory
+  -o, --out <dir>           output dir; parent dir when --stdin has several URLs
   -m, --max <count>         max pages; default all llms.txt pages, otherwise 50
-  --concurrency <n>         fetch concurrency, CPU-scaled default up to 64
+  --concurrency <n>         fetch concurrency
   --clean                   remove output dir before writing
-  --dry-run                 run without writing files
-  --page                    capture only the given page after robots.txt check
+  --page                    capture only the supplied page
+  --site                    force site discovery for a specific page URL
+  --include <path-glob>     keep matching paths; repeatable
+  --exclude <path-glob>     skip matching paths; repeatable
   --no-cache                disable the shared fetch cache for this run
-  --agent-files             add a docsnap block to AGENTS.md/CLAUDE.md in the current directory
-  --json                    print one machine-readable result
-  --quiet                   suppress progress logs
-  --stdin                   read the URL from stdin
-  --ignore-robots           bypass robots.txt rules
+  --stdin                   read one URL per line from stdin; max 32
   --user-agent <value>      custom User-Agent
-  --fail-on-low-quality     exit non-zero when low-quality pages are found
-  --fail-on-injection-signal exit non-zero when injection signal pages are found
   -v, --version             show version
   -h, --help                show help
 
-Examples:
-  docsnap https://react.dev/reference -o vendor-docs --clean --json
-  docsnap https://fly.io/docs/ -m 100 --concurrency 24
-  docsnap https://docs.djangoproject.com/en/stable/topics/auth/ --page
-  echo https://react.dev/reference | docsnap --stdin --json
-  docsnap https://docs.python.org/3/ --dry-run --json
-  docsnap https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API --fail-on-low-quality`;
+Run "docsnap map --help" or "docsnap refresh --help" for subcommand flags.`;
 
-// The typed capture intent shared by every config builder. It is the single
-// shape callers populate — the CLI from argv, MCP tools from validated fields —
-// before buildPipelineConfig turns it into a PipelineConfig. Absent fields take
-// the canonical defaults that live in buildPipelineConfig; presence of `max`
-// drives maxExplicit unless `maxExplicit` is set directly (refresh inherits the
-// prior run's policy regardless of whether a new max was supplied).
-export type ConfigInput = {
-	seedUrl: string;
-	outDir?: string;
+const mapUsage = `Usage:
+  docsnap map <url> [flags]
+
+Returns bounded site-capture candidates without extracting or writing a corpus.
+
+Flags:
+  -m, --max <count>         max URLs; default 50, max ${maxGeneratedCapturePages}
+  --concurrency <n>         fetch concurrency
+  --include <path-glob>     keep matching paths; repeatable
+  --exclude <path-glob>     skip matching paths; repeatable
+  --no-cache                disable the shared fetch cache
+  --user-agent <value>      custom User-Agent`;
+
+const refreshUsage = `Usage:
+  docsnap refresh <corpus-dir> [flags]
+
+Flags:
+  -m, --max <count>         override prior page limit
+  --concurrency <n>         fetch concurrency
+  --no-cache                disable the shared fetch cache for this run`;
+
+export type RefreshInput = {
+	outputDir: string;
 	max?: number;
-	maxExplicit?: boolean;
 	concurrency?: number;
-	clean?: boolean;
-	dryRun?: boolean;
-	agentFiles?: boolean;
-	pageOnly?: boolean;
-	ignoreRobots?: boolean;
-	cache?: boolean;
-	userAgent?: string;
-	transport?: FetchTransport;
+	cache: boolean;
 };
+type ParsedArgs =
+	| { kind: "run"; run: ConfigInput }
+	| { kind: "map"; map: ConfigInput }
+	| { kind: "refresh"; refresh: RefreshInput }
+	| { kind: "help"; help: string }
+	| { kind: "version"; version: true };
 
-export type ParsedRun = { run: ConfigInput; cli: CliOptions };
-type ParsedArgs = ParsedRun | { help: string } | { version: true };
-
-export function flagTakesValue(flag: string): boolean {
+export function isValueFlag(flag: string): boolean {
 	return valueFlags.has(flag);
 }
 
-// Single owner of every PipelineConfig invariant: URL normalization/safety,
-// default output dir, max + maxExplicit derivation, concurrency range, and the
-// perOrigin clamp. Both the CLI and the MCP tools build configs only through
-// here, so a new field or rule changes one place.
-export function buildPipelineConfig(input: ConfigInput): PipelineConfig {
-	let seedUrl: string;
-	try {
-		seedUrl = parseUrl(input.seedUrl).href;
-	} catch {
-		throw new Error(`Invalid URL: ${input.seedUrl}`);
-	}
-	const unsafe = validatePublicHttpUrl(seedUrl);
-	if (unsafe) throw new Error(`Unsafe URL: ${unsafe}`);
-
-	const max = input.max ?? 50;
-	if (max < 1) throw new Error("--max must be at least 1");
-	const concurrency = input.concurrency ?? defaultConcurrency;
-	if (concurrency < 1) throw new Error("--concurrency must be at least 1");
-
-	return {
-		seedUrl,
-		outDir: input.outDir ?? defaultOutDir(seedUrl),
-		max,
-		maxExplicit: input.maxExplicit ?? input.max !== undefined,
-		concurrency,
-		perOrigin: Math.min(concurrency, defaultPerOrigin),
-		clean: input.clean ?? false,
-		dryRun: input.dryRun ?? false,
-		agentFiles: input.agentFiles ?? false,
-		pageOnly: input.pageOnly ?? false,
-		ignoreRobots: input.ignoreRobots ?? false,
-		cache: input.cache ?? true,
-		userAgent: input.userAgent ?? defaultUserAgent,
-		timeoutMs: 10_000,
-		maxBytes: 12 * 1024 * 1024,
-		...(input.transport ? { transport: input.transport } : {}),
-	};
-}
-
-// Pure argv -> capture intent translation. It owns only CLI surface concerns:
-// help/version sentinels, flag spelling, and per-token value errors. It builds
-// no PipelineConfig; buildPipelineConfig consumes the returned ConfigInput.
 export function parseArgs(argv: string[]): ParsedArgs {
+	if (argv[0] === "map") return parseMapArgs(argv.slice(1));
+	if (argv[0] === "refresh") return parseRefreshArgs(argv.slice(1));
 	if (argv.length === 0 || argv.includes("-h") || argv.includes("--help"))
-		return { help: usage };
+		return { kind: "help", help: usage };
 	if (argv.includes("-v") || argv.includes("--version"))
-		return { version: true };
+		return { kind: "version", version: true };
 
 	const run: ConfigInput = { seedUrl: "" };
-	const cli: CliOptions = {
-		json: false,
-		quiet: false,
-		failOnLowQuality: false,
-		failOnInjectionSignal: false,
-	};
 
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i]!;
@@ -148,57 +95,109 @@ export function parseArgs(argv: string[]): ParsedArgs {
 			run.max = readInt(argv, ++i, arg);
 		} else if (arg === "--concurrency") {
 			run.concurrency = readInt(argv, ++i, arg);
+		} else if (arg === "--include") {
+			run.include = [...(run.include ?? []), readValue(argv, ++i, arg)];
+		} else if (arg === "--exclude") {
+			run.exclude = [...(run.exclude ?? []), readValue(argv, ++i, arg)];
 		} else if (arg === "--clean") run.clean = true;
-		else if (arg === "--dry-run") run.dryRun = true;
 		else if (arg === "--page") run.pageOnly = true;
+		else if (arg === "--site") run.site = true;
 		else if (arg === "--no-cache") run.cache = false;
-		else if (arg === "--agent-files") run.agentFiles = true;
-		else if (arg === "--json") cli.json = true;
-		else if (arg === "--quiet") cli.quiet = true;
-		else if (arg === "--ignore-robots") run.ignoreRobots = true;
 		else if (arg === "--user-agent") run.userAgent = readValue(argv, ++i, arg);
-		else if (arg === "--fail-on-low-quality") cli.failOnLowQuality = true;
-		else if (arg === "--fail-on-injection-signal")
-			cli.failOnInjectionSignal = true;
-		else throw new Error(`Unknown argument: ${arg}\n\n${usage}`);
+		else throw new InputError(`Unknown argument: ${arg}`);
 	}
 
 	if (!run.seedUrl)
-		throw new Error(
-			`Missing URL\n\nTry: docsnap https://react.dev/reference --help`,
+		throw new InputError(
+			"Missing URL",
+			"Pass a public URL, for example: docsnap https://react.dev/reference",
 		);
-	return { run, cli };
+	if (run.pageOnly && run.site)
+		throw new InputError("--page and --site conflict");
+	if (run.pageOnly && (run.include?.length || run.exclude?.length))
+		throw new InputError("--page cannot be combined with path filters");
+	return { kind: "run", run };
+}
+
+function parseMapArgs(argv: string[]): ParsedArgs {
+	if (argv.includes("-h") || argv.includes("--help")) {
+		return { kind: "help", help: mapUsage };
+	}
+	const config: ConfigInput = {
+		seedUrl: "",
+		maxExplicit: true,
+		site: true,
+	};
+	const positional: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i]!;
+		if (arg === "-m" || arg === "--max") {
+			config.max = readInt(argv, ++i, arg, maxGeneratedCapturePages);
+		} else if (arg === "--concurrency")
+			config.concurrency = readInt(argv, ++i, arg);
+		else if (arg === "--include")
+			config.include = [...(config.include ?? []), readValue(argv, ++i, arg)];
+		else if (arg === "--exclude")
+			config.exclude = [...(config.exclude ?? []), readValue(argv, ++i, arg)];
+		else if (arg === "--no-cache") config.cache = false;
+		else if (arg === "--user-agent")
+			config.userAgent = readValue(argv, ++i, arg);
+		else if (arg.startsWith("-"))
+			throw new InputError(`Unknown map argument: ${arg}`);
+		else positional.push(arg);
+	}
+	config.seedUrl = positional[0] ?? "";
+	if (!config.seedUrl)
+		throw new InputError(
+			"Missing URL",
+			"Pass a public URL, for example: docsnap map https://react.dev",
+		);
+	if (positional.length > 1)
+		throw new InputError(`Unexpected map argument: ${positional[1]}`);
+	return { kind: "map", map: config };
+}
+
+function parseRefreshArgs(argv: string[]): ParsedArgs {
+	if (argv.includes("-h") || argv.includes("--help")) {
+		return { kind: "help", help: refreshUsage };
+	}
+	const refresh: RefreshInput = { outputDir: "", cache: true };
+	const positional: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i]!;
+		if (arg === "-m" || arg === "--max") refresh.max = readInt(argv, ++i, arg);
+		else if (arg === "--concurrency")
+			refresh.concurrency = readInt(argv, ++i, arg);
+		else if (arg === "--no-cache") refresh.cache = false;
+		else if (arg.startsWith("-"))
+			throw new InputError(`Unknown refresh argument: ${arg}`);
+		else positional.push(arg);
+	}
+	refresh.outputDir = positional[0] ?? "";
+	if (!refresh.outputDir) {
+		throw new InputError(
+			"Missing corpus directory",
+			"Pass a corpus directory, for example: docsnap refresh docsnap/react-dev-reference",
+		);
+	}
+	if (positional.length > 1) {
+		throw new InputError(`Unexpected refresh argument: ${positional[1]}`);
+	}
+	return { kind: "refresh", refresh };
 }
 
 function readValue(argv: string[], index: number, flag: string) {
 	const value = argv[index];
 	if (!value || value.startsWith("-"))
-		throw new Error(`${flag} requires a value`);
+		throw new InputError(`${flag} requires a value`);
 	return value;
 }
 
-function defaultOutDir(seedUrl: string) {
-	const url = new URL(seedUrl);
-	const host = slug(url.hostname.replace(/^www\./, ""));
-	const path = url.pathname.split("/").filter(Boolean).slice(0, 2).map(slug);
-	return `docsnap/${[host, ...path].filter(Boolean).join("-") || "site"}`;
-}
-
-function slug(value: string) {
-	return value
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "");
-}
-
-function parseUrl(value: string) {
-	if (/^https?:\/\//i.test(value)) return new URL(value);
-	return new URL(`https://${value}`);
-}
-
-function readInt(argv: string[], index: number, flag: string) {
+function readInt(argv: string[], index: number, flag: string, max?: number) {
 	const value = Number(readValue(argv, index, flag));
 	if (!Number.isInteger(value) || value < 1)
-		throw new Error(`${flag} requires a positive integer`);
+		throw new InputError(`${flag} requires a positive integer`);
+	if (max !== undefined && value > max)
+		throw new InputError(`${flag} must be ${max} or fewer`);
 	return value;
 }

@@ -1,39 +1,14 @@
 # docsnap
 
-Browser-free CLI that turns public docs and text-heavy pages into clean Markdown corpora for coding agents.
-
-docsnap uses static fetches, `llms.txt`, sitemaps, RSS/Atom feeds, regular links, JS asset text mining, and inline-state extraction. It does not launch a browser and has no `--render` mode.
+DocSnap takes a public URL and leaves a folder of Markdown for an agent.
 
 ```bash
-bunx docsnap https://react.dev/reference -m 8 --clean
+bunx docsnap https://react.dev/reference
 ```
 
-The CLI prints progress as it runs:
-
-```text
-docsnap: discovering
-docsnap: fetching 8 pages
-docsnap: extracting 8 pages
-docsnap: writing output
-docsnap: 8 pages written to docsnap/react-dev-reference in 0.57s
-docsnap: page limit reached; rerun with -m 16 for more
-docsnap: summary docsnap/react-dev-reference/summary.json
-docsnap: manifest docsnap/react-dev-reference/manifest.jsonl
-docsnap: guide docsnap/react-dev-reference/AGENT_README.md
-```
-
-It writes:
-
-```text
-docsnap/react-dev-reference/
-  AGENT_README.md
-  manifest.jsonl
-  summary.json
-  tree.txt
-  ...
-```
-
-docsnap works best on public sites with readable HTML, `llms.txt`, sitemaps, regular links, or extractable inline state.
+It can capture one page or follow a site, read `llms.txt` and sitemaps,
+convert PDFs with PDF Inspector and other documents with AnyDoc, and render
+JavaScript pages with local Chrome.
 
 ## Install
 
@@ -41,95 +16,89 @@ docsnap works best on public sites with readable HTML, `llms.txt`, sitemaps, reg
 bun add -g docsnap
 ```
 
-## Usage
+DocSnap runs on Bun 1.4.0 or newer; installed through npm without Bun, the CLI
+explains what to install. Chrome is optional unless a page needs browser
+rendering. PDF conversion is unavailable on Intel Macs.
 
-```text
-Usage:
-  docsnap <url> [flags]
-  docsnap mcp                  run local stdio MCP server
-
-Flags:
-  -o, --out <dir>           output dir; relative paths must stay under the current directory
-  -m, --max <count>         max pages; default all llms.txt pages, otherwise 50
-  --concurrency <n>         fetch concurrency, CPU-scaled default up to 64
-  --clean                   remove output dir before writing
-  --dry-run                 run without writing files
-  --page                    capture only the given page after robots.txt check
-  --no-cache                disable the shared fetch cache for this run
-  --agent-files             add a docsnap block to AGENTS.md/CLAUDE.md in the current directory
-  --json                    print one machine-readable result
-  --quiet                   suppress progress logs
-  --stdin                   read the URL from stdin
-  --ignore-robots           bypass robots.txt rules
-  --user-agent <value>      custom User-Agent
-  --fail-on-low-quality     exit non-zero when low-quality pages are found
-  --fail-on-injection-signal exit non-zero when injection signal pages are found
-  -v, --version             show version
-  -h, --help                show help
-
-Examples:
-  docsnap https://react.dev/reference -o vendor-docs --clean --json
-  docsnap https://fly.io/docs/ -m 100 --concurrency 24
-  docsnap https://docs.djangoproject.com/en/stable/topics/auth/ --page
-  echo https://react.dev/reference | docsnap --stdin --json
-  docsnap https://docs.python.org/3/ --dry-run --json
-  docsnap https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API --fail-on-low-quality
-```
-
-## Common runs
+## Capture
 
 ```bash
 docsnap https://react.dev/reference
-
-docsnap https://react.dev/reference/react/useEffect --page
-
-docsnap https://docs.python.org -o ./python-docs -m 100
-
-docsnap https://docs.djangoproject.com/en/stable/ --agent-files
+docsnap https://docs.python.org/3/ --site -m 100
+docsnap https://example.com/architecture.pdf
 ```
 
-Use an absolute `--out` path for output outside the current directory.
+A specific page or document URL captures one page. `--site` follows related
+pages. `-m` sets the page limit.
 
-## Cache
+If the output directory already contains another corpus, choose a different
+path or pass `--clean` to replace it.
 
-docsnap keeps a shared fetch cache in `~/.cache/docsnap` so repeated captures can reuse public page bodies across output directories. Set `DOCSNAP_CACHE_DIR` to choose another cache directory, `DOCSNAP_CACHE_DIR=off` or `--no-cache` to bypass it, and `DOCSNAP_CACHE_MAX_MB` to change the default 2048 MB cap.
-
-## MCP
+Keep only the paths you need:
 
 ```bash
-claude mcp add docsnap -- docsnap mcp
+docsnap https://example.com --site \
+  --include '/docs/**' \
+  --exclude '/docs/archive/**'
 ```
 
-Tools:
+The supplied URL is always attempted. Filters apply to discovered pages, and
+exclude wins.
 
-- `docsnap_fetch` — drop-in WebFetch replacement: capture (or reuse/refresh) a URL and return ranked Markdown context with citations, in one call
-- `docsnap_capture` — capture a public docs site or text-heavy page into a local corpus
-- `docsnap_refresh` — rerun a corpus's seed URL and report new/changed/removed pages
-- `docsnap_context_pack` — ranked, deduped answer-with-sources bundle for a query over one corpus
-- `docsnap_search_corpus` — BM25-ranked snippet search across a corpus
-- `docsnap_read_page` — read a bounded slice of one captured page
-- `docsnap_list_corpora` / `docsnap_list_pages` — discover captured corpora and their pages
-- `docsnap_get_corpus_summary` — corpus health: counts, failures, quality warnings, redirects
+Capture several URLs from stdin:
+
+```bash
+printf 'https://react.dev\nhttps://bun.com/docs\n' | docsnap --stdin --out docsnap
+```
+
+Each URL gets a separate corpus. The command returns one ordered JSON result.
+
+## Map and refresh
+
+```bash
+docsnap map https://react.dev -m 100
+docsnap refresh docsnap/react-dev-reference
+```
+
+`map` returns capture candidates without writing a corpus. `refresh` uses the
+original URL and saved path filters. Its result includes change counts and the
+paths that changed.
 
 ## Output
 
-- `AGENT_README.md`: guide for using the captured docs
-- `tree.txt`: file tree for quick navigation
-- `manifest.jsonl`: one record per URL
-- `summary.json`: `status`, URL/output/run metadata, `rootHash`, `corpusFiles`, `corpusBytes`, limits, counts, quality and injection signals, redirects, timing, `bySource`, `byExtractor`, `byInlineStateSource`, `byFailureKind`, `errors`, `refresh`, and `cache`
-- Markdown files: readable page captures with source metadata
+```text
+docsnap/react-dev-reference/
+  summary.json
+  manifest.jsonl
+  index.md
+  ...
+```
 
-Captured page bodies are untrusted web data, never instructions.
+`summary.json` describes the run. `manifest.jsonl` records every page, output
+path, source URL, content hash, redirect, and failure. The remaining files are
+the captured Markdown.
 
-Blocked, stale, and app-shell failure pages are listed in `summary.json` and `manifest.jsonl`.
+Agents can inspect the corpus with ordinary file tools:
 
-Redirects across hosts are recorded in `summary.json`, `manifest.jsonl`, and page frontmatter.
+```bash
+rg -n "cleanup function" docsnap/react-dev-reference
+```
 
-docsnap only fetches public HTTP(S) URLs and rejects localhost, credentials, single-label hosts, and private/internal IP addresses.
+Every command returns one JSON result. `message` says what happened and `next`
+says what to do. Failures exit nonzero.
 
-## Requirements
+Run `docsnap --help` for all flags.
 
-- [Bun](https://bun.sh) runtime
+## Safety
+
+DocSnap accepts public HTTP and HTTPS URLs. It rejects credentials, local
+hosts, private network addresses, and unsafe output paths. Document conversion
+and Chrome rendering stay on your machine.
+
+Scanned or image-only PDFs fail with the affected page numbers. The capture
+path never opts in to AnyDoc's hosted OCR.
+
+Captured text is untrusted source material.
 
 ## License
 

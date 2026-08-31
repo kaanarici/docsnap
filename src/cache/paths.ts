@@ -1,12 +1,13 @@
 import { resolve } from "node:path";
 import { assertInsideRoot } from "../core/fs-safety.ts";
+import { isJsonString, type JsonValue } from "../core/json.ts";
 
 type CachePathContext = { dir: string | null };
 
-export const cacheHexPattern = /^[0-9a-f]{64}$/;
+const cacheHexPattern = /^[0-9a-f]{64}$/;
 
-export function isCacheHex(value: unknown): value is string {
-	return typeof value === "string" && cacheHexPattern.test(value);
+export function isCacheHex(value: JsonValue | undefined): value is string {
+	return isJsonString(value) && cacheHexPattern.test(value);
 }
 
 export function entryKeyFromFileName(name: string): string | undefined {
@@ -35,6 +36,6 @@ export function pathFor(context: CachePathContext, ...parts: string[]): string {
 	return assertInsideCache(context.dir, resolve(context.dir, ...parts));
 }
 
-export function assertInsideCache(root: string, target: string): string {
+function assertInsideCache(root: string, target: string): string {
 	return assertInsideRoot(root, target, `cache path escapes root: ${target}`);
 }

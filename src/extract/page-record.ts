@@ -1,162 +1,183 @@
-import { hashContent } from "../core/snapshot.ts";
+import { maxGeneratedCapturePages } from "../core/config.ts";
+import { hashContent } from "../core/hash.ts";
+import { markdownLinkHrefs } from "../core/markdown.ts";
 import { wordCount } from "../core/text.ts";
 import type {
 	DiscoverySource,
 	FailureKind,
 	FetchedUrl,
 	FetchResult,
-	InlineStateSource,
 	PageExtractor,
+	PageKind,
 	PageRecord,
 } from "../core/types.ts";
+import { validatePublicHttpUrl } from "../security/url.ts";
 import {
-	scanMarkdownForInjectionSignals,
-	scanRawHtmlForInjectionSignals,
-} from "../security/injection.ts";
-import {
-	emptyContentError,
-	isBlockedChallenge,
+	blockedAccessError,
 	isLanguageSelector,
 	isLoadingShellPlaceholder,
+	reportedNotFoundError,
 } from "./app-shell.ts";
-import { cleanMarkdown, linksFromMarkdown } from "./markdown.ts";
-import { scoreMarkdown } from "./quality.ts";
+import { cleanMarkdown } from "./markdown.ts";
+import { qualityReasons } from "./quality.ts";
+import { titleFromContent } from "./title.ts";
 
 export type ExtractedBody = {
 	markdown: string;
 	extractor: PageExtractor;
-	inlineStateSource?: InlineStateSource;
 	title?: string;
 	canonicalUrl?: string;
+	truncated?: boolean;
 };
 
 export function recordFromExtracted(
 	input: FetchedUrl,
 	extracted: ExtractedBody,
-	started: number,
-	rawSignals: PageRecord["injectionSignals"],
+	kind: PageKind,
 ): PageRecord {
-	const { metadata, result, source } = input;
+	const { result, source, wasSeed } = input;
 	const markdown = cleanMarkdown(extracted.markdown);
-	if (!markdown)
-		return failedRecord(
-			result,
-			source,
-			metadata,
-			emptyContentError(result.body),
-			"empty",
-			rawSignals,
-		);
-	if (isLoadingShellPlaceholder(markdown, result.body)) {
-		return failedRecord(
-			result,
-			source,
-			metadata,
-			"app shell without static text",
-			"empty",
-			rawSignals,
-		);
+	const title = titleFromContent(markdown, extracted.title);
+	const shell = kind === "app-shell";
+	const emptyError = shell ? shellError : "empty content";
+	const fail = (error: string, failureKind: FailureKind) =>
+		failedRecord(result, source, error, failureKind, wasSeed);
+	if (!markdown) return fail(emptyError, "empty");
+	if (isLoadingShellPlaceholder(markdown, shell)) {
+		return fail(shellError, "empty");
 	}
-	if (isBlockedChallenge(markdown, extracted.title)) {
-		return failedRecord(
-			result,
-			source,
-			metadata,
-			"blocked by client challenge",
-			"blocked",
-			rawSignals,
-		);
+	const reportedNotFound = reportedNotFoundError(markdown, title);
+	if (reportedNotFound) {
+		return fail(reportedNotFound, "not_found");
+	}
+	const blocked = blockedAccessError(markdown, title, result.body);
+	if (blocked) {
+		return fail(blocked, "blocked");
 	}
 	if (isLanguageSelector(result.finalUrl, result.body)) {
-		return failedRecord(
-			result,
-			source,
-			metadata,
-			"language selector without article content",
-			"empty",
-			rawSignals,
-		);
+		return fail("language selector without article content", "empty");
 	}
-	const injectionSignals = uniqueSignals([
-		...rawSignals,
-		...scanMarkdownForInjectionSignals(markdown),
-	]);
-	const quality = scoreMarkdown(markdown, extracted.title);
+	const quality = qualityReasons(markdown, title);
+	if (extracted.extractor === "inline-state") {
+		quality.push("inline state may omit content");
+	}
+	if (extracted.truncated) {
+		quality.push("truncated extraction");
+	}
+	const links = publicHrefs(
+		markdownLinkHrefs(markdown, maxGeneratedCapturePages),
+		result.finalUrl,
+		maxGeneratedCapturePages,
+	);
 	if (
-		(extracted.extractor === "fallback" ||
-			extracted.extractor === "structured") &&
-		wordCount(markdown) < 20 &&
-		quality.reasons.includes("thin content")
+		isChromeOnlyContent(
+			markdown,
+			title,
+			extracted.extractor,
+			{ reasons: quality },
+			links.length,
+		)
 	) {
-		quality.confidence = Math.min(quality.confidence, 0.55);
+		return fail("page chrome without article content", "empty");
 	}
-	return {
+	const page: Extract<PageRecord, { ok: true }> = {
 		ok: true,
 		url: result.url,
 		finalUrl: result.finalUrl,
 		redirects: result.redirects ?? [],
-		...(result.etag ? { etag: result.etag } : {}),
-		...(result.lastModified ? { lastModified: result.lastModified } : {}),
 		fetchedAt: result.fetchedAt ?? new Date().toISOString(),
-		injectionSignals,
-		...(metadata ?? {}),
-		...(extracted.canonicalUrl ? { canonicalUrl: extracted.canonicalUrl } : {}),
-		...(extracted.title ? { title: extracted.title } : {}),
 		markdown,
-		links: linksFromMarkdown(markdown),
+		links,
 		status: result.status,
 		contentHash: hashContent(markdown),
 		extractor: extracted.extractor,
-		...(extracted.inlineStateSource
-			? { inlineStateSource: extracted.inlineStateSource }
-			: {}),
-		confidence: quality.confidence,
-		qualityReasons: quality.reasons,
+		qualityReasons: quality,
 		source,
-		timings: {
-			fetchMs: result.fetchMs,
-			extractMs: performance.now() - started,
-			writeMs: 0,
-		},
 	};
+	if (result.etag) page.etag = result.etag;
+	if (result.lastModified) page.lastModified = result.lastModified;
+	if (extracted.canonicalUrl) page.canonicalUrl = extracted.canonicalUrl;
+	if (title) page.title = title;
+	if (wasSeed) page.wasSeed = true;
+	page.kind = kind;
+	return page;
+}
+
+const shellError = "app shell without static text";
+
+const titleStopTerms = new Set(["and", "the", "with", "from", "your"]);
+
+function isChromeOnlyContent(
+	markdown: string,
+	title: string | undefined,
+	extractor: PageExtractor,
+	quality: { reasons: string[] },
+	links: number,
+) {
+	if (
+		extractor === "html" &&
+		title &&
+		markdown.replace(/^#{1,6}\s*/, "").trim() === title.trim()
+	) {
+		return true;
+	}
+	if (extractor !== "html") return false;
+	if (
+		quality.reasons.includes("thin content") &&
+		wordCount(markdown) <= 6 &&
+		/!\[[^\]]*\]\(|\[[^\]]+\]\(/.test(markdown) &&
+		!/[.!?](?:\s|$)/.test(markdown)
+	) {
+		return true;
+	}
+	if (links <= Math.max(20, wordCount(markdown) / 8)) return false;
+	if (links < 20 || /^#{1,6}\s+/m.test(markdown)) return false;
+	const terms = (title ?? "")
+		.toLowerCase()
+		.split(/[^a-z0-9]+/)
+		.filter((term) => term.length >= 4 && !titleStopTerms.has(term));
+	if (terms.length < 2) return false;
+	const text = markdown.toLowerCase();
+	return terms.filter((term) => text.includes(term)).length < 2;
 }
 
 export function failedRecord(
 	result: FetchResult,
 	source: DiscoverySource,
-	metadata: FetchedUrl["metadata"],
 	error: string,
 	failureKind: FailureKind = "extract",
-	injectionSignals: PageRecord["injectionSignals"] = [],
+	wasSeed?: true,
 ): PageRecord {
-	return {
+	const page: Extract<PageRecord, { ok: false }> = {
 		ok: false,
 		url: result.url,
 		finalUrl: result.finalUrl,
 		redirects: result.redirects ?? [],
-		...(result.etag ? { etag: result.etag } : {}),
-		...(result.lastModified ? { lastModified: result.lastModified } : {}),
 		fetchedAt: result.fetchedAt ?? new Date().toISOString(),
-		injectionSignals,
-		...(metadata ?? {}),
 		markdown: "",
 		links: [],
 		status: result.status,
 		contentHash: "",
 		extractor: "none",
-		confidence: 0,
 		qualityReasons: [],
 		source,
 		error,
 		failureKind,
-		timings: { fetchMs: result.fetchMs, extractMs: 0, writeMs: 0 },
 	};
+	if (result.etag) page.etag = result.etag;
+	if (result.lastModified) page.lastModified = result.lastModified;
+	if (wasSeed) page.wasSeed = true;
+	return page;
 }
 
-export function rawInjectionSignals(result: FetchResult) {
-	return scanRawHtmlForInjectionSignals(result.body);
-}
-
-function uniqueSignals(signals: PageRecord["injectionSignals"]) {
-	return [...new Set(signals)];
+function publicHrefs(hrefs: string[], base: string, limit: number) {
+	const links = new Set<string>();
+	for (const href of hrefs) {
+		try {
+			const url = new URL(href, base);
+			if (!validatePublicHttpUrl(url.href)) links.add(url.href);
+		} catch {}
+		if (links.size >= limit) break;
+	}
+	return [...links];
 }

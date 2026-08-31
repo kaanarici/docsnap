@@ -3,12 +3,18 @@ import type { FetchResult } from "../core/types.ts";
 
 export function refreshUrl(result: FetchResult): string | undefined {
 	if (!result.ok || !/html/i.test(result.contentType)) return undefined;
-	const html = stripCompleteHtmlElement(result.body, "noscript");
+	const html = stripCompleteHtmlElement(
+		result.body.slice(0, 131_072),
+		"noscript",
+	);
 	const match = html.match(
 		/<meta\b[^>]*http-equiv\s*=\s*["']?\s*refresh\s*["']?[^>]*>/i,
 	);
+	const content = match?.[0].match(
+		/\bcontent\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i,
+	);
 	const target =
-		refreshTarget(attributeValue(match?.[0], "content")) ??
+		refreshTarget(content?.[1] ?? content?.[2] ?? content?.[3]) ??
 		scriptRedirectTarget(html);
 	if (!target) return undefined;
 	try {
@@ -25,19 +31,6 @@ function refreshTarget(content: string | undefined): string | undefined {
 	if (explicit?.trim()) return explicit.trim();
 	const implicit = content?.split(";").slice(1).join(";").trim();
 	return implicit || undefined;
-}
-
-function attributeValue(
-	tag: string | undefined,
-	name: string,
-): string | undefined {
-	if (!tag) return undefined;
-	const pattern = new RegExp(
-		`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`,
-		"i",
-	);
-	const match = tag.match(pattern);
-	return match?.[1] ?? match?.[2] ?? match?.[3];
 }
 
 function scriptRedirectTarget(html: string): string | undefined {

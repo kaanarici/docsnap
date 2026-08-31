@@ -16,8 +16,26 @@ export function wordCount(value: string): number {
 	return whitespaceKey(value).split(/\s+/).filter(Boolean).length;
 }
 
-// escape regex metacharacters so untrusted text is matched literally — never
-// build a RegExp from raw URL/DOM input (catastrophic-backtracking ReDoS)
+export function hasMarkdownBody(markdown: string): boolean {
+	const trimmed = markdown.trim();
+	if (!trimmed) return false;
+	if (!trimmed.startsWith("---")) return true;
+	const end = trimmed.indexOf("\n---", 3);
+	return end < 0 || trimmed.slice(end + 4).trim().length > 0;
+}
+
+export const invisibleTextPattern =
+	"(?:\\u034f|\\p{Variation_Selector}|[\\u00ad\\u115f\\u1160\\u180e\\u200b-\\u200d\\u2060-\\u2064\\u2800\\u3164\\ufeff\\uffa0])";
+
+const invisibleTextOnlyPattern = new RegExp(
+	`^(?:\\s|${invisibleTextPattern})*$`,
+	"u",
+);
+
+export function isInvisibleTextOnly(value: string) {
+	return invisibleTextOnlyPattern.test(value);
+}
+
 export function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -44,7 +62,7 @@ export function stripCompleteHtmlElement(
 		const start = lower.indexOf(openToken, index);
 		if (start === -1) break;
 		const afterName = start + openToken.length;
-		if (!tagNameBoundary(lower[afterName])) {
+		if (!/[\s>/]/.test(lower[afterName] ?? "")) {
 			index = afterName;
 			continue;
 		}
@@ -57,8 +75,4 @@ export function stripCompleteHtmlElement(
 		index = cursor;
 	}
 	return cursor === 0 ? html : out + html.slice(cursor);
-}
-
-function tagNameBoundary(char: string | undefined) {
-	return char === undefined || /[\s>/]/.test(char);
 }

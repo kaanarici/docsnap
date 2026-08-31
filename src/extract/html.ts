@@ -1,89 +1,242 @@
-import { Defuddle } from "defuddle/node";
 import { parseHTML } from "linkedom";
+import { markdownLinkHrefs } from "../core/markdown.ts";
+import { uniqueByWhitespace, wordCount } from "../core/text.ts";
+import type {
+	FetchedUrl,
+	FetchResult,
+	PageExtractor,
+	PageKind,
+	PageRecord,
+} from "../core/types.ts";
+import { urlWithoutFragment } from "../core/url.ts";
 import {
-	stripCompleteHtmlElement,
-	uniqueByWhitespace,
-	wordCount,
-} from "../core/text.ts";
-import type { FetchedUrl, FetchResult, PageRecord } from "../core/types.ts";
-import { urlWithoutFragmentAndQuery } from "../core/url.ts";
-import { isFeedResponse } from "../discover/feed.ts";
-import { chromeHeading, isShellPlaceholder } from "./app-shell.ts";
+	discoverFetchedResources,
+	type PageResources,
+} from "../discover/nav.ts";
 import {
+	blockedAccessError,
+	isLanguageSelector,
+	isRecoverableAppShell,
+	isShellPlaceholder,
+} from "./app-shell.ts";
+import {
+	isCodeTextAsset,
 	isMarkdownLike,
 	isStructuredTextAsset,
+	languageFromContentType,
 	languageFromUrl,
 } from "./content.ts";
-import { linksFromMarkdown, titleFromMarkdown } from "./markdown.ts";
+import { parseWithDefuddle } from "./defuddle.ts";
+import { extractDocument } from "./document.ts";
+import { extractInlineState } from "./inline-state.ts";
+import { scriptBlocks } from "./inline-state-scan.ts";
 import {
 	type ExtractedBody,
 	failedRecord,
-	rawInjectionSignals,
 	recordFromExtracted,
 } from "./page-record.ts";
-import { scoreMarkdown } from "./quality.ts";
-import { extractSerializedText } from "./serialized-text.ts";
 import { structuredFallback } from "./structured-fallback.ts";
 import {
-	countTextChars,
-	isElement,
+	isHiddenElement,
 	maxBacktickRun,
-	shouldSkipElement,
-	tagName,
+	maxOutputChars,
+	maxSerializeVisits,
+	walkText,
 } from "./structured-fallback-shared.ts";
+import { titleFromMarkdown } from "./title.ts";
 
-export async function extractPage(input: FetchedUrl): Promise<PageRecord> {
-	const { metadata, result, source } = input;
-	const started = performance.now();
+export type ExtractedPage = [PageRecord, PageResources, boolean];
+
+type HtmlExtractKind = Extract<
+	PageKind,
+	"docs-html" | "article-html" | "app-shell"
+>;
+
+type HtmlClass =
+	| { kind: HtmlExtractKind }
+	| { kind: "empty"; error: string }
+	| { kind: "blocked"; error: string };
+
+export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
+	const { result, source, wasSeed } = input;
+	let resources: PageResources = { links: [] };
+	let kind: PageKind | undefined;
+	const page = (record: PageRecord): ExtractedPage => [
+		record,
+		resources,
+		kind === "app-shell",
+	];
 	if (!result.ok)
-		return failedRecord(
-			result,
-			source,
-			metadata,
-			result.error,
-			result.failureKind,
+		return page(
+			failedRecord(result, source, result.error, result.failureKind, wasSeed),
 		);
-	// rss/atom feeds are discovery sources, not content pages; exclude them from
-	// the corpus instead of capturing the raw feed XML as a page
-	if (shouldCheckFeedResponse(result) && isFeedResponse(result))
-		return failedRecord(
-			result,
-			source,
-			metadata,
-			"feed resource used for discovery, not a content page",
-			"empty",
+	if (result.document) {
+		kind = "binary";
+		const record = await extractDocument(input);
+		resources = { links: record.links };
+		return page(record);
+	}
+	if (shouldCheckFeedResponse(result) && isFeedResponse(result)) {
+		kind = "feed";
+		return page(
+			failedRecord(
+				result,
+				source,
+				"feed resource, not a content page",
+				"empty",
+				wasSeed,
+			),
 		);
-	const signals = rawInjectionSignals(result);
+	}
 
 	try {
-		const extracted = await extractBody(result);
-		return recordFromExtracted(input, extracted, started, signals);
+		const textAsset = isStructuredTextAsset(result) || isCodeTextAsset(result);
+		const markdownLike = isMarkdownLike(result);
+		const document =
+			textAsset || markdownLike ? undefined : parseHTML(result.body).document;
+		resources = discoverFetchedResources(result, document);
+		if (textAsset || markdownLike) {
+			kind = "markdown";
+			return page(
+				recordFromExtracted(
+					input,
+					textAsset ? textAssetBody(result) : markdownAssetBody(result),
+					kind,
+				),
+			);
+		}
+		if (!document) {
+			kind = "empty";
+			return page(
+				failedRecord(result, source, "empty content", "empty", wasSeed),
+			);
+		}
+
+		const classified = classifyHtml(result, document);
+		kind = classified.kind;
+		if (classified.kind === "blocked") {
+			return page(
+				failedRecord(result, source, classified.error, "blocked", wasSeed),
+			);
+		}
+		if (classified.kind === "empty") {
+			return page(
+				failedRecord(result, source, classified.error, "empty", wasSeed),
+			);
+		}
+
+		const scripts = scriptBlocks(document);
+		const extracted = await extractBody(result, document, classified.kind);
+		const staticRecord = recordFromExtracted(input, extracted, classified.kind);
+		if (classified.kind !== "app-shell" || scripts.length === 0) {
+			return page(staticRecord);
+		}
+		try {
+			const inline = extractInlineState(result.body, result.finalUrl, {
+				scripts,
+				title: extracted.title,
+			});
+			if (!inline) return page(staticRecord);
+			const inlineRecord = recordFromExtracted(
+				input,
+				{
+					markdown: inline,
+					extractor: "inline-state",
+					title: titleFromMarkdown(inline, new URL(result.finalUrl).pathname),
+				},
+				classified.kind,
+			);
+			return page(
+				inlineRecord.ok ||
+					inlineRecord.failureKind === "not_found" ||
+					inlineRecord.failureKind === "blocked"
+					? inlineRecord
+					: staticRecord,
+			);
+		} catch {
+			return page(staticRecord);
+		}
 	} catch (error) {
-		return failedRecord(
-			result,
-			source,
-			metadata,
-			error instanceof Error ? error.message : String(error),
-			"extract",
-			signals,
+		return page(
+			failedRecord(
+				result,
+				source,
+				error instanceof Error ? error.message : String(error),
+				"extract",
+				wasSeed,
+			),
 		);
 	}
 }
 
-// cheap guard so the feed-root DOM parse only runs for xml-ish responses
-// or text/plain bodies that start like feed XML
-function shouldCheckFeedResponse(result: FetchResult): boolean {
-	return (
-		feedLikeContentType(result.contentType) || feedLikeBodyPrefix(result.body)
+function classifyHtml(result: FetchResult, document: Document): HtmlClass {
+	if (!result.body.trim()) {
+		return { kind: "empty", error: "empty content" };
+	}
+	if (isLanguageSelector(result.finalUrl, result.body)) {
+		return {
+			kind: "empty",
+			error: "language selector without article content",
+		};
+	}
+	const title = documentTitle(document);
+	const blocked = blockedAccessError(
+		document.body?.textContent?.slice(0, 4_000) ?? "",
+		title,
+		result.body,
+	);
+	if (blocked) return { kind: "blocked", error: blocked };
+	if (isRecoverableAppShell(result.body, document)) {
+		return { kind: "app-shell" };
+	}
+	if (isDocsHtml(document, result)) return { kind: "docs-html" };
+	return { kind: "article-html" };
+}
+
+function isDocsHtml(document: Document, result: FetchResult) {
+	if (document.querySelector("[data-docsnap-root]")) return true;
+	if (docsHtmlMarker.test(result.body.slice(0, 131_072))) return true;
+	const generator = meta(document, "generator") ?? "";
+	if (docsGenerator.test(generator)) return true;
+	const main =
+		document.querySelector("main,[role=main],article") ?? document.body;
+	const headings = main?.querySelectorAll("h1,h2,h3").length ?? 0;
+	const tables = main?.querySelectorAll("table").length ?? 0;
+	const code = main?.querySelectorAll("pre,table,dl").length ?? 0;
+	const navLinks = document.querySelectorAll(
+		"nav a, aside a, [class*='sidebar' i] a, [role='navigation'] a",
+	).length;
+	if (headings >= 1 && tables >= 1) return true;
+	if (headings >= 3 && (code >= 2 || navLinks >= 20)) return true;
+	try {
+		const path = new URL(result.finalUrl).pathname;
+		return (
+			/\/(?:docs|documentation|reference)(?:\/|$)/i.test(path) &&
+			headings >= 2 &&
+			navLinks >= 8
+		);
+	} catch {
+		return false;
+	}
+}
+
+const docsHtmlMarker =
+	/data-docsnap-root|data-docsnap-writerside|\b__docusaurus\b|\bdocusaurus\b|\brst-content\b|\bwy-nav|\bsphinxsidebar\b|\bmkdocs\b|\bmd-content\b|\bvitepress\b|\bVPContent\b|\bVPDoc\b|\bnextra-|\bstarlight\b|\bfumadocs\b|\bmintlify\b|\bgitbook\b|\bwriterside\b|\bmdn-main-content\b|\bmain-page-content\b|\breadthedocs\b|\bantora\b|\bswagger-ui\b/i;
+const docsGenerator =
+	/docusaurus|sphinx|mkdocs|vitepress|starlight|gitbook|antora|jsdoc|typedoc|docfx|writerside/i;
+
+function isFeedResponse(result: FetchResult): boolean {
+	const type = result.contentType.toLowerCase().split(";")[0]?.trim() ?? "";
+	if (type === "application/rss+xml" || type === "application/atom+xml")
+		return true;
+	return /<(?:[a-z][\w.-]*:)?(?:feed|rss|rdf)\b/i.test(
+		result.body.slice(0, 4096),
 	);
 }
 
-function feedLikeContentType(contentType: string): boolean {
-	return /(?:rss|atom)\+xml|\bxml\b/i.test(contentType);
-}
-
-function feedLikeBodyPrefix(body: string): boolean {
-	const prefix = body
+function shouldCheckFeedResponse(result: FetchResult): boolean {
+	if (/(?:rss|atom)\+xml|\bxml\b/i.test(result.contentType)) return true;
+	const prefix = result.body
 		.slice(0, 2048)
 		.replace(/^\uFEFF/, "")
 		.trimStart();
@@ -95,210 +248,186 @@ function feedLikeBodyPrefix(body: string): boolean {
 	);
 }
 
-async function extractBody(result: FetchResult): Promise<ExtractedBody> {
-	if (isStructuredTextAsset(result)) {
-		const title = titleFromMarkdown("", new URL(result.finalUrl).pathname);
-		return {
-			title,
-			markdown: renderTextAsset(title, result.body, result.finalUrl),
-			extractor: "text" as const,
-		};
-	}
-	if (isMarkdownLike(result)) {
-		const title = titleFromMarkdown(
-			result.body,
-			new URL(result.finalUrl).pathname,
-		);
-		return {
-			title,
-			markdown: result.body.trim(),
-			extractor: "markdown" as const,
-		};
-	}
-
-	const cleaned = stripScriptStyleTags(result.body);
-	const { document } = parseHTML(cleaned);
+async function extractBody(
+	result: FetchResult,
+	document: Document,
+	kind: HtmlExtractKind,
+): Promise<ExtractedBody> {
+	removeScriptsAndStyles(document);
+	removeHiddenElements(document);
 	const canonical = resolveCanonical(
 		document.querySelector('link[rel="canonical"]')?.getAttribute("href"),
 		result.finalUrl,
 	);
-	const documentTitleText = documentTitle(document);
-	const outline = largePageOutline(document, result.body, documentTitleText);
-	if (outline) {
-		return {
-			...(documentTitleText ? { title: documentTitleText } : {}),
-			...(canonical ? { canonicalUrl: canonical } : {}),
-			markdown: outline,
-			extractor: "fallback" as const,
-		};
+	const title = documentTitle(document);
+	switch (kind) {
+		case "app-shell":
+			return extractedBody("", "fallback", title, canonical);
+		case "docs-html":
+			return extractDocsHtml(document, result, title, canonical);
+		case "article-html":
+			return extractArticleHtml(document, result, title, canonical);
+		default: {
+			const unexpected: never = kind;
+			throw new Error(`unhandled extract kind: ${unexpected}`);
+		}
 	}
+}
 
-	// Defuddle is ~90% of cold extraction time. When the page has a clear semantic
-	// main-content container, the cheap structured extractor already matches it
-	// (verified equivalent content on real docs), so skip the expensive pass when
-	// its result is strong and confident. Cluttered pages with no main/article, or
-	// a weak/low-confidence structured result, still fall through to Defuddle.
-	const fast = strongStructuredFastPath(
-		document,
-		result.finalUrl,
-		documentTitleText,
-		result.body,
-	);
-	if (fast) {
-		return {
-			...(documentTitleText ? { title: documentTitleText } : {}),
-			...(canonical ? { canonicalUrl: canonical } : {}),
-			markdown: fast,
-			extractor: "structured" as const,
-		};
+function extractDocsHtml(
+	document: Document,
+	result: FetchResult,
+	title: string | undefined,
+	canonical: string | undefined,
+) {
+	return htmlFallback(document, result, title, canonical);
+}
+
+async function extractArticleHtml(
+	document: Document,
+	result: FetchResult,
+	title: string | undefined,
+	canonical: string | undefined,
+) {
+	if (document.querySelectorAll("*").length > maxDefuddleElements) {
+		return htmlFallback(document, result, title, canonical);
 	}
-
 	const parsed = await parseWithDefuddle(document, result.finalUrl);
-	if (parsed?.content?.trim()) {
-		const title = parsed.title || documentTitleText;
+	if (parsed?.content.trim()) {
+		const parsedTitle = title || parsed.title;
 		const markdown = parsed.content.trim();
-		if (isShellPlaceholder(markdown, title, result.body)) {
-			return {
-				...(title ? { title } : {}),
-				...(canonical ? { canonicalUrl: canonical } : {}),
-				markdown: "",
-				extractor: "fallback" as const,
-			};
+		if (isShellPlaceholder(markdown, parsedTitle, result.body)) {
+			return extractedBody("", "fallback", parsedTitle, canonical);
 		}
-		const serialized =
-			scoreMarkdown(markdown, title).confidence < 0.6
-				? extractSerializedText(result.body, title)
-				: undefined;
-		if (serialized) {
-			return {
-				...(title ? { title } : {}),
-				...(canonical ? { canonicalUrl: canonical } : {}),
-				markdown: serialized,
-				extractor: "fallback" as const,
-			};
+		if (chromeOnlyExtractedMarkdown(markdown)) {
+			const fallback = structuredOrFlat(
+				freshDocument(result.body),
+				result.finalUrl,
+			);
+			if (wordCount(fallback.markdown) > 20) {
+				return extractedBody(
+					fallback.markdown,
+					fallback.extractor,
+					parsedTitle,
+					canonical,
+					fallback.truncated,
+				);
+			}
 		}
-		const fallback = chromeOnlyExtractedMarkdown(markdown)
-			? structuredOrFlat(freshDocument(cleaned), result.finalUrl)
-			: undefined;
-		if (fallback && wordCount(fallback.markdown) > 20) {
-			return {
-				...(title ? { title } : {}),
-				...(canonical ? { canonicalUrl: canonical } : {}),
-				markdown: fallback.markdown,
-				extractor: fallback.extractor,
-			};
-		}
-		return {
-			...(title ? { title } : {}),
-			...(canonical ? { canonicalUrl: canonical } : {}),
-			markdown,
-			extractor: "html" as const,
-		};
+		return extractedBody(markdown, "html", parsedTitle, canonical);
 	}
+	return htmlFallback(freshDocument(result.body), result, title, canonical);
+}
 
-	const title = documentTitleText;
-	const fallbackDocument = freshDocument(cleaned);
-	const fallback = structuredOrFlat(fallbackDocument, result.finalUrl);
-	const serialized =
-		wordCount(fallback.markdown) < 40
-			? extractSerializedText(result.body, title)
-			: undefined;
-	const metadata = serialized
+function htmlFallback(
+	document: Document,
+	result: FetchResult,
+	title: string | undefined,
+	canonical: string | undefined,
+) {
+	const fallback = structuredOrFlat(document, result.finalUrl);
+	const metadata = fallback.markdown
 		? undefined
-		: metadataMarkdown(fallbackDocument, title);
-	const markdown = serialized ?? (fallback.markdown || metadata || "");
-	const extractor = serialized
-		? ("fallback" as const)
-		: fallback.markdown
-			? fallback.extractor
-			: ("fallback" as const);
-	// Meta-tag-only output means nothing real was extracted — the markdown is just
-	// the page's og/twitter description (marketing copy), not captured content. Fail
-	// honestly so inline-state can still recover real JS state and content-less
-	// shells/skeletons record as empty rather than masquerading as a captured page.
-	const metadataOnly = !serialized && !fallback.markdown && Boolean(metadata);
-	const isShell =
+		: metadataMarkdown(document, title);
+	const markdown = fallback.markdown || metadata || "";
+	const extractor = fallback.markdown
+		? fallback.extractor
+		: ("fallback" as const);
+	const metadataOnly = !fallback.markdown && Boolean(metadata);
+	const shell =
 		isShellPlaceholder(markdown, title, result.body) ||
 		(metadataOnly && Boolean(markdown));
-	return {
-		...(title ? { title } : {}),
-		...(canonical ? { canonicalUrl: canonical } : {}),
-		markdown: isShell ? "" : markdown,
+	return extractedBody(
+		shell ? "" : markdown,
 		extractor,
-	};
+		title,
+		canonical,
+		fallback.truncated,
+	);
+}
+
+function textAssetBody(result: FetchResult): ExtractedBody {
+	const title = titleFromMarkdown("", new URL(result.finalUrl).pathname);
+	return extractedBody(
+		renderTextAsset(title, result.body, result.finalUrl, result.contentType),
+		"text",
+		title,
+	);
+}
+
+function markdownAssetBody(result: FetchResult): ExtractedBody {
+	const body = result.body.trim();
+	const truncated = body.length > maxOutputChars;
+	const markdown = truncated ? body.slice(0, maxOutputChars) : body;
+	const title = titleFromMarkdown(markdown, new URL(result.finalUrl).pathname);
+	return extractedBody(markdown, "markdown", title, undefined, truncated);
+}
+
+function extractedBody(
+	markdown: string,
+	extractor: PageExtractor,
+	title?: string,
+	canonicalUrl?: string,
+	truncated = false,
+): ExtractedBody {
+	const extracted: ExtractedBody = { markdown, extractor };
+	if (title) extracted.title = title;
+	if (canonicalUrl) extracted.canonicalUrl = canonicalUrl;
+	if (truncated) extracted.truncated = true;
+	return extracted;
 }
 
 function freshDocument(html: string) {
-	return parseHTML(html).document;
+	const document = parseHTML(html).document;
+	removeScriptsAndStyles(document);
+	return document;
 }
 
-// Returns structured markdown only when it is confidently the page's real content
-// (substantial prose, high quality score, not a shell), so the caller can skip the
-// costly Defuddle pass. structuredFallback already finds and gates the content root
-// (returning "" for weak/link-dominated roots), so no semantic-container requirement
-// is needed; conservative word/confidence/shell gates keep clutter on Defuddle.
-const fastPathMinWords = 200;
-const fastPathMinConfidence = 0.9;
-function strongStructuredFastPath(
-	document: Document,
-	baseUrl: string,
-	title: string | undefined,
-	html: string,
-): string | undefined {
-	const markdown = structuredFallback(document, baseUrl);
-	if (!markdown || wordCount(markdown) < fastPathMinWords) return undefined;
-	if (isShellPlaceholder(markdown, title, html)) return undefined;
-	if (scoreMarkdown(markdown, title).confidence < fastPathMinConfidence) {
-		return undefined;
-	}
-	return markdown;
+function removeScriptsAndStyles(document: Document) {
+	document.querySelectorAll("script,style").forEach((node) => {
+		node.remove();
+	});
 }
 
-function structuredOrFlat(
-	document: Document,
-	baseUrl: string,
-): { markdown: string; extractor: "structured" | "fallback" } {
-	const structured = structuredFallback(document, baseUrl);
-	if (wordCount(structured) >= 20) {
-		return { markdown: structured, extractor: "structured" };
+function removeHiddenElements(document: Document) {
+	document.querySelectorAll("*").forEach((element) => {
+		if (isHiddenElement(element)) element.remove();
+	});
+}
+
+const maxDefuddleElements = 10_000;
+
+function structuredOrFlat(document: Document, baseUrl: string) {
+	const result = structuredFallback(document, baseUrl);
+	if (wordCount(result.markdown) >= 20) {
+		return { ...result, extractor: "structured" as const };
 	}
-	return { markdown: pageText(document), extractor: "fallback" };
+	const fallback = pageText(document);
+	return {
+		...fallback,
+		extractor: "fallback" as const,
+		truncated: result.truncated || fallback.truncated,
+	};
 }
 
 function pageText(document: Document) {
-	const element =
-		document.querySelector("main") ??
-		document.querySelector("article") ??
-		elementWithText(document.body) ??
-		elementWithText(document.documentElement);
-	return element ? readableText(element) : "";
-}
-
-function largePageOutline(
-	document: Document,
-	html: string,
-	title: string | undefined,
-) {
-	if (html.length < 2_000_000 || document.querySelectorAll("a").length < 500)
-		return undefined;
-	const headings = uniqueByWhitespace(
-		Array.from(document.querySelectorAll("h1,h2,h3"))
-			.map((element) => element.textContent?.replace(/\s+/g, " ").trim())
-			.filter((text): text is string => Boolean(text) && !chromeHeading(text)),
-	).slice(0, 120);
-	if (headings.length < 3) return undefined;
-	const parts = [
-		title ? `# ${title}` : undefined,
-		meta(document, "description"),
-		`## Page Outline\n\n${headings.map((heading) => `- ${heading}`).join("\n")}`,
-	].filter((value): value is string => Boolean(value?.trim()));
-	const markdown = uniqueByWhitespace(parts).join("\n\n");
-	return wordCount(markdown) >= 8 ? markdown : undefined;
+	const candidates = [
+		document.querySelector("main"),
+		document.querySelector("article"),
+		document.body,
+		document.documentElement,
+	];
+	for (const element of candidates) {
+		if (!element) continue;
+		const result = readableText(element);
+		if (wordCount(result.markdown) >= 8) return result;
+	}
+	return { markdown: "", truncated: false };
 }
 
 function chromeOnlyExtractedMarkdown(markdown: string) {
 	const words = wordCount(markdown);
-	const linkCount = linksFromMarkdown(markdown).length;
+	const linkCount = markdownLinkHrefs(markdown).length;
 	const imageCount = (markdown.match(/!\[[^\]]*]\([^)]+\)/g) ?? []).length;
 	const withoutLinks = markdown
 		.replace(/\[[^\]]+]\([^)]+\)/g, "")
@@ -318,112 +447,38 @@ function chromeOnlyExtractedMarkdown(markdown: string) {
 	);
 }
 
-function readableText(node: Node): string {
-	const parts: string[] = [];
-	const stack: Array<{ node: Node; inAnchor: boolean }> = [
-		{ node, inAnchor: false },
-	];
-	let visits = 0;
-	let chars = 0;
-	let anchorChars = 0;
-	while (stack.length > 0 && visits++ < 60_000 && chars < 200_000) {
-		const frame = stack.pop()!;
-		if (frame.node.nodeType === 3) {
-			const value = frame.node.textContent ?? "";
-			parts.push(value);
-			const textChars = countTextChars(value);
-			chars += textChars;
-			if (frame.inAnchor) anchorChars += textChars;
-			continue;
-		}
-		if (!isElement(frame.node)) continue;
-		if (shouldSkipElement(frame.node)) continue;
-		const inAnchor = frame.inAnchor || tagName(frame.node) === "a";
-		const children = frame.node.childNodes;
-		const remaining = Math.max(0, 60_000 - visits);
-		let pushed = 0;
-		for (let index = children.length - 1; index >= 0; index--) {
-			if (pushed >= remaining) break;
-			const child = children[index];
-			if (!child) continue;
-			stack.push({ node: child, inAnchor });
-			pushed++;
-		}
-	}
-	if (chars > 0 && anchorChars / chars >= 0.5) return "";
-	return parts
-		.join(" ")
-		.replace(/\s+/g, " ")
-		.replace(/\s+([,.;:!?])/g, "$1")
-		.trim();
-}
-
-function elementWithText(element: Element | null): Element | undefined {
-	const text = element ? readableText(element) : "";
-	return wordCount(text) >= 8 ? (element ?? undefined) : undefined;
-}
-
-function renderTextAsset(title: string, body: string, url: string) {
-	const language = languageFromUrl(url);
-	// fence must be longer than the longest backtick run in the body, or it
-	// closes early and strands content (mirrors codeBlock in structured-fallback)
-	const fence = "`".repeat(Math.max(3, maxBacktickRun(body) + 1));
-	return `# ${title}\n\n${fence}${language}\n${body.trim()}\n${fence}`;
-}
-
-export function stripScriptStyleTags(html: string): string {
-	return stripCompleteHtmlElement(
-		stripCompleteHtmlElement(html, "script"),
-		"style",
-	);
-}
-
-// Defuddle logs parse warnings straight to console. We silence console.error /
-// console.warn only WHILE a parse is in flight, then restore the real methods —
-// so importing this module leaves the host's console untouched and stderr is
-// pristine whenever extraction is idle (it is not mutated at module load). A
-// depth counter handles concurrent worker-pool parses: the first parse saves and
-// replaces the real methods, the last to finish restores them.
-let activeDefuddleParses = 0;
-let restoreConsole: (() => void) | undefined;
-
-function silenceConsoleDuringParse() {
-	if (activeDefuddleParses++ > 0) return;
-	const error = console.error;
-	const warn = console.warn;
-	console.error = () => {};
-	console.warn = () => {};
-	restoreConsole = () => {
-		console.error = error;
-		console.warn = warn;
+function readableText(node: Node) {
+	const { parts, textChars, anchorChars, truncated } = walkText(node, {
+		maxVisits: maxSerializeVisits,
+		collectChars: maxOutputChars,
+	});
+	if (textChars > 0 && anchorChars / textChars >= 0.5)
+		return { markdown: "", truncated };
+	return {
+		markdown: parts
+			.join(" ")
+			.replace(/\s+/g, " ")
+			.replace(/\s+([,.;:!?])/g, "$1")
+			.trim(),
+		truncated,
 	};
 }
 
-function endDefuddleParse() {
-	if (--activeDefuddleParses > 0) return;
-	restoreConsole?.();
-	restoreConsole = undefined;
-}
-
-async function parseWithDefuddle(document: Document, url: string) {
-	silenceConsoleDuringParse();
-	try {
-		return await Defuddle(document, url, {
-			markdown: true,
-			debug: false,
-			useAsync: false,
-		});
-	} catch {
-		return undefined;
-	} finally {
-		endDefuddleParse();
-	}
+function renderTextAsset(
+	title: string,
+	body: string,
+	url: string,
+	contentType: string,
+) {
+	const language = languageFromUrl(url) || languageFromContentType(contentType);
+	const fence = "`".repeat(Math.max(3, maxBacktickRun(body) + 1));
+	return `# ${title}\n\n${fence}${language}\n${body.trim()}\n${fence}`;
 }
 
 function resolveCanonical(href: string | null | undefined, base: string) {
 	if (!href) return undefined;
 	try {
-		return urlWithoutFragmentAndQuery(href, base);
+		return urlWithoutFragment(href, base);
 	} catch {
 		return undefined;
 	}

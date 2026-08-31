@@ -2,14 +2,37 @@ export type MarkdownLink = {
 	text: string;
 	href: string;
 	suffix: string;
+	start: number;
+	end: number;
+	full: string;
 };
 
-export function markdownLinkHrefs(markdown: string): string[] {
-	return markdownLinkSpans(markdown).map((link) => link.href);
+export function safeMarkdownDestination(value: string) {
+	let depth = 0;
+	for (const char of value) {
+		if (char === "(") depth++;
+		else if (char === ")" && depth-- === 0) return encodeParentheses(value);
+	}
+	return depth === 0 ? value : encodeParentheses(value);
+}
+
+export function markdownLinkHrefs(markdown: string, limit?: number): string[] {
+	const hrefs: string[] = [];
+	if (limit !== undefined && limit <= 0) return hrefs;
+	for (const link of markdownLinkSpans(markdown)) {
+		if (isImage(markdown, link.start)) continue;
+		hrefs.push(link.href);
+		if (limit !== undefined && hrefs.length >= limit) break;
+	}
+	return hrefs;
 }
 
 export function markdownLinkCount(markdown: string): number {
-	return markdownLinkSpans(markdown).length;
+	let count = 0;
+	for (const link of markdownLinkSpans(markdown)) {
+		if (!isImage(markdown, link.start)) count++;
+	}
+	return count;
 }
 
 export function replaceMarkdownLinks(
@@ -26,23 +49,21 @@ export function replaceMarkdownLinks(
 	return cursor === 0 ? markdown : out + markdown.slice(cursor);
 }
 
-type MarkdownLinkSpan = MarkdownLink & {
-	start: number;
-	end: number;
-	full: string;
-};
-
-function markdownLinkSpans(markdown: string): MarkdownLinkSpan[] {
-	const links: MarkdownLinkSpan[] = [];
+function* markdownLinkSpans(markdown: string): Generator<MarkdownLink> {
 	const code = codeRegions(markdown);
 	let index = 0;
+	let regionIndex = 0;
 	while (index < markdown.length) {
 		const start = findUnescaped(markdown, "[", index);
 		if (start === -1) break;
-		const region = code.find((r) => start >= r.start && start < r.end);
+		while (regionIndex < code.length && code[regionIndex]!.end <= start)
+			regionIndex++;
+		const region = code[regionIndex];
 		if (region) {
-			index = region.end;
-			continue;
+			if (start >= region.start) {
+				index = region.end;
+				continue;
+			}
 		}
 		const textEnd = findUnescaped(markdown, "]", start + 1);
 		if (textEnd === -1) break;
@@ -51,27 +72,23 @@ function markdownLinkSpans(markdown: string): MarkdownLinkSpan[] {
 			continue;
 		}
 		const hrefStart = textEnd + 2;
-		if (hrefStart >= markdown.length || invalidHrefChar(markdown[hrefStart]!)) {
+		if (hrefStart >= markdown.length || /[)\s]/.test(markdown[hrefStart]!)) {
 			index = hrefStart + 1;
 			continue;
 		}
-		let hrefEnd = hrefStart + 1;
-		while (hrefEnd < markdown.length && !invalidHrefChar(markdown[hrefEnd]!)) {
-			hrefEnd++;
-		}
-		const end = markdown.indexOf(")", hrefEnd);
-		if (end === -1) break;
-		links.push({
+		const destination = markdownDestination(markdown, hrefStart);
+		if (!destination) break;
+		const { hrefEnd, end } = destination;
+		yield {
 			text: markdown.slice(start + 1, textEnd),
-			href: markdown.slice(hrefStart, hrefEnd),
+			href: parsedDestination(markdown.slice(hrefStart, hrefEnd)),
 			suffix: markdown.slice(hrefEnd, end),
 			start,
 			end: end + 1,
 			full: markdown.slice(start, end + 1),
-		});
+		};
 		index = end + 1;
 	}
-	return links;
 }
 
 function findUnescaped(markdown: string, target: "[" | "]", start: number) {
@@ -89,16 +106,64 @@ function findUnescaped(markdown: string, target: "[" | "]", start: number) {
 	return -1;
 }
 
-function invalidHrefChar(char: string) {
-	return char === ")" || /\s/.test(char);
+function markdownDestination(markdown: string, start: number) {
+	let depth = 1;
+	let hrefEnd: number | undefined;
+	let quote = "";
+	let backslashes = 0;
+	for (let index = start; index < markdown.length; index++) {
+		const char = markdown[index]!;
+		if (char === "\\") {
+			backslashes++;
+			continue;
+		}
+		const escaped = backslashes % 2 === 1;
+		backslashes = 0;
+		if (escaped) continue;
+		if (hrefEnd !== undefined && (char === '"' || char === "'")) {
+			quote = quote === char ? "" : quote || char;
+			continue;
+		}
+		if (quote) continue;
+		if (/\s/.test(char)) {
+			if (hrefEnd === undefined) {
+				if (depth !== 1) return undefined;
+				hrefEnd = index;
+			}
+			continue;
+		}
+		if (char === "(") depth++;
+		if (char !== ")" || --depth > 0) continue;
+		return { hrefEnd: hrefEnd ?? index, end: index };
+	}
+	return undefined;
+}
+
+function parsedDestination(value: string) {
+	let out = "";
+	for (let index = 0; index < value.length; index++) {
+		let char = value[index]!;
+		const next = value[index + 1];
+		if (char === "\\" && (next === "(" || next === ")")) {
+			char = value[++index]!;
+		}
+		out += char;
+	}
+	return safeMarkdownDestination(out);
+}
+
+const encodeParentheses = (value: string) =>
+	value.replaceAll("(", "%28").replaceAll(")", "%29");
+
+function isImage(markdown: string, start: number) {
+	if (markdown[start - 1] !== "!") return false;
+	let backslashes = 0;
+	for (let index = start - 2; markdown[index] === "\\"; index--) backslashes++;
+	return backslashes % 2 === 0;
 }
 
 type CodeRegion = { start: number; end: number };
 
-// Captured docs frequently contain Markdown examples; links inside fenced
-// blocks or inline code are source content and must not be rewritten. Linear
-// scan: fenced blocks (lines opened by ``` / ~~~) take priority, then inline
-// code spans delimited by matching backtick runs on the same logical text.
 function codeRegions(markdown: string): CodeRegion[] {
 	const regions: CodeRegion[] = [];
 	const length = markdown.length;
@@ -106,10 +171,15 @@ function codeRegions(markdown: string): CodeRegion[] {
 	let lineStart = 0;
 	while (index < length) {
 		const char = markdown[index]!;
-		if (index === lineStart && (char === "`" || char === "~")) {
-			const fence = fenceAt(markdown, index, char);
+		if (index === lineStart) {
+			const fence = fenceAt(markdown, index);
 			if (fence) {
-				const end = fenceClose(markdown, fence.bodyStart, char, fence.length);
+				const end = fenceClose(
+					markdown,
+					fence.bodyStart,
+					fence.marker,
+					fence.length,
+				);
 				regions.push({ start: index, end });
 				index = end;
 				lineStart = end;
@@ -130,14 +200,27 @@ function codeRegions(markdown: string): CodeRegion[] {
 	return regions;
 }
 
-function fenceAt(markdown: string, start: number, marker: "`" | "~") {
+type FenceOpening = {
+	marker: "`" | "~";
+	length: number;
+	bodyStart: number;
+};
+
+function fenceAt(
+	markdown: string,
+	lineStart: number,
+): FenceOpening | undefined {
+	let start = lineStart;
+	while (start - lineStart < 3 && markdown[start] === " ") start++;
+	const marker = markdown[start];
+	if (marker !== "`" && marker !== "~") return undefined;
 	let length = 0;
 	while (markdown[start + length] === marker) length++;
 	if (length < 3) return undefined;
 	let bodyStart = start + length;
 	while (bodyStart < markdown.length && markdown[bodyStart] !== "\n")
 		bodyStart++;
-	return { length, bodyStart: bodyStart + 1 };
+	return { marker, length, bodyStart: bodyStart + 1 };
 }
 
 function fenceClose(
@@ -149,6 +232,7 @@ function fenceClose(
 	let lineStart = from;
 	while (lineStart < markdown.length) {
 		let cursor = lineStart;
+		while (cursor - lineStart < 3 && markdown[cursor] === " ") cursor++;
 		let run = 0;
 		while (markdown[cursor] === marker) {
 			run++;
@@ -156,7 +240,9 @@ function fenceClose(
 		}
 		if (run >= openLength) {
 			const lineEnd = markdown.indexOf("\n", cursor);
-			return lineEnd === -1 ? markdown.length : lineEnd + 1;
+			const end = lineEnd === -1 ? markdown.length : lineEnd;
+			while (cursor < end && /[ \t\r]/.test(markdown[cursor]!)) cursor++;
+			if (cursor === end) return lineEnd === -1 ? end : end + 1;
 		}
 		const next = markdown.indexOf("\n", lineStart);
 		if (next === -1) return markdown.length;

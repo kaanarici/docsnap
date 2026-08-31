@@ -8,7 +8,7 @@ import { validatePublicHttpUrl } from "../security/url.ts";
 import { isNotModifiedResult } from "./policy.ts";
 import type { CacheLookup, CacheRequest } from "./store.ts";
 import {
-	acquireCacheLock,
+	acquireCacheWriteLock,
 	cacheConditional,
 	cachedFetchResult,
 	cacheRequest,
@@ -27,9 +27,6 @@ export type UncachedFetch = (
 	allowUrl?: UrlGate,
 ) => Promise<FetchResult>;
 
-// Process-local single-flight: concurrent same-key cold fetches share one
-// network request and cache write instead of stampeding the origin. Scoped per
-// PipelineConfig (cache context) so unrelated runs never collide; cleared on settle.
 const inFlight = new WeakMap<
 	PipelineConfig,
 	Map<string, Promise<FetchResult>>
@@ -43,24 +40,19 @@ export async function fetchWithCache(
 	uncached: UncachedFetch,
 	allowUrl?: UrlGate,
 ): Promise<FetchResult> {
-	if (conditional || validatePublicHttpUrl(url)) {
+	const unsafe = validatePublicHttpUrl(url);
+	if (conditional || unsafe) {
 		const result = await uncached(url, config, accept, conditional, allowUrl);
-		if (
-			!conditional ||
-			!result.ok ||
-			isNotModifiedResult(result) ||
-			validatePublicHttpUrl(url)
-		) {
+		if (!conditional || !result.ok || isNotModifiedResult(result) || unsafe) {
 			return result;
 		}
 		await writeThroughCache(url, config, accept, result);
 		return result;
 	}
-	const started = performance.now();
 	const request = cacheRequest(url, config, accept);
 	const first = await readCache(config, request);
 	if (first.state === "fresh") {
-		const hit = await freshHit(url, first, started, allowUrl);
+		const hit = await freshHit(url, first, allowUrl);
 		if (hit) return hit;
 	}
 	if (first.state === "disabled")
@@ -83,9 +75,7 @@ function singleFlight(
 	}
 	const existing = pending.get(key);
 	if (existing) return existing;
-	const promise = run().finally(() => {
-		pending?.delete(key);
-	});
+	const promise = run().finally(() => pending.delete(key));
 	pending.set(key, promise);
 	return promise;
 }
@@ -99,20 +89,19 @@ async function fillCold(
 	uncached: UncachedFetch,
 	allowUrl: UrlGate | undefined,
 ): Promise<FetchResult> {
-	const started = performance.now();
-	const lock = await acquireCacheLock(config, first.key);
+	const lock = await acquireCacheWriteLock(config, request);
 	if (!lock) {
 		const afterWait = await readCache(config, request);
 		if (afterWait.state === "fresh") {
-			const hit = await freshHit(url, afterWait, started, allowUrl);
+			const hit = await freshHit(url, afterWait, allowUrl);
 			if (hit) return hit;
 		}
 		return uncached(url, config, accept, undefined, allowUrl);
 	}
 	try {
-		const latest = await readCache(config, request, { count: false });
+		const latest = await readCache(config, request);
 		if (latest.state === "fresh") {
-			const hit = await freshHit(url, latest, started, allowUrl);
+			const hit = await freshHit(url, latest, allowUrl);
 			if (hit) return hit;
 		}
 		const stale =
@@ -129,20 +118,10 @@ async function fillCold(
 			allowUrl,
 		);
 		if (isNotModifiedResult(result) && stale) {
-			const entry = await refreshCacheEntry(
-				config,
-				first.key,
-				stale.entry,
-				result,
-			);
-			return cachedFetchResult(
-				url,
-				entry,
-				stale.body,
-				performance.now() - started,
-			);
+			const entry = await refreshCacheEntry(config, lock, stale.entry, result);
+			return cachedFetchResult(entry, stale.body, url);
 		}
-		await writeCacheResult(config, first.key, request, result);
+		await writeCacheResult(config, lock, result);
 		return result;
 	} finally {
 		await releaseDirLock(lock);
@@ -152,29 +131,16 @@ async function fillCold(
 async function freshHit(
 	url: string,
 	lookup: Extract<CacheLookup, { body: string }>,
-	started: number,
 	allowUrl: UrlGate | undefined,
 ): Promise<FetchResult | undefined> {
-	const result = cachedFetchResult(
-		url,
-		lookup.entry,
-		lookup.body,
-		performance.now() - started,
-	);
-	return (await cachedAllowed(result, allowUrl)) ? result : undefined;
-}
-
-async function cachedAllowed(
-	result: FetchResult,
-	allowUrl: UrlGate | undefined,
-) {
-	if (!allowUrl) return true;
+	const result = cachedFetchResult(lookup.entry, lookup.body, url);
+	if (!allowUrl) return result;
 	if (result.url === result.finalUrl && (result.redirects?.length ?? 0) === 0)
-		return true;
+		return result;
 	try {
-		return await allowUrl(result.finalUrl);
+		return (await allowUrl(result.finalUrl)) ? result : undefined;
 	} catch {
-		return false;
+		return undefined;
 	}
 }
 
@@ -185,11 +151,10 @@ async function writeThroughCache(
 	result: FetchResult,
 ) {
 	const request = cacheRequest(url, config, accept);
-	const key = (await readCache(config, request, { count: false })).key;
-	const lock = await acquireCacheLock(config, key);
+	const lock = await acquireCacheWriteLock(config, request);
 	if (!lock) return;
 	try {
-		await writeCacheResult(config, key, request, result);
+		await writeCacheResult(config, lock, result);
 	} finally {
 		await releaseDirLock(lock);
 	}

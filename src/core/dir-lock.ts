@@ -1,11 +1,27 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import {
+	lstat,
+	mkdir,
+	open,
+	readdir,
+	rename,
+	rmdir,
+	unlink,
+	writeFile,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
+import {
+	isJsonNumber,
+	isJsonObject,
+	isJsonString,
+	parseJsonValue,
+} from "./json.ts";
 
 export const dirLockOwnerFile = "owner.json";
-
+export const dirLockOwnerKind = "docsnap-dir-lock-v1";
 const defaultStaleMs = 60_000;
-const defaultHardReapMs = 30 * 60_000;
+const maxOwnerBytes = 4096;
 
 export type DirLock = {
 	path: string;
@@ -13,6 +29,7 @@ export type DirLock = {
 };
 
 type DirLockOwner = {
+	kind: typeof dirLockOwnerKind;
 	pid: number;
 	token: string;
 	createdAt: string;
@@ -21,14 +38,13 @@ type DirLockOwner = {
 type DirLockBaseOptions = {
 	path: string;
 	staleMs?: number;
-	hardReapMs?: number;
 	ownerFile?: string;
 };
 
 type SoftDirLockOptions = DirLockBaseOptions & {
 	mode: "soft";
 	delaysMs: readonly number[];
-	onAccessError: (error: unknown) => void;
+	onAccessError: (cause: unknown) => void;
 };
 
 type HardDirLockOptions = DirLockBaseOptions & {
@@ -46,10 +62,9 @@ export async function acquireDirLock(
 	options: SoftDirLockOptions | HardDirLockOptions,
 ): Promise<DirLock | undefined> {
 	const staleMs = Math.max(0, options.staleMs ?? defaultStaleMs);
-	const hardReapMs = Math.max(staleMs, options.hardReapMs ?? defaultHardReapMs);
 	return options.mode === "soft"
-		? acquireSoft(options, staleMs, hardReapMs)
-		: acquireHard(options, staleMs, hardReapMs);
+		? acquireSoft(options, staleMs)
+		: acquireHard(options, staleMs);
 }
 
 export async function releaseDirLock(
@@ -59,13 +74,12 @@ export async function releaseDirLock(
 	if (!lock) return;
 	const owner = await readLockOwner(lock.path, ownerFile);
 	if (owner?.token !== lock.token) return;
-	await rm(lock.path, { recursive: true, force: true });
+	await removeLock(lock.path, ownerFile, owner.token);
 }
 
 async function acquireSoft(
 	options: SoftDirLockOptions,
 	staleMs: number,
-	hardReapMs: number,
 ): Promise<DirLock | undefined> {
 	for (const delay of options.delaysMs) {
 		if (delay) await Bun.sleep(delay);
@@ -77,12 +91,7 @@ async function acquireSoft(
 				return undefined;
 			}
 			try {
-				await reapStaleLock(
-					options.path,
-					staleMs,
-					hardReapMs,
-					options.ownerFile,
-				);
+				await reapStaleLock(options.path, staleMs, options.ownerFile);
 			} catch (reapError) {
 				options.onAccessError(reapError);
 				return undefined;
@@ -95,7 +104,6 @@ async function acquireSoft(
 async function acquireHard(
 	options: HardDirLockOptions,
 	staleMs: number,
-	hardReapMs: number,
 ): Promise<DirLock> {
 	const started = Date.now();
 	const delays = options.delaysMs ?? [0, 25, 50, 100, 150, 250];
@@ -105,7 +113,7 @@ async function acquireHard(
 			return await createLock(options.path, options.ownerFile);
 		} catch (error) {
 			if (!isAlreadyExists(error)) throw error;
-			await reapStaleLock(options.path, staleMs, hardReapMs, options.ownerFile);
+			await reapStaleLock(options.path, staleMs, options.ownerFile);
 		}
 		if (Date.now() - started >= Math.max(0, options.waitTimeoutMs)) {
 			throw new Error(
@@ -123,19 +131,22 @@ async function createLock(
 	ownerFile = dirLockOwnerFile,
 ): Promise<DirLock> {
 	await mkdir(dirname(path), { recursive: true });
-	await mkdir(path);
+	await mkdir(path, { mode: 0o700 });
 	const token = randomUUID();
 	try {
 		await writeFile(
 			lockOwnerPath(path, ownerFile),
 			`${JSON.stringify({
+				kind: dirLockOwnerKind,
 				pid: process.pid,
 				token,
 				createdAt: new Date().toISOString(),
 			})}\n`,
+			{ flag: "wx", mode: 0o600 },
 		);
 	} catch (error) {
-		await rm(path, { recursive: true, force: true });
+		await unlink(lockOwnerPath(path, ownerFile)).catch(() => {});
+		await rmdir(path).catch(() => {});
 		throw error;
 	}
 	return { path, token };
@@ -144,29 +155,24 @@ async function createLock(
 async function reapStaleLock(
 	path: string,
 	staleMs: number,
-	hardReapMs: number,
 	ownerFile = dirLockOwnerFile,
 ): Promise<void> {
-	let info: Awaited<ReturnType<typeof stat>>;
+	const owner = await readLockOwner(path, ownerFile);
+	if (owner) {
+		if (!isProcessAlive(owner.pid)) {
+			await removeLock(path, ownerFile, owner.token);
+		}
+		return;
+	}
+	let info: Awaited<ReturnType<typeof lstat>>;
 	try {
-		info = await stat(path);
+		info = await lstat(path);
 	} catch (error) {
 		if (!isNotFound(error)) throw error;
 		return;
 	}
-	const owner = await readLockOwner(path, ownerFile);
-	const createdAt = Date.parse(owner?.createdAt ?? "");
-	const started = Number.isFinite(createdAt) ? createdAt : info.mtimeMs;
-	const ageMs = Date.now() - started;
-	if (ageMs < staleMs) return;
-	if (owner && isProcessAlive(owner.pid) && ageMs < hardReapMs) return;
-	const stalePath = `${path}.reap-${process.pid}-${randomUUID()}`;
-	try {
-		await rename(path, stalePath);
-		await rm(stalePath, { recursive: true, force: true });
-	} catch (error) {
-		if (!isNotFound(error) && !isAlreadyExists(error)) throw error;
-	}
+	if (Date.now() - info.mtimeMs < staleMs) return;
+	await removeLock(path, ownerFile);
 }
 
 async function readLockOwner(
@@ -174,18 +180,89 @@ async function readLockOwner(
 	ownerFile: string,
 ): Promise<DirLockOwner | undefined> {
 	try {
-		const value = JSON.parse(
-			await readFile(lockOwnerPath(path, ownerFile), "utf8"),
+		if (!(await lstat(path)).isDirectory()) return undefined;
+	} catch {
+		return undefined;
+	}
+	let handle: Awaited<ReturnType<typeof open>>;
+	try {
+		handle = await open(
+			lockOwnerPath(path, ownerFile),
+			constants.O_RDONLY | constants.O_NOFOLLOW,
 		);
+	} catch {
+		return undefined;
+	}
+	try {
+		const info = await handle.stat();
+		if (!info.isFile() || info.size > maxOwnerBytes) return undefined;
+		const body = Buffer.allocUnsafe(maxOwnerBytes + 1);
+		const { bytesRead } = await handle.read(body, 0, body.length, 0);
+		if (bytesRead > maxOwnerBytes) return undefined;
+		const value = parseJsonValue(body.subarray(0, bytesRead).toString("utf8"));
 		if (
-			typeof value?.pid === "number" &&
-			typeof value.token === "string" &&
-			typeof value.createdAt === "string"
+			isJsonObject(value) &&
+			value["kind"] === dirLockOwnerKind &&
+			isJsonNumber(value["pid"]) &&
+			Number.isInteger(value["pid"]) &&
+			value["pid"] > 0 &&
+			isJsonString(value["token"]) &&
+			/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(value["token"]) &&
+			isJsonString(value["createdAt"]) &&
+			Number.isFinite(Date.parse(value["createdAt"]))
 		) {
-			return value as DirLockOwner;
+			return {
+				kind: dirLockOwnerKind,
+				pid: value["pid"],
+				token: value["token"],
+				createdAt: value["createdAt"],
+			};
 		}
-	} catch {}
-	return undefined;
+		return undefined;
+	} catch {
+		return undefined;
+	} finally {
+		await handle.close();
+	}
+}
+
+async function removeLock(
+	path: string,
+	ownerFile: string,
+	token?: string,
+): Promise<void> {
+	const removedPath = `${path}.reap-${process.pid}-${randomUUID()}`;
+	try {
+		await rename(path, removedPath);
+	} catch (error) {
+		if (isNotFound(error)) return;
+		throw error;
+	}
+	let removed = false;
+	try {
+		if (!(await lstat(removedPath)).isDirectory()) return;
+		const entries = await readdir(removedPath);
+		if (token) {
+			const movedOwner = await readLockOwner(removedPath, ownerFile);
+			if (movedOwner?.token !== token) return;
+			if (entries.length !== 1 || entries[0] !== ownerFile) {
+				throw new Error(`Directory lock contains unexpected files: ${path}`);
+			}
+		} else if (entries.length === 0) {
+			await rmdir(removedPath);
+			removed = true;
+			return;
+		} else {
+			if (entries.length !== 1 || entries[0] !== ownerFile) return;
+			const info = await lstat(lockOwnerPath(removedPath, ownerFile));
+			if (!info.isFile() || info.size > maxOwnerBytes) return;
+		}
+		await unlink(lockOwnerPath(removedPath, ownerFile));
+		await rmdir(removedPath);
+		removed = true;
+	} finally {
+		if (!removed) await rename(removedPath, path).catch(() => {});
+	}
 }
 
 function lockOwnerPath(path: string, ownerFile: string): string {
@@ -205,14 +282,14 @@ function isProcessAlive(pid: number): boolean {
 	}
 }
 
-function isNotFound(error: unknown): boolean {
-	return hasErrorCode(error, "ENOENT");
+function isNotFound(cause: unknown): boolean {
+	return hasErrorCode(cause, "ENOENT");
 }
 
-function isAlreadyExists(error: unknown): boolean {
-	return hasErrorCode(error, "EEXIST");
+function isAlreadyExists(cause: unknown): boolean {
+	return hasErrorCode(cause, "EEXIST");
 }
 
-function hasErrorCode(error: unknown, code: string): boolean {
-	return error instanceof Error && "code" in error && error.code === code;
+function hasErrorCode(cause: unknown, code: string): boolean {
+	return cause instanceof Error && "code" in cause && cause.code === code;
 }

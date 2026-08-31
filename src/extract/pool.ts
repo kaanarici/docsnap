@@ -1,77 +1,136 @@
-import { cpus } from "node:os";
-import type { FetchedUrl, PageRecord } from "../core/types.ts";
+import { availableParallelism } from "node:os";
+import type { FetchedUrl } from "../core/types.ts";
 import { shouldExtractInWorker } from "./content.ts";
-import { extractPage } from "./html.ts";
+import { type ExtractedPage, extractPage } from "./html.ts";
+import { failedRecord } from "./page-record.ts";
 
 type Message =
-	| { id: number; record: PageRecord }
+	| { id: number; page: ExtractedPage }
 	| { id: number; error: string };
 
-export async function extractMany(inputs: FetchedUrl[]): Promise<PageRecord[]> {
-	if (typeof Worker === "undefined")
-		return Promise.all(inputs.map(extractPage));
+export type ExtractionPool = {
+	extractMany(inputs: FetchedUrl[]): Promise<ExtractedPage[]>;
+	close(): Promise<void>;
+};
 
-	const results: PageRecord[] = new Array(inputs.length);
-	const heavy: Array<{ id: number; input: FetchedUrl }> = [];
-	await Promise.all(
-		inputs.map(async (input, id) => {
-			if (shouldExtractInWorker(input.result)) heavy.push({ id, input });
-			else results[id] = await extractPage(input);
-		}),
-	);
-	if (heavy.length < 2) {
+const workerPageThreshold = 48;
+const workerByteThreshold = 8 * 1024 * 1024;
+
+export function createExtractionPool(): ExtractionPool {
+	const workers: Worker[] = [];
+	let activeReject: ((error: Error) => void) | undefined;
+
+	return { extractMany, close };
+
+	async function extractMany(inputs: FetchedUrl[]): Promise<ExtractedPage[]> {
+		if (!("Worker" in globalThis))
+			return Promise.all(inputs.map(safeExtractPage));
+		if (activeReject) {
+			throw new Error("extractMany calls must not overlap on one pool");
+		}
+
+		const results: ExtractedPage[] = [];
+		results.length = inputs.length;
+		const heavy: Array<{ id: number; input: FetchedUrl }> = [];
 		await Promise.all(
-			heavy.map(async ({ id, input }) => {
-				results[id] = await extractPage(input);
+			inputs.map(async (input, id) => {
+				if (shouldExtractInWorker(input.result)) heavy.push({ id, input });
+				else results[id] = await safeExtractPage(input);
 			}),
 		);
+		const heavyBytes = heavy.reduce(
+			(total, { input }) => total + Buffer.byteLength(input.result.body),
+			0,
+		);
+		if (
+			heavy.length < workerPageThreshold &&
+			heavyBytes < workerByteThreshold &&
+			heavy.every(({ input }) => !input.result.document)
+		) {
+			await Promise.all(
+				heavy.map(async ({ id, input }) => {
+					results[id] = await safeExtractPage(input);
+				}),
+			);
+			return results;
+		}
+
+		const size = Math.min(
+			heavy.length,
+			Math.max(1, availableParallelism() - 1),
+			8,
+		);
+		while (workers.length < size) workers.push(createWorker());
+		let next = 0;
+		let pending = heavy.length;
+		await new Promise<void>((resolve, reject) => {
+			activeReject = reject;
+			for (const worker of workers.slice(0, size)) {
+				worker.onmessage = (event: MessageEvent<Message>) => {
+					const message = event.data;
+					if ("error" in message) {
+						results[message.id] = failedExtraction(
+							inputs[message.id]!,
+							message.error,
+						);
+					} else {
+						results[message.id] = message.page;
+					}
+					pending--;
+					if (pending === 0) {
+						activeReject = undefined;
+						resolve();
+					} else {
+						send(worker);
+					}
+				};
+				send(worker);
+			}
+
+			function send(worker: Worker) {
+				const job = heavy[next++];
+				if (!job) return;
+				const body = Buffer.from(job.input.result.body, "utf8");
+				const input = {
+					...job.input,
+					result: { ...job.input.result, body: "" },
+				};
+				worker.postMessage({ id: job.id, input, body }, [body.buffer]);
+			}
+		});
 		return results;
 	}
 
-	const size = Math.min(heavy.length, Math.max(1, cpus().length - 1), 8);
-	let next = 0;
-	const pool: Worker[] = [];
-	// a fatal error in one worker must tear down the siblings too; otherwise they
-	// keep draining the queue and hold the event loop open after a failed run
-	const terminateAll = () => {
-		for (const worker of pool) worker.terminate();
-	};
-
-	const tasks = Array.from({ length: size }, () => {
+	function createWorker() {
 		const worker = new Worker(new URL("./worker.ts", import.meta.url), {
 			type: "module",
 		});
-		pool.push(worker);
-		return new Promise<void>((resolve, reject) => {
-			const fail = (error: Error) => {
-				terminateAll();
-				reject(error);
-			};
-			worker.onerror = (event) =>
-				fail(event.error ?? new Error("extract worker crashed"));
-			worker.onmessage = (event: MessageEvent<Message>) => {
-				const message = event.data;
-				if ("error" in message) {
-					fail(new Error(message.error));
-					return;
-				}
-				results[message.id] = message.record;
-				if (!send()) {
-					worker.terminate();
-					resolve();
-				}
-			};
-			send();
+		worker.onerror = (event) => {
+			const reject = activeReject;
+			activeReject = undefined;
+			reject?.(event.error ?? new Error("extract worker crashed"));
+		};
+		return worker;
+	}
 
-			function send() {
-				const job = heavy[next++];
-				if (!job) return false;
-				worker.postMessage({ id: job.id, input: job.input });
-				return true;
-			}
-		});
-	});
+	async function close() {
+		await Promise.all(workers.map((worker) => worker.terminate()));
+	}
+}
 
-	await Promise.all(tasks);
-	return results;
+async function safeExtractPage(input: FetchedUrl): Promise<ExtractedPage> {
+	try {
+		return await extractPage(input);
+	} catch (error) {
+		return failedExtraction(input, error);
+	}
+}
+
+function failedExtraction(input: FetchedUrl, cause: unknown): ExtractedPage {
+	const message = cause instanceof Error ? cause.message : String(cause);
+	return [
+		failedRecord(input.result, input.source, message, "extract", input.wasSeed),
+		{ links: [] },
+		false,
+	];
 }

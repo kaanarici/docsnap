@@ -1,9 +1,11 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { awaitWithSignal } from "../core/parallel.ts";
 
 const blockedHostname = /(^|\.)localhost$/i;
 const addressCacheTtlMs = 60_000;
 const allowTestHostEnv = "DOCSNAP_ALLOW_TEST_HOST";
+export const maxPublicUrlChars = 16_384;
 const addressCache = new Map<
 	string,
 	{ addresses: PublicAddress[]; expires: number }
@@ -17,18 +19,22 @@ export type PublicHttpAddress = {
 	addresses: PublicAddress[];
 };
 
+export class UnsafeUrlError extends Error {}
+
 export type PublicAddress = {
 	address: string;
 	family: 4 | 6;
 };
 
 export function validatePublicHttpUrl(raw: string): string | undefined {
+	if (raw.length > maxPublicUrlChars) return "URL is too long";
 	let url: URL;
 	try {
 		url = new URL(raw);
 	} catch {
 		return "invalid URL";
 	}
+	if (url.href.length > maxPublicUrlChars) return "URL is too long";
 	if (url.protocol !== "http:" && url.protocol !== "https:") {
 		return "URL must use http or https";
 	}
@@ -55,9 +61,10 @@ export function validatePublicHttpUrl(raw: string): string | undefined {
 
 export async function resolvePublicHttpUrl(
 	raw: string,
+	signal?: AbortSignal,
 ): Promise<PublicHttpAddress> {
 	const syntaxError = validatePublicHttpUrl(raw);
-	if (syntaxError) throw new Error(syntaxError);
+	if (syntaxError) throw new UnsafeUrlError(syntaxError);
 
 	const url = new URL(raw);
 	const hostname = normalizedHostname(url);
@@ -70,7 +77,7 @@ export async function resolvePublicHttpUrl(
 	if (cached && cached.expires > Date.now()) {
 		const [address] = cached.addresses;
 		if (!address)
-			throw new Error("hostname did not resolve to a public address");
+			throw new UnsafeUrlError("hostname did not resolve to a public address");
 		return {
 			url,
 			hostname,
@@ -80,27 +87,12 @@ export async function resolvePublicHttpUrl(
 		};
 	}
 
-	const addresses = await lookup(hostname, { all: true, verbatim: true });
-	if (addresses.length === 0) {
-		throw new Error("hostname did not resolve");
-	}
-	for (const address of addresses) {
-		if (
-			(address.family === 4 || address.family === 6) &&
-			!isPublicIp(address.address, address.family)
-		) {
-			throw new Error("hostname resolves to a private or internal address");
-		}
-	}
-	const publicAddresses = uniqueAddresses(
-		addresses.filter(
-			(item): item is PublicAddress =>
-				(item.family === 4 || item.family === 6) &&
-				isPublicIp(item.address, item.family),
-		),
+	const publicAddresses = validateResolvedAddresses(
+		await lookupWithSignal(hostname, signal),
 	);
 	const [address] = publicAddresses;
-	if (!address) throw new Error("hostname did not resolve to a public address");
+	if (!address)
+		throw new UnsafeUrlError("hostname did not resolve to a public address");
 	addressCache.set(hostname, {
 		addresses: publicAddresses,
 		expires: Date.now() + addressCacheTtlMs,
@@ -114,8 +106,46 @@ export async function resolvePublicHttpUrl(
 	};
 }
 
+export function validateResolvedAddresses(
+	addresses: Array<{ address: string; family: number }>,
+): PublicAddress[] {
+	if (addresses.length === 0)
+		throw new UnsafeUrlError("hostname did not resolve");
+	for (const address of addresses) {
+		if (
+			(address.family === 4 || address.family === 6) &&
+			!isPublicIp(address.address, address.family)
+		) {
+			throw new UnsafeUrlError(
+				"hostname resolves to a private or internal address",
+			);
+		}
+	}
+	const publicAddresses = uniqueAddresses(
+		addresses.filter(
+			(item): item is PublicAddress =>
+				(item.family === 4 || item.family === 6) &&
+				isPublicIp(item.address, item.family),
+		),
+	);
+	if (publicAddresses.length === 0) {
+		throw new UnsafeUrlError("hostname did not resolve to a public address");
+	}
+	return publicAddresses;
+}
+
+async function lookupWithSignal(hostname: string, signal?: AbortSignal) {
+	return awaitWithSignal(
+		lookup(hostname, { all: true, verbatim: true }),
+		signal,
+	);
+}
+
 function normalizedHostname(url: URL): string {
-	return url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+	return url.hostname
+		.replace(/^\[|\]$/g, "")
+		.replace(/\.$/, "")
+		.toLowerCase();
 }
 
 function allowsExactTestOrigin(url: URL): boolean {
@@ -158,7 +188,8 @@ function isPublicIpv4(address: string): boolean {
 	if (parts.length !== 4 || parts.some((part) => part < 0 || part > 255)) {
 		return false;
 	}
-	const [a, b] = parts as [number, number, number, number];
+	const a = parts[0] ?? -1;
+	const b = parts[1] ?? -1;
 	return !(
 		a === 0 ||
 		a === 10 ||
@@ -182,16 +213,9 @@ function isPublicIpv6(address: string): boolean {
 	if (!segments) return false;
 	const mappedIpv4 = ipv4FromMappedIpv6(segments);
 	if (mappedIpv4) return isPublicIpv4(mappedIpv4);
-	const [first, second, third] = segments as [
-		number,
-		number,
-		number,
-		number,
-		number,
-		number,
-		number,
-		number,
-	];
+	const first = segments[0] ?? 0;
+	const second = segments[1] ?? 0;
+	const third = segments[2] ?? 0;
 	return !(
 		first < 0x2000 ||
 		first > 0x3fff ||
@@ -211,12 +235,11 @@ function ipv6Segments(address: string): number[] | undefined {
 		const colon = value.lastIndexOf(":");
 		const tail = value.slice(colon + 1);
 		if (isIP(tail) !== 4) return undefined;
-		const [a, b, c, d] = tail.split(".").map(Number) as [
-			number,
-			number,
-			number,
-			number,
-		];
+		const octets = tail.split(".").map(Number);
+		const a = octets[0] ?? 0;
+		const b = octets[1] ?? 0;
+		const c = octets[2] ?? 0;
+		const d = octets[3] ?? 0;
 		value = `${value.slice(0, colon)}:${((a << 8) | b).toString(16)}:${(
 			(c << 8) | d
 		).toString(16)}`;
