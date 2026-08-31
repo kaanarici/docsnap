@@ -18,6 +18,7 @@ import {
 	skipChrome,
 } from "../render/session.ts";
 import { startDiscovery } from "./index.ts";
+import { discoverFetchedResources } from "./nav.ts";
 import { normalizeUrl } from "./url.ts";
 
 type DiscoveryRun = {
@@ -64,6 +65,7 @@ export async function discoverMap(
 		const pending: DiscoveredUrl[] = [];
 		const known = new Set<string>();
 		while (known.size < limit) {
+			config.signal?.throwIfAborted();
 			const batch = await session.frontier.take(limit - known.size);
 			if (batch.length === 0) break;
 			pending.push(...batch);
@@ -75,6 +77,7 @@ export async function discoverMap(
 		}
 		const expand = session.allowResource !== undefined && known.size < limit;
 		while (slots < limit) {
+			config.signal?.throwIfAborted();
 			const batchSize = Math.min(config.perOrigin, limit - slots);
 			const pulledBatch =
 				pending.length > 0
@@ -126,7 +129,10 @@ export async function discoverMap(
 				: undefined;
 			if (fetched) {
 				for (const page of fetched) {
-					session.frontier.observe(page.result);
+					session.frontier.observe(
+						page.result,
+						discoverFetchedResources(page.result),
+					);
 					if (page.result.ok) {
 						scheduled.add(candidateKey(page.result.finalUrl));
 					}

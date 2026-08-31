@@ -4,19 +4,12 @@ import {
 	candidateKey,
 	identityKeys,
 } from "../src/core/identity.ts";
-import {
-	classifyDiscoveryResource,
-	relatedHost,
-	sameSharedHostPlatform,
-	scopeFromFeedResource,
-} from "../src/core/url.ts";
-import { discoverFeed } from "../src/discover/feed.ts";
-import { normalizeUrl } from "../src/discover/url.ts";
+import { normalizeUrl, pathAllowed } from "../src/discover/url.ts";
 import {
 	validatePublicHttpUrl,
 	validateResolvedAddresses,
 } from "../src/security/url.ts";
-import { okFetch, testConfig } from "./fixtures.ts";
+import { testConfig } from "./fixtures.ts";
 
 describe("IP address rejection", () => {
 	test.each([
@@ -82,15 +75,6 @@ describe("resolved-address validation", () => {
 });
 
 describe("URL identity", () => {
-	test("does not trust unrelated country-domain registrants", () => {
-		for (const suffix of ["co.kr", "com.tr"]) {
-			expect(relatedHost(`victim.${suffix}`, `attacker.${suffix}`)).toBeFalse();
-			expect(
-				sameSharedHostPlatform(`victim.${suffix}`, `attacker.${suffix}`),
-			).toBeFalse();
-		}
-	});
-
 	test("collapses route-equivalent index and extension forms", () => {
 		const guide = candidateKey("https://example.com/guide");
 		for (const url of [
@@ -156,68 +140,13 @@ describe("URL identity", () => {
 	});
 });
 
-test.each([
-	["https://daringfireball.net/feeds/main", "/"],
-	["https://planetpython.org/rss20.xml", "/"],
-	["https://example.com/blog/rss.xml", "/blog/"],
-	["https://example.com/blog/rss", "/blog/"],
-	["https://example.com/headlines/rss", "/headlines/"],
-])("derives content scope from feed resource %s", (url, scope) => {
-	expect(classifyDiscoveryResource(url)?.source).toBe("feed");
-	expect(scopeFromFeedResource(url)).toBe(scope);
-});
-
-test("widens only an empty feed path scope without crossing origins", async () => {
-	const seed = "https://example.com/headlines/rss";
-	const response = okFetch(
-		seed,
-		`<rss><channel>
-			<item><link>https://example.com/Articles/1/</link></item>
-			<item><link>https://outside.example/Articles/2/</link></item>
-		</channel></rss>`,
-		{ contentType: "application/rss+xml" },
-	);
-	const found = await discoverFeed(
-		seed,
-		seed,
-		scopeFromFeedResource(seed),
-		testConfig("unused"),
-		{ response },
-	);
-	expect(found.pages.map((page) => page.url)).toEqual([
-		"https://example.com/Articles/1/",
-	]);
-
-	const blogSeed = "https://example.com/blog/rss";
-	const blog = await discoverFeed(
-		blogSeed,
-		blogSeed,
-		scopeFromFeedResource(blogSeed),
-		testConfig("unused"),
-		{
-			response: okFetch(
-				blogSeed,
-				"<rss><channel><item><link>https://example.com/blog/1</link></item><item><link>https://example.com/elsewhere/2</link></item></channel></rss>",
-				{ contentType: "application/rss+xml" },
-			),
-		},
-	);
-	expect(blog.pages.map((page) => page.url)).toEqual([
-		"https://example.com/blog/1",
-	]);
-});
-
-test("reads namespaced RDF feeds", async () => {
-	const seed = "https://example.com/feed.rdf";
-	const response = okFetch(
-		seed,
-		`<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/"><item><link>https://example.com/guide</link></item></rdf:RDF>`,
-		{ contentType: "application/rss+xml" },
-	);
-	const found = await discoverFeed(seed, seed, "/", testConfig("unused"), {
-		response,
+test("filters URL paths with exclude taking precedence", () => {
+	const config = testConfig("unused", {
+		include: ["/docs/**"],
+		exclude: ["/docs/internal/**"],
 	});
-	expect(found.pages.map((page) => page.url)).toEqual([
-		"https://example.com/guide",
-	]);
+	expect(pathAllowed("https://example.com/docs", config)).toBeTrue();
+	expect(pathAllowed("https://example.com/docs/guide", config)).toBeTrue();
+	expect(pathAllowed("https://example.com/docs/internal", config)).toBeFalse();
+	expect(pathAllowed("https://example.com/blog", config)).toBeFalse();
 });

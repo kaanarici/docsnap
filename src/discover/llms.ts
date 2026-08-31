@@ -6,7 +6,7 @@ import { fetchText, preferredMarkdownAccept } from "../fetch/fetcher.ts";
 import { orderByTopic } from "./topic.ts";
 import {
 	normalizeUrl,
-	pathInScope,
+	pathAllowed,
 	sameScopeLinks,
 	scopeFromSeed,
 } from "./url.ts";
@@ -16,7 +16,6 @@ export type LlmsDiscoveryOptions = {
 	cache?: Map<string, Promise<FetchResult>>;
 	allowResource?: (url: string) => Promise<boolean> | boolean;
 	limit?: number;
-	initialFetchLimit?: number;
 	truncated?: boolean;
 };
 
@@ -44,7 +43,7 @@ export async function discoverLlms(
 	};
 	const initialUrls = queue.slice(
 		0,
-		options.initialFetchLimit ?? Math.min(config.concurrency, config.perOrigin),
+		Math.min(config.concurrency, config.perOrigin),
 	);
 	const initialResponses = await Promise.all(initialUrls.map(fetchAllowed));
 	const initial = new Map(
@@ -77,6 +76,7 @@ export async function discoverLlms(
 				if (!seen.has(link)) queue.push(link);
 				continue;
 			}
+			if (!pathAllowed(link, config)) continue;
 			if (shouldExpandIndex(link, corpusBase, seen, urls, scanLimit)) {
 				urls.add(link);
 				queue.push(link);
@@ -165,37 +165,26 @@ function looksLikeCorpus(body: string) {
 	);
 }
 
-function guessFullCorpusUrls(body: string, base: string, explicit: string[]) {
-	const hints: string[] = [];
-	for (const name of ["llms-full.txt", "llms-ctx.txt", "llms-ctx-full.txt"]) {
-		if (explicit.some((raw) => new URL(raw).pathname.endsWith(`/${name}`)))
-			continue;
-		const url = normalizeUrl(name, base);
-		if (url && body.includes(name)) hints.push(url);
-	}
-	return hints;
-}
-
 function corpusLinks(
 	body: string,
 	base: string,
 	requestedScope: string,
 	config: PipelineConfig,
 ) {
-	const explicit = corpusEntryLinks(
-		body,
-		base,
-		config.maxExplicit ? config.max : maxGeneratedCapturePages + 1,
-	);
-	const links = [
-		...new Set([...explicit, ...guessFullCorpusUrls(body, base, explicit)]),
-	];
-	if (!config.maxExplicit) return links;
-	const scopeRanked = links.sort(
-		(a, b) =>
-			linkRank(a, base, requestedScope) - linkRank(b, base, requestedScope),
-	);
-	return orderByTopic(scopeRanked, base, requestedScope);
+	const links = corpusEntryLinks(body, base, maxGeneratedCapturePages + 1);
+	const hasSmaller = links.some((link) => {
+		const pathname = new URL(link).pathname;
+		return pathname !== "/" && !isFullCorpusUrl(link);
+	});
+	const selected = hasSmaller
+		? links.filter((link) => !isFullCorpusUrl(link))
+		: links;
+	if (!config.maxExplicit) return selected;
+	return orderByTopic(selected, base, requestedScope);
+}
+
+function isFullCorpusUrl(raw: string) {
+	return /(?:^|\/)llms-(?:full|ctx-full)\.txt$/i.test(new URL(raw).pathname);
 }
 
 function corpusEntryLinks(body: string, base: string, limit: number) {
@@ -208,7 +197,7 @@ function corpusEntryLinks(body: string, base: string, limit: number) {
 		if (first !== undefined) {
 			const url = normalizeUrl(first, base);
 			if (url) links.add(url);
-		} else if (!languageListingLine(line)) {
+		} else {
 			for (const url of sameScopeLinks(line, base, limit - links.size)) {
 				links.add(url);
 			}
@@ -217,24 +206,6 @@ function corpusEntryLinks(body: string, base: string, limit: number) {
 		start = newline + 1;
 	}
 	return [...links];
-}
-
-function languageListingLine(line: string) {
-	return (
-		/\b\d+\s+pages\b/i.test(line) &&
-		/(^|\s)\/docs(?:\/[a-z]{2}(?:-[a-z]{2})?)?(?:\s|$)/i.test(line)
-	);
-}
-
-function linkRank(raw: string, base: string, requestedScope: string) {
-	const scope = base.replace(/\/[^/]*$/, "/");
-	const url = new URL(raw);
-	return (
-		Number(!pathInScope(url.pathname, requestedScope)) * 4 +
-		Number(!pathInScope(url.pathname, new URL(scope).pathname)) +
-		Number(/(^|\/)llms-full\.txt$/i.test(url.pathname)) * 2 +
-		(/(?:^|\/)(?:widgets?|playground|chat)\//i.test(url.pathname) ? 10 : 0)
-	);
 }
 
 function shouldExpandIndex(

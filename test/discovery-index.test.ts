@@ -1,6 +1,11 @@
 import { describe, expect, onTestFinished, test } from "bun:test";
+import { parseHTML } from "linkedom";
 import { startDiscovery } from "../src/discover/index.ts";
 import { discoverLlms } from "../src/discover/llms.ts";
+import {
+	discoverFetchedResources,
+	discoverPageResources,
+} from "../src/discover/nav.ts";
 import { okFetch, setTestEnv, testConfig } from "./fixtures.ts";
 
 function listed(session: Awaited<ReturnType<typeof startDiscovery>>) {
@@ -53,6 +58,63 @@ function siteConfig(origin: string, max = 8) {
 }
 
 describe("discovery index policy", () => {
+	test("does not accept one filtered llms URL as a complete root corpus", async () => {
+		const origin = serve({
+			"/": { body: "<main>Home</main>" },
+			"/llms.txt": {
+				type: "text/markdown",
+				body: "# Docs\n\n- [One](/docs/one)\n",
+			},
+			"/sitemap.xml": {
+				type: "application/xml",
+				body: `<urlset>
+					<url><loc>/docs/one</loc></url>
+					<url><loc>/docs/two</loc></url>
+					<url><loc>/docs/three</loc></url>
+				</urlset>`,
+			},
+			"/docs/one": { body: "<main>One</main>" },
+			"/docs/two": { body: "<main>Two</main>" },
+			"/docs/three": { body: "<main>Three</main>" },
+		});
+		const config = siteConfig(origin);
+		config.include = ["/docs/**"];
+
+		expect(await listed(await startDiscovery(config))).toEqual([
+			{ path: "/", source: "seed", wasSeed: true },
+			{ path: "/docs/one", source: "sitemap", wasSeed: false },
+			{ path: "/docs/two", source: "sitemap", wasSeed: false },
+			{ path: "/docs/three", source: "sitemap", wasSeed: false },
+		]);
+	});
+
+	test("applies path filters before accepting llms.txt candidates", async () => {
+		const origin = serve({
+			"/": { body: "<main>Home</main>" },
+			"/llms.txt": {
+				type: "text/markdown",
+				body: [
+					"# Docs",
+					"- [One](/docs/one)",
+					"- [Two](/docs/two)",
+					"- [Three](/docs/three)",
+					"- [Internal](/docs/internal/secret)",
+					"- [Blog](/blog/post)",
+				].join("\n"),
+			},
+		});
+		const config = siteConfig(origin);
+		config.include = ["/docs/**"];
+		config.exclude = ["/docs/internal/**"];
+
+		expect(await listed(await startDiscovery(config))).toEqual([
+			{ path: "/", source: "seed", wasSeed: true },
+			{ path: "/docs/one", source: "llms", wasSeed: false },
+			{ path: "/docs/two", source: "llms", wasSeed: false },
+			{ path: "/docs/three", source: "llms", wasSeed: false },
+		]);
+	});
+
 	test("keeps the explicit seed and returns an llms.txt corpus without crawling", async () => {
 		const origin = serve({
 			"/": {
@@ -120,6 +182,33 @@ describe("discovery index policy", () => {
 	});
 });
 
+test("reuses a full parsed document for oversized HTML discovery", () => {
+	const tail = '<a href="/after-limit">After limit</a>';
+	const html = `<main>${"x".repeat(1_000_100)}${tail}</main>`;
+	const document = parseHTML(html).document;
+	const resources = discoverPageResources(
+		html,
+		"https://example.com/",
+		false,
+		document,
+	);
+
+	expect(resources.links).toContain("https://example.com/after-limit");
+	expect(resources.truncated).toBeUndefined();
+});
+
+test("flags discovery truncation past the large HTML parse limit", async () => {
+	const before = '<a href="/before-limit">Before</a>';
+	const tail = '<a href="/after-limit">After</a>';
+	const html = `<main>${before}${"x".repeat(1_000_100)}${tail}</main>`;
+	const resources = discoverFetchedResources(
+		okFetch("https://example.com/", html),
+	);
+
+	expect(resources.links).toContain("https://example.com/before-limit");
+	expect(resources.truncated).toBeTrue();
+});
+
 test("rejects a large unfinished Markdown link corpus", async () => {
 	const seed = "https://example.com/";
 	const llms = `${seed}llms.txt`;
@@ -144,4 +233,94 @@ test("rejects a large unfinished Markdown link corpus", async () => {
 			{ cache },
 		),
 	).resolves.toEqual([]);
+});
+
+test("uses section indexes instead of an available full corpus", async () => {
+	const seed = "https://example.com/";
+	const cache = new Map([
+		[
+			`${seed}llms.txt`,
+			Promise.resolve(
+				okFetch(
+					`${seed}llms.txt`,
+					"Full text: https://example.com/llms-full.txt\n\n- [Guide](https://example.com/guide/llms.txt)",
+					{ contentType: "text/markdown" },
+				),
+			),
+		],
+		[
+			"https://example.com/guide/llms.txt",
+			Promise.resolve(
+				okFetch(
+					"https://example.com/guide/llms.txt",
+					"- [One](/guide/one)\n- [Two](/guide/two)\n- [Three](/guide/three)",
+					{ contentType: "text/markdown" },
+				),
+			),
+		],
+		[
+			"https://example.com/llms-full.txt",
+			Promise.resolve(
+				okFetch(
+					"https://example.com/llms-full.txt",
+					"- [Bogus](/data)\n- [Old](/removed.mdx)",
+					{ contentType: "text/markdown" },
+				),
+			),
+		],
+	]);
+	const urls = await discoverLlms(
+		seed,
+		testConfig("unused", {
+			seedUrl: seed,
+			max: 20,
+			maxExplicit: true,
+		}),
+		{ cache },
+	);
+	expect(urls).toEqual([
+		"https://example.com/guide/one",
+		"https://example.com/guide/two",
+		"https://example.com/guide/three",
+	]);
+});
+
+test("keeps a full corpus when the smaller index only links home", async () => {
+	const seed = "https://example.com/";
+	const cache = new Map([
+		[
+			`${seed}llms.txt`,
+			Promise.resolve(
+				okFetch(
+					`${seed}llms.txt`,
+					"- [Home](/)\n- [Full](https://example.com/llms-full.txt)",
+					{ contentType: "text/markdown" },
+				),
+			),
+		],
+		[
+			"https://example.com/llms-full.txt",
+			Promise.resolve(
+				okFetch(
+					"https://example.com/llms-full.txt",
+					"- [One](/one)\n- [Two](/two)\n- [Three](/three)",
+					{ contentType: "text/markdown" },
+				),
+			),
+		],
+	]);
+	const urls = await discoverLlms(
+		seed,
+		testConfig("unused", {
+			seedUrl: seed,
+			max: 20,
+			maxExplicit: true,
+		}),
+		{ cache },
+	);
+	expect(urls).toEqual([
+		"https://example.com/one",
+		"https://example.com/two",
+		"https://example.com/three",
+	]);
 });

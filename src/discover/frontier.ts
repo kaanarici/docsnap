@@ -4,10 +4,8 @@ import type {
 	FetchResult,
 	PipelineConfig,
 } from "../core/types.ts";
-import { type FetchUrlGate, fetchText } from "../fetch/fetcher.ts";
+import type { FetchUrlGate } from "../fetch/fetcher.ts";
 import { filteredNonPageResult } from "../fetch/result.ts";
-import type { LlmsCorpusOptions } from "./corpus.ts";
-import { discoverFeed } from "./feed.ts";
 import {
 	discoverFetchedResources,
 	isHtmlResponse,
@@ -15,7 +13,7 @@ import {
 } from "./nav.ts";
 import type { Robots } from "./robots.ts";
 import { orderByTopic } from "./topic.ts";
-import { addDiscovered, inScope, normalizeUrl } from "./url.ts";
+import { addDiscovered, inScope, normalizeUrl, pathAllowed } from "./url.ts";
 
 export type DiscoveryFrontierInput = {
 	config: PipelineConfig;
@@ -25,7 +23,7 @@ export type DiscoveryFrontierInput = {
 	scope: string;
 	robots: Robots;
 	allowResource: FetchUrlGate;
-	llmsOptions: LlmsCorpusOptions;
+	indexTruncated: boolean;
 	seedResponse: FetchResult;
 	seedResources: PageResources;
 	seedIsLanguageSelector: boolean;
@@ -71,7 +69,9 @@ export function createDiscoveryFrontier(
 	const out: DiscoveredUrl[] = [];
 	const seen = new Set(input.finalSeed ? [] : [input.inputSeed]);
 	const accepted = (url: string) =>
-		inScope(url, input.seed, input.scope) && input.robots.allowed(url);
+		inScope(url, input.seed, input.scope) &&
+		pathAllowed(url, config) &&
+		input.robots.allowed(url);
 	const prioritize = (urls: string[]) =>
 		diversityFirst(
 			config.maxExplicit ? orderByTopic(urls, input.seed, input.scope) : urls,
@@ -86,11 +86,8 @@ export function createDiscoveryFrontier(
 		: [{ urls: nav, source: "nav", index: 0 }];
 	const crawl: LinkStream = { urls: [], source: "crawl", index: 0 };
 	const crawlQueued = new Set<string>();
-	const pagination: string[] = [];
-	const paginationSeen = new Set<string>();
 	const { attemptLimit } = input;
 	let emitted = 0;
-	let paginationIndex = 0;
 	let prepared: Promise<void> | undefined;
 	let truncated = Boolean(input.seedResources.truncated);
 
@@ -143,22 +140,16 @@ export function createDiscoveryFrontier(
 	) => {
 		truncated ||= Boolean(page.truncated);
 		if (input.seedIsLanguageSelector) return page;
-		for (const url of diversityFirst(page.links)) queue(url);
+		for (const url of page.links) queue(url);
 		if (!isHtmlResponse(result)) return page;
 		const resource = page.next;
-		if (resource && !paginationSeen.has(resource) && accepted(resource)) {
-			if (pagination.length >= attemptLimit) truncated = true;
-			else {
-				paginationSeen.add(resource);
-				pagination.push(resource);
-			}
-		}
+		if (resource) queue(resource);
 		return page;
 	};
 
 	const observeLinks = (base: string, links: string[]) => {
 		if (input.seedIsLanguageSelector) return;
-		for (const link of diversityFirst(links)) queue(link, base);
+		for (const link of links) queue(link, base);
 	};
 
 	const prepare = async () => {
@@ -166,28 +157,6 @@ export function createDiscoveryFrontier(
 		if (!config.maxExplicit && out.length < Math.min(attemptLimit, 3)) {
 			streams.push({ urls: seedUrls, source: "crawl", index: 0 });
 			pump(attemptLimit);
-		}
-		if (out.length < Math.min(attemptLimit, 3)) {
-			const feeds = input.seedResources.feeds ?? [];
-			truncated ||= feeds.length > 2;
-			for (const feedUrl of feeds.slice(0, 2)) {
-				const feed = await discoverFeed(
-					feedUrl,
-					input.seed,
-					input.scope,
-					config,
-					{
-						limit: attemptLimit - out.length,
-						accept: accepted,
-						allowResource: input.allowResource,
-					},
-				);
-				truncated ||= feed.truncated;
-				for (const page of diversityFirst(feed.pages, (item) => item.url)) {
-					add(page.url, "feed", attemptLimit, page.fetched, page.metadata);
-				}
-				if (out.length >= attemptLimit) break;
-			}
 		}
 		if (!config.maxExplicit && streams.length === 1) {
 			streams.push({ urls: seedUrls, source: "crawl", index: 0 });
@@ -220,10 +189,10 @@ export function createDiscoveryFrontier(
 	observeResult(input.seedResponse, input.seedResources);
 	return {
 		get truncated() {
-			return truncated || Boolean(input.llmsOptions.truncated);
+			return truncated || input.indexTruncated;
 		},
 		get queued() {
-			return crawlQueued.size + paginationSeen.size;
+			return crawlQueued.size;
 		},
 		async take(limit) {
 			if (limit <= 0) return [];
@@ -236,19 +205,6 @@ export function createDiscoveryFrontier(
 			await prepared;
 			const target = Math.min(attemptLimit, emitted + limit);
 			pump(target);
-			while (out.length < target && paginationIndex < pagination.length) {
-				const resource = pagination[paginationIndex++]!;
-				if (!(await input.allowResource(resource))) continue;
-				const result = await fetchText(
-					resource,
-					config,
-					undefined,
-					undefined,
-					input.allowResource,
-				);
-				observeResult(result);
-				pump(target);
-			}
 			const batch = out.slice(emitted, emitted + limit);
 			emitted += batch.length;
 			return batch;

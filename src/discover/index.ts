@@ -7,9 +7,7 @@ import type {
 } from "../core/types.ts";
 import {
 	classifyDiscoveryResource,
-	isLlmsResourcePath,
 	looksLikeSpecificContentUrl,
-	scopeFromFeedResource,
 } from "../core/url.ts";
 import { isLanguageSelector } from "../extract/app-shell.ts";
 import {
@@ -23,7 +21,6 @@ import {
 	type LlmsCorpusOptions,
 	resourceAllowed,
 } from "./corpus.ts";
-import { discoverFeed, isFeedResponse } from "./feed.ts";
 import {
 	createDiscoveryFrontier,
 	type DiscoveryFrontier,
@@ -40,6 +37,7 @@ import {
 	chooseScope,
 	normalizeDiscoveryResourceUrl,
 	normalizeUrl,
+	pathAllowed,
 	scopeFromSeed,
 } from "./url.ts";
 
@@ -96,41 +94,29 @@ async function discoverRawRun(
 
 	const llmsOptions: LlmsCorpusOptions = { cache: new Map() };
 
-	const seedIsLlms = classifyDiscoveryResource(inputSeed)?.source === "llms";
-	if (seedIsLlms) {
+	if (classifyDiscoveryResource(inputSeed)?.source === "llms") {
 		llmsOptions.cache?.set(
 			inputSeed,
 			fetchText(inputSeed, config, preferredMarkdownAccept),
 		);
-	}
-	const overlapSeed =
-		!seedIsLlms && config.concurrency > 1 && config.perOrigin > 1;
-	const seedResponsePromise = overlapSeed
-		? fetchText(inputSeed, config)
-		: undefined;
-	const corpus = await resolveLlmsCorpus(
-		config,
-		inputSeed,
-		overlapSeed
-			? {
-					...llmsOptions,
-					initialFetchLimit: Math.min(config.concurrency, config.perOrigin) - 1,
-				}
-			: llmsOptions,
-		attemptLimit,
-	);
-	if ("done" in corpus && seedIsLlms) {
-		const done = corpus.done.map((item) =>
+		const listed = await discoverLlmsCorpus(
+			inputSeed,
+			inputSeed,
+			"/",
+			config,
+			llmsOptions,
+			attemptLimit,
+		);
+		const done = listed.map((item) =>
 			item.url === inputSeed ? { ...item, wasSeed: true as const } : item,
 		);
+		const response = await llmsOptions.cache?.get(inputSeed);
 		if (done.length === 0) {
-			const response = await llmsOptions.cache?.get(inputSeed);
 			return {
 				urls: [await explicitLlmsSeedFailure(config, inputSeed, response)],
 				truncated: Boolean(llmsOptions.truncated),
 			};
 		}
-		const response = await llmsOptions.cache?.get(inputSeed);
 		const seedResource: DiscoveryResourceSeed = {
 			url: inputSeed,
 			finalUrl:
@@ -145,70 +131,15 @@ async function discoverRawRun(
 		};
 	}
 
-	const seedResponse = await (seedResponsePromise ??
-		fetchText(inputSeed, config));
-	if ("done" in corpus) {
-		return {
-			urls: seedFirstCorpus(
-				seedEntry(
-					normalizeUrl(seedResponse.finalUrl) ?? inputSeed,
-					"seed",
-					seedResponse,
-				),
-				corpus.done,
-				config,
-				attemptLimit,
-			),
-			truncated: Boolean(llmsOptions.truncated),
-		};
-	}
+	const seedResponse = await fetchText(inputSeed, config);
 	if (!seedResponse.ok) {
 		return { urls: [seedEntry(inputSeed, "seed", seedResponse)] };
-	}
-
-	if (isFeedResponse(seedResponse)) {
-		const feedSeed =
-			normalizeDiscoveryResourceUrl(seedResponse.finalUrl) ?? inputSeed;
-		const seedResource: DiscoveryResourceSeed = {
-			url: inputSeed,
-			finalUrl: feedSeed,
-			source: "feed",
-		};
-		const robots = await loadRobots(new URL(feedSeed).origin, config);
-		const feed = await discoverFeed(
-			feedSeed,
-			feedSeed,
-			scopeFromFeedResource(feedSeed),
-			config,
-			{
-				limit: attemptLimit,
-				response: seedResponse,
-				accept: robots.allowed,
-			},
-		);
-		if (feed.pages.length > 0) {
-			return { urls: feed.pages, seedResource, truncated: feed.truncated };
-		}
-		return {
-			urls: [
-				seedEntry(
-					feedSeed,
-					"feed",
-					emptyResourceResult(
-						seedResponse,
-						"feed resource did not list any in-scope pages",
-					),
-				),
-			],
-			seedResource,
-		};
 	}
 
 	const resolved = await resolveHtmlSeed(
 		config,
 		inputSeed,
 		seedResponse,
-		corpus.llmsOut,
 		llmsOptions,
 		attemptLimit,
 	);
@@ -243,64 +174,10 @@ async function explicitLlmsSeedFailure(
 
 type IndexHit = { done: DiscoveredUrl[]; truncated?: boolean };
 
-async function resolveLlmsCorpus(
-	config: PipelineConfig,
-	inputSeed: string,
-	llmsOptions: LlmsCorpusOptions,
-	attemptLimit: number,
-): Promise<IndexHit | { llmsOut: DiscoveredUrl[] }> {
-	const inputUrl = new URL(inputSeed);
-	if (classifyDiscoveryResource(inputSeed)?.source === "llms") {
-		return {
-			done: await discoverLlmsCorpus(
-				inputSeed,
-				inputSeed,
-				"/",
-				config,
-				llmsOptions,
-				attemptLimit,
-			),
-		};
-	}
-	if (deferInitialLlms(config, inputSeed)) return { llmsOut: [] };
-
-	const inputScope = scopeFromSeed(inputSeed);
-	let llmsOut = await discoverLlmsCorpus(
-		inputSeed,
-		inputSeed,
-		inputScope,
-		config,
-		llmsOptions,
-		attemptLimit,
-	);
-	const substantivePageCount = llmsOut.filter((item) => {
-		const path = new URL(item.url).pathname;
-		return !isLlmsResourcePath(path);
-	}).length;
-	if (
-		inputScope !== "/" &&
-		llmsOut.length <= Math.min(config.max, 3) &&
-		substantivePageCount < 2
-	) {
-		const rootLlmsOut = await discoverLlmsCorpus(
-			`${inputUrl.origin}/`,
-			inputSeed,
-			inputScope,
-			config,
-			llmsOptions,
-			attemptLimit,
-		);
-		if (rootLlmsOut.length > llmsOut.length) llmsOut = rootLlmsOut;
-	}
-	if (llmsIsCorpus(llmsOut, config, inputScope)) return { done: llmsOut };
-	return { llmsOut };
-}
-
 async function resolveHtmlSeed(
 	config: PipelineConfig,
 	inputSeed: string,
 	seedResponse: FetchResult,
-	llmsOut: DiscoveredUrl[],
 	llmsOptions: LlmsCorpusOptions,
 	attemptLimit: number,
 ): Promise<IndexHit | DiscoverySession> {
@@ -323,20 +200,19 @@ async function resolveHtmlSeed(
 	const allowResource: FetchUrlGate = (url) => resourceAllowed(url, config);
 	const seedPage = seedEntry(seed, "seed", seedResponse);
 
+	let llmsOut: DiscoveredUrl[] = [];
 	if (!deferInitialLlms(config, inputSeed)) {
-		const redirected = await redirectedLlmsCorpus(
-			config,
-			inputSeed,
+		llmsOut = await discoverLlmsCorpus(
 			seed,
-			inputScope,
+			seed,
 			scope,
-			llmsOut,
+			config,
 			llmsOptions,
 			attemptLimit,
 		);
-		if (redirected) {
+		if (llmsIsCorpus(llmsOut, config)) {
 			return {
-				done: seedFirstCorpus(seedPage, redirected, config, attemptLimit),
+				done: seedFirstCorpus(seedPage, llmsOut, config, attemptLimit),
 			};
 		}
 	}
@@ -363,7 +239,7 @@ async function resolveHtmlSeed(
 		scope,
 		robots,
 		allowResource,
-		llmsOptions,
+		indexTruncated: Boolean(llmsOptions.truncated),
 		seedResponse,
 		seedResources,
 		seedIsLanguageSelector,
@@ -377,53 +253,6 @@ async function resolveHtmlSeed(
 	};
 }
 
-async function redirectedLlmsCorpus(
-	config: PipelineConfig,
-	inputSeed: string,
-	seed: string,
-	inputScope: string,
-	scope: string,
-	llmsOut: DiscoveredUrl[],
-	llmsOptions: LlmsCorpusOptions,
-	attemptLimit: number,
-): Promise<DiscoveredUrl[] | undefined> {
-	if (seed !== inputSeed || scope !== inputScope) {
-		const adjusted = await discoverLlmsCorpus(
-			seed,
-			seed,
-			scope,
-			config,
-			llmsOptions,
-			attemptLimit,
-		);
-		if (llmsIsCorpus(adjusted, config, scope)) return adjusted;
-	}
-	const seedUrl = new URL(seed);
-	const inputUrl = new URL(inputSeed);
-	if (
-		seedUrl.pathname.endsWith("/") ||
-		inputUrl.pathname.split("/").filter(Boolean).length !== 1
-	) {
-		return;
-	}
-	const sameOrigin = seedUrl.origin === inputUrl.origin;
-	const root = await discoverLlmsCorpus(
-		seed,
-		sameOrigin ? inputSeed : seed,
-		sameOrigin ? inputScope : "/",
-		config,
-		llmsOptions,
-		attemptLimit,
-	);
-	if (
-		root.length > llmsOut.length &&
-		llmsIsCorpus(root, config, sameOrigin ? inputScope : "/")
-	) {
-		return root;
-	}
-	return undefined;
-}
-
 async function discoverSitemapIndex(
 	seed: string,
 	scope: string,
@@ -435,7 +264,7 @@ async function discoverSitemapIndex(
 	const sitemap = await discoverSitemaps(seed, robots.sitemaps, config, {
 		limit: candidateWindow(config, attemptLimit),
 		scope,
-		accept: (url) => robots.allowed(url),
+		accept: (url) => robots.allowed(url) && pathAllowed(url, config),
 		allowResource,
 	});
 	const ranked = config.maxExplicit
@@ -450,12 +279,8 @@ async function discoverSitemapIndex(
 	return { pages, truncated: sitemap.truncated };
 }
 
-function llmsIsCorpus(
-	out: DiscoveredUrl[],
-	config: PipelineConfig,
-	scope: string,
-) {
-	return scope === "/" ? out.length > 0 : hasCorpus(out, config);
+function llmsIsCorpus(out: DiscoveredUrl[], config: PipelineConfig) {
+	return out.length >= Math.min(config.max, 3);
 }
 
 function hasCorpus(out: DiscoveredUrl[], config: PipelineConfig) {

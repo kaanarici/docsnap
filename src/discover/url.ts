@@ -3,14 +3,20 @@ import {
 	type DiscoveredUrl,
 	type DiscoverySource,
 	discoverySourceScore,
+	type PipelineConfig,
 } from "../core/types.ts";
-import { canonicalUrlSearch, classifyDiscoveryResource } from "../core/url.ts";
+import { canonicalUrlSearch } from "../core/url.ts";
 import { maxPublicUrlChars } from "../security/url.ts";
 
-export const ignoredExtension =
+const ignoredExtension =
 	/\.(png|jpe?g|gif|svg|webp|ico|pdf|epub|zip|tar|tgz|gz|bz2|xz|zst|7z|rar|mp4|mp3|wav|woff2?|ttf|eot|css|js|mjs|map|rss|atom)$/i;
 const trackingParam =
 	/^(?:_ga|dclid|fbclid|gclid|mc_(?:cid|eid)|msclkid|utm(?:_.+)?)$/i;
+const unsafePagePath = /%3c|%3e|[<>]|%7b|%7d|[{}]/i;
+const nonPagePath =
+	/(?:^|\/)(?:%3a|:)[^/]+|(?:^|\/)search\/?$|(?:^|\/)(?:genindex|search|py-modindex)\.html$|\/(?:_sources|\+\+theme\+\+[^/]+)\/|(?:^|\/)(?:create-account|try)\/?$|(?:^|\/)cgi-bin\/|\/\.well-known\/captcha\/|\/cdn-cgi\/|(?:^|\/)(?:login|sign-?in|sign-?up|signup|register)(?:\/|$)|(?:^|\/)(?:managewatches|mydocs)(?:\/|$)|(?:^|\/)contributors\.txt$|(?:^|\/)(?:copyright|copying(?:_[a-z]+)?)\.html$|(?:^|\/)page\/index\.md$|\.x?html?\.md$|(?:^|\/)api\/(?:article|search)(?:\/|$)|(?:^|\/)(?:rss|feed|atom)\.xml$|(?:^|\/)(?:rss|feed|atom)\/?$|(?:^|\/)(?:chat|demo|playground|repl|test)\/?$|\/chunked\/.*\.json$|(?:^|\/)(?:robots\.txt|sitemap[^/]*\.xml)$/i;
+const loginReturnParam = /^(?:post_)?login_(?:redirect|return)(?:_url)?$/i;
+const pathGlobs = new Map<string, Bun.Glob>();
 
 export function normalizeUrl(
 	raw: string,
@@ -18,11 +24,13 @@ export function normalizeUrl(
 ): string | undefined {
 	const url = normalizedHttpUrl(raw, base);
 	if (!url) return;
-	const searchParamNames = Array.from(url.searchParams.keys());
-	for (const name of searchParamNames) {
-		if (trackingParam.test(name)) url.searchParams.delete(name);
+	if (url.search) {
+		const searchParamNames = Array.from(url.searchParams.keys());
+		for (const name of searchParamNames) {
+			if (trackingParam.test(name)) url.searchParams.delete(name);
+		}
+		url.search = canonicalUrlSearch(url);
 	}
-	url.search = canonicalUrlSearch(url);
 	collapseRepeatedBasePath(url, base);
 	if (isNonPageUrl(url)) return;
 	return url.href.length <= maxPublicUrlChars ? url.href : undefined;
@@ -34,12 +42,7 @@ export function normalizeDiscoveryResourceUrl(
 ): string | undefined {
 	const url = normalizedHttpUrl(raw, base);
 	if (!url) return;
-	if (
-		ignoredExtension.test(url.pathname) &&
-		classifyDiscoveryResource(url)?.source !== "feed"
-	) {
-		return;
-	}
+	if (ignoredExtension.test(url.pathname)) return;
 	return url.href.length <= maxPublicUrlChars ? url.href : undefined;
 }
 
@@ -73,6 +76,28 @@ export function inScope(raw: string, seed: string, scope: string): boolean {
 		url.origin === base.origin &&
 		pathInScope(url.pathname, scope) &&
 		!ignoredExtension.test(url.pathname)
+	);
+}
+
+export function pathAllowed(
+	raw: string,
+	config: Pick<PipelineConfig, "include" | "exclude">,
+): boolean {
+	const pathname = new URL(raw).pathname;
+	const matches = (pattern: string) => {
+		let glob = pathGlobs.get(pattern);
+		if (!glob) {
+			glob = new Bun.Glob(pattern);
+			pathGlobs.set(pattern, glob);
+		}
+		if (glob.match(pathname)) return true;
+		if (!pattern.endsWith("/**")) return false;
+		const root = pattern.slice(0, -3).replace(/\/$/, "") || "/";
+		return pathname === root || pathname === `${root}/`;
+	};
+	return (
+		(config.include.length === 0 || config.include.some(matches)) &&
+		!config.exclude.some(matches)
 	);
 }
 
@@ -210,34 +235,12 @@ function collapseRepeatedBasePath(url: URL, base?: string | URL) {
 function isNonPageUrl(url: URL) {
 	return (
 		/(?:%e2%80%a6|…)/i.test(url.href) ||
-		[...url.searchParams.keys()].some((name) =>
-			/^(?:post_)?login_(?:redirect|return)(?:_url)?$/i.test(name),
-		) ||
-		/%3c|%3e|[<>]/i.test(url.pathname) ||
-		/%7b|%7d|[{}]/i.test(url.pathname) ||
-		/(?:^|\/)(?:%3a|:)[^/]+/i.test(url.pathname) ||
-		/(?:^|\/)search\/?$/i.test(url.pathname) ||
-		/(?:^|\/)(?:genindex|search|py-modindex)\.html$/i.test(url.pathname) ||
-		/\/(?:_sources|\+\+theme\+\+[^/]+)\//i.test(url.pathname) ||
-		/(?:^|\/)(?:create-account|try)\/?$/i.test(url.pathname) ||
-		/(?:^|\/)cgi-bin\//i.test(url.pathname) ||
-		/\/\.well-known\/captcha\//i.test(url.pathname) ||
-		/\/cdn-cgi\//i.test(url.pathname) ||
-		/(?:^|\/)(?:login|sign-?in|sign-?up|signup|register)(?:\/|$)/i.test(
-			url.pathname,
-		) ||
-		/(?:^|\/)(?:managewatches|mydocs)(?:\/|$)/i.test(url.pathname) ||
-		/(?:^|\/)contributors\.txt$/i.test(url.pathname) ||
-		/(?:^|\/)(?:copyright|copying(?:_[a-z]+)?)\.html$/i.test(url.pathname) ||
-		/(?:^|\/)page\/index\.md$/i.test(url.pathname) ||
-		/\.x?html?\.md$/i.test(url.pathname) ||
-		/(?:^|\/)api\/(?:article|search)(?:\/|$)/i.test(url.pathname) ||
-		/youtube\.com\/watch/i.test(url.pathname) ||
-		/(?:^|\/)(?:rss|feed|atom)\.xml$/i.test(url.pathname) ||
-		/(?:^|\/)(?:rss|feed|atom)\/?$/i.test(url.pathname) ||
-		/(?:^|\/)(?:chat|demo|playground|repl|test)\/?$/i.test(url.pathname) ||
-		/\/chunked\/.*\.json$/i.test(url.pathname) ||
-		/(?:^|\/)(?:robots\.txt|sitemap[^/]*\.xml)$/i.test(url.pathname)
+		(Boolean(url.search) &&
+			[...url.searchParams.keys()].some((name) =>
+				loginReturnParam.test(name),
+			)) ||
+		unsafePagePath.test(url.pathname) ||
+		nonPagePath.test(url.pathname)
 	);
 }
 

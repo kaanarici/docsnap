@@ -21,7 +21,6 @@ export type PageResources = {
 	links: string[];
 	next?: string;
 	nav?: string[];
-	feeds?: string[];
 	truncated?: boolean;
 };
 
@@ -31,13 +30,10 @@ export function discoverPageResources(
 	seed = false,
 	parsedDocument?: Document,
 ): PageResources {
-	const truncated = html.length > maxDiscoveryHtmlChars;
+	const truncated = !parsedDocument && html.length > maxDiscoveryHtmlChars;
 	const source = truncated ? html.slice(0, maxDiscoveryHtmlChars) : html;
-	const document =
-		!truncated && parsedDocument ? parsedDocument : parseHTML(source).document;
-	const links = new Set(
-		discoverMarkdownTextLinks(source, base).slice(0, maxGeneratedCapturePages),
-	);
+	const document = parsedDocument ?? parseHTML(source).document;
+	const links = new Set<string>();
 	for (const link of document.querySelectorAll("a[href]")) {
 		if (links.size >= maxGeneratedCapturePages) break;
 		if (isControlLink(link)) continue;
@@ -45,22 +41,15 @@ export function discoverPageResources(
 		if (url) links.add(url);
 	}
 	let next: string | undefined;
-	const feeds = new Set<string>();
 	for (const link of document.querySelectorAll("link[rel][href]")) {
 		const rel = relTokens(link);
 		const href = link.getAttribute("href");
 		const url = href ? normalizeDiscoveryResourceUrl(href, base) : undefined;
 		if (!next && rel.includes("next")) next = url;
-		if (seed && url && rel.includes("alternate") && feedType(link)) {
-			feeds.add(url);
-		}
 	}
 	const resources: PageResources = { links: [...links] };
 	if (next) resources.next = next;
-	if (seed) {
-		resources.nav = discoverLinks(document, base);
-		resources.feeds = [...feeds];
-	}
+	if (seed) resources.nav = discoverLinks(document, base);
 	if (truncated) resources.truncated = true;
 	return resources;
 }
@@ -122,84 +111,15 @@ function relTokens(element: Element) {
 		.filter(Boolean);
 }
 
-function feedType(element: Element) {
-	const type = element
-		.getAttribute("type")
-		?.toLowerCase()
-		.split(";")[0]
-		?.trim();
-	return type === "application/rss+xml" || type === "application/atom+xml";
-}
-
-function isControlLink(link: Element) {
+function isControlLink(link: Pick<Element, "getAttribute" | "hasAttribute">) {
 	const toggle =
 		link.getAttribute("data-bs-toggle") ?? link.getAttribute("data-toggle");
 	if (toggle?.toLowerCase() === "dropdown") return true;
 	return (
-		link.classList.contains("dropdown-toggle") &&
+		(link.getAttribute("class") ?? "")
+			.split(/\s+/)
+			.includes("dropdown-toggle") &&
 		link.getAttribute("role") === "button" &&
 		link.hasAttribute("aria-expanded")
 	);
-}
-
-export function srcsetCandidates(input: string, limit = 100) {
-	const out: Array<{ url: string; descriptor: string }> = [];
-	const whitespace = (char: string) => /[\t\n\f\r ]/.test(char);
-	let index = 0;
-	while (index < input.length && out.length < limit) {
-		while (
-			index < input.length &&
-			(whitespace(input[index]!) || input[index] === ",")
-		)
-			index++;
-		const start = index;
-		while (index < input.length && !whitespace(input[index]!)) index++;
-		let url = input.slice(start, index);
-		let ended = false;
-		while (url.endsWith(",")) {
-			url = url.slice(0, -1);
-			ended = true;
-		}
-		if (!url) continue;
-		if (ended) {
-			out.push({ url, descriptor: "" });
-			continue;
-		}
-		while (index < input.length && whitespace(input[index]!)) index++;
-		const descriptorStart = index;
-		let parentheses = 0;
-		while (index < input.length) {
-			const char = input[index++]!;
-			if (char === "(") parentheses++;
-			else if (char === ")") parentheses = Math.max(0, parentheses - 1);
-			else if (char === "," && parentheses === 0) break;
-		}
-		out.push({
-			url,
-			descriptor: input
-				.slice(descriptorStart, input[index - 1] === "," ? index - 1 : index)
-				.trim(),
-		});
-	}
-	return out;
-}
-
-function discoverMarkdownTextLinks(html: string, base: string) {
-	const urls = new Set<string>();
-	const text = html.slice(0, 512 * 1024);
-	for (const match of text.matchAll(
-		/(?:^|[\s"'(>])((?:https?:\/\/|\/|\.{1,2}\/)[^\s<>"'`)]*\.md)(?=$|[\s<>"'`)])/gi,
-	)) {
-		const index = match.index ?? 0;
-		if (
-			!/\b(?:llm|markdown)\b/i.test(
-				text.slice(Math.max(0, index - 160), index + 240),
-			)
-		)
-			continue;
-		const url = normalizeUrl(match[1]!, base);
-		if (url) urls.add(url);
-		if (urls.size >= maxGeneratedCapturePages) break;
-	}
-	return [...urls];
 }

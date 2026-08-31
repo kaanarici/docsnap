@@ -17,29 +17,29 @@ describe("robots fetch policy", () => {
 			bodyBytes: maxRobotsBytes + 1,
 		},
 		{ budget: "configured", maxBytes: 1_024, bodyBytes: 1_025 },
-	])("fails closed above the $budget byte budget", async ({
-		maxBytes,
-		bodyBytes,
-	}) => {
-		const server = Bun.serve({
-			port: 0,
-			fetch: () => new Response("x".repeat(bodyBytes)),
-		});
-		const localOrigin = `http://127.0.0.1:${server.port}`;
-		setTestEnv("DOCSNAP_ALLOW_TEST_HOST", localOrigin);
-		try {
-			const robots = await loadRobots(
-				localOrigin,
-				testConfig("unused", {
-					seedUrl: `${localOrigin}/`,
-					maxBytes,
-				}),
-			);
-			expect(robots.allowed(`${localOrigin}/page`)).toBe(false);
-		} finally {
-			server.stop(true);
-		}
-	});
+	])(
+		"fails closed above the $budget byte budget",
+		async ({ maxBytes, bodyBytes }) => {
+			const server = Bun.serve({
+				port: 0,
+				fetch: () => new Response("x".repeat(bodyBytes)),
+			});
+			const localOrigin = `http://127.0.0.1:${server.port}`;
+			setTestEnv("DOCSNAP_ALLOW_TEST_HOST", localOrigin);
+			try {
+				const robots = await loadRobots(
+					localOrigin,
+					testConfig("unused", {
+						seedUrl: `${localOrigin}/`,
+						maxBytes,
+					}),
+				);
+				expect(robots.allowed(`${localOrigin}/page`)).toBe(false);
+			} finally {
+				server.stop(true);
+			}
+		},
+	);
 
 	test("treats 4xx as open", () => {
 		const robots = robotsFromFetch(
@@ -103,59 +103,51 @@ describe("robots fetch policy", () => {
 
 	test.each([
 		{
-			path: "/feed.xml",
-			contentType: "application/rss+xml",
-			body: `<?xml version="1.0"?><rss><channel><item><link>/allowed</link></item><item><link>/blocked</link></item></channel></rss>`,
-			source: "feed",
-		},
-		{
 			path: "/llms.txt",
 			contentType: "text/markdown",
 			body: "# Docs\n\n- [Allowed](/allowed)\n- [Blocked](/blocked)",
 			source: "llms",
 		},
-	] as const)("parses an explicit $source resource while filtering listed pages through robots", async ({
-		path,
-		contentType,
-		body,
-		source,
-	}) => {
-		const server = Bun.serve({
-			port: 0,
-			fetch(request) {
-				const requested = new URL(request.url).pathname;
-				if (requested === "/robots.txt") {
-					return new Response(
-						`User-agent: *\nDisallow: ${path}\nDisallow: /blocked\n`,
-					);
-				}
-				if (requested === path) {
-					return new Response(body, {
-						headers: { "content-type": contentType },
-					});
-				}
-				return new Response("page");
-			},
-		});
-		const localOrigin = `http://127.0.0.1:${server.port}`;
-		setTestEnv("DOCSNAP_ALLOW_TEST_HOST", localOrigin);
-		try {
-			const session = await startDiscovery(
-				testConfig("unused", {
-					seedUrl: `${localOrigin}${path}`,
-					pageOnly: false,
-					max: 2,
-					maxExplicit: true,
-				}),
-			);
-			expect(await session.frontier.take(2)).toEqual([
-				expect.objectContaining({
-					url: `${localOrigin}/allowed`,
-					source,
-				}),
-			]);
-		} finally {
-			server.stop(true);
-		}
-	});
+	] as const)(
+		"parses an explicit $source resource while filtering listed pages through robots",
+		async ({ path, contentType, body, source }) => {
+			const server = Bun.serve({
+				port: 0,
+				fetch(request) {
+					const requested = new URL(request.url).pathname;
+					if (requested === "/robots.txt") {
+						return new Response(
+							`User-agent: *\nDisallow: ${path}\nDisallow: /blocked\n`,
+						);
+					}
+					if (requested === path) {
+						return new Response(body, {
+							headers: { "content-type": contentType },
+						});
+					}
+					return new Response("page");
+				},
+			});
+			const localOrigin = `http://127.0.0.1:${server.port}`;
+			setTestEnv("DOCSNAP_ALLOW_TEST_HOST", localOrigin);
+			try {
+				const session = await startDiscovery(
+					testConfig("unused", {
+						seedUrl: `${localOrigin}${path}`,
+						pageOnly: false,
+						max: 2,
+						maxExplicit: true,
+					}),
+				);
+				expect(await session.frontier.take(2)).toEqual([
+					expect.objectContaining({
+						url: `${localOrigin}/allowed`,
+						source,
+					}),
+				]);
+			} finally {
+				server.stop(true);
+			}
+		},
+	);
 });

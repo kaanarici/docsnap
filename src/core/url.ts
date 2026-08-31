@@ -17,7 +17,7 @@ export function canonicalUrlSearch(url: URL) {
 export function classifyDiscoveryResource(
 	raw: string | URL,
 	base?: string | URL,
-): { url: string; source: "llms" | "feed" } | undefined {
+): { url: string; source: "llms" } | undefined {
 	try {
 		const url = new URL(raw, base);
 		if (!["http:", "https:"].includes(url.protocol)) return undefined;
@@ -27,9 +27,6 @@ export function classifyDiscoveryResource(
 		if (!url.pathname) url.pathname = "/";
 		if (isLlmsResourcePath(url.pathname))
 			return { url: url.href, source: "llms" };
-		const feedPath = feedResourceStart(url.pathname.split("/").filter(Boolean));
-		if (feedPath >= 0 || url.searchParams.has("feed"))
-			return { url: url.href, source: "feed" };
 		return undefined;
 	} catch {
 		return undefined;
@@ -60,62 +57,6 @@ export function isDocumentPath(path: string) {
 	);
 }
 
-export function scopeFromFeedResource(seed: string): string {
-	const url = new URL(seed);
-	if (url.searchParams.has("feed")) {
-		if (url.pathname === "/" || url.pathname === "") return "/";
-		if (url.pathname.endsWith("/")) return url.pathname;
-		if (!/\.[a-z0-9]+$/i.test(url.pathname)) return url.pathname;
-	}
-	const parts = url.pathname.split("/").filter(Boolean);
-	const resourceStart = feedResourceStart(parts);
-	if (resourceStart >= 0) parts.length = resourceStart;
-	return parts.length > 0 ? `/${parts.join("/")}/` : "/";
-}
-
 export function isLlmsResourcePath(pathname: string): boolean {
 	return /\/llms(?:-(?:full|ctx(?:-full)?))?\.(?:md|txt)$/i.test(pathname);
-}
-
-export function relatedHost(left: string, right: string): boolean {
-	const a = withoutWww(left);
-	const b = withoutWww(right);
-	if (a === b) return true;
-	if (isSharedHostTenant(a) || isSharedHostTenant(b)) return false;
-	return a.endsWith(`.${b}`) || b.endsWith(`.${a}`);
-}
-
-export function sameSharedHostPlatform(left: string, right: string): boolean {
-	const a = withoutWww(left);
-	const b = withoutWww(right);
-	return sharedHostSuffixes.some(
-		(suffix) => a.endsWith(`.${suffix}`) && b.endsWith(`.${suffix}`),
-	);
-}
-
-function withoutWww(hostname: string): string {
-	return hostname.toLowerCase().replace(/^www\./, "");
-}
-
-const sharedHostSuffixes =
-	"appspot.com cloudflarepages.com firebaseapp.com fly.dev github.io gitlab.io glitch.me herokuapp.com netlify.app pages.dev readthedocs.io replit.app surge.sh vercel.app web.app".split(
-		" ",
-	);
-
-function isSharedHostTenant(hostname: string): boolean {
-	return sharedHostSuffixes.some(
-		(suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`),
-	);
-}
-
-function feedResourceStart(parts: string[]): number {
-	const marker = parts.findIndex((part) =>
-		/^(?:feed|feeds|rss|atom)$/i.test(part),
-	);
-	if (marker >= 0) return marker;
-	const last = parts.at(-1) ?? "";
-	return /^(?:feed|rss|atom)\d*(?:\.xml)?$/i.test(last) ||
-		/\.(?:rss|atom)$/i.test(last)
-		? parts.length - 1
-		: -1;
 }

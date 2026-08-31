@@ -24,7 +24,7 @@ function frontier(links: string[], attemptLimit = 4, truncated = false) {
 		scope: "/",
 		robots: parseRobots("User-agent: *\nDisallow: /private", origin),
 		allowResource: async () => true,
-		llmsOptions: { cache: new Map() },
+		indexTruncated: false,
 		seedResponse,
 		seedResources: { links, nav: [], truncated },
 		seedIsLanguageSelector: false,
@@ -78,6 +78,53 @@ describe("discovery frontier", () => {
 			`${origin}/two`,
 		]);
 		expect(discovery.truncated).toBe(true);
+	});
+
+	test("does not refetch an emitted rel=next page", async () => {
+		let requests = 0;
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			fetch() {
+				requests++;
+				return new Response("unexpected");
+			},
+		});
+		onTestFinished(() => server.stop(true));
+		const localOrigin = server.url.origin;
+		setTestEnv("DOCSNAP_ALLOW_TEST_HOST", localOrigin);
+		const seed = `${localOrigin}/guide`;
+		const next = `${localOrigin}/next`;
+		const config = testConfig("unused", {
+			seedUrl: seed,
+			pageOnly: false,
+			max: 3,
+			maxExplicit: true,
+		});
+		const discovery = createDiscoveryFrontier({
+			config,
+			attemptLimit: 3,
+			inputSeed: seed,
+			seed,
+			scope: "/",
+			robots: parseRobots("User-agent: *\nAllow: /", localOrigin),
+			allowResource: async () => true,
+			indexTruncated: false,
+			seedResponse: okFetch(seed, "<main>Guide</main>"),
+			seedResources: { links: [next], nav: [] },
+			seedIsLanguageSelector: false,
+			finalSeed: seed,
+			indexUrls: [],
+		});
+
+		expect((await discovery.take(3)).map(({ url }) => url)).toEqual([seed]);
+		expect((await discovery.take(3)).map(({ url }) => url)).toEqual([next]);
+		discovery.observe(okFetch(next, "<main>Next</main>"), {
+			links: [],
+			next,
+		});
+		expect(await discovery.take(3)).toEqual([]);
+		expect(requests).toBe(0);
 	});
 
 	test("stops after a full batch is rate limited", async () => {
