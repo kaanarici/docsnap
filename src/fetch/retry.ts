@@ -1,21 +1,39 @@
 import type { FailureKind } from "../core/types.ts";
+import { UnsafeUrlError } from "../security/url.ts";
 
 const refusedErrorPattern = /ECONNREFUSED/i;
-const unsafeUrlErrorPattern =
-	/private|internal|localhost|single-label|credentials|unsafe|scheme|resolve/i;
 
 export function retryDelayMs(
 	attempt: number,
 	retryAfter?: string | null,
+	now = Date.now(),
 ): number {
-	if (retryAfter) {
-		const seconds = Number(retryAfter);
-		if (Number.isFinite(seconds)) return Math.min(seconds * 1000, 10_000);
-		const date = Date.parse(retryAfter);
-		if (Number.isFinite(date))
-			return Math.min(Math.max(0, date - Date.now()), 10_000);
+	const retryAt = retryAtMs(retryAfter, now);
+	if (retryAt !== undefined) {
+		return Math.min(Math.max(0, retryAt - now), 10_000);
 	}
 	return Math.min(250 * 2 ** attempt + Math.floor(Math.random() * 80), 2500);
+}
+
+export function retryAtFromHeader(
+	retryAfter?: string | null,
+	now = Date.now(),
+): string | undefined {
+	const retryAt = retryAtMs(retryAfter, now);
+	return retryAt === undefined ? undefined : new Date(retryAt).toISOString();
+}
+
+function retryAtMs(retryAfter: string | null | undefined, now: number) {
+	const value = retryAfter?.trim();
+	if (!value) return;
+	const seconds = Number(value);
+	if (Number.isFinite(seconds)) {
+		if (!Number.isSafeInteger(seconds) || seconds < 0) return;
+		const retryAt = now + seconds * 1000;
+		return Number.isFinite(retryAt) && retryAt <= 8.64e15 ? retryAt : undefined;
+	}
+	const retryAt = Date.parse(value);
+	return Number.isFinite(retryAt) ? retryAt : undefined;
 }
 
 export function shouldRetry(status: number, attempt: number): boolean {
@@ -28,7 +46,7 @@ export function isRetryableFetchError(cause: unknown): boolean {
 		!isTimeoutError(cause) &&
 		!refusedErrorPattern.test(cause.message) &&
 		!isTooLargeError(cause.message) &&
-		!isUnsafeUrlError(cause.message)
+		!(cause instanceof UnsafeUrlError)
 	);
 }
 
@@ -36,15 +54,11 @@ export function isTooLargeError(error: string): boolean {
 	return /response exceeds|buffer larger than|maxOutputLength/i.test(error);
 }
 
-export function isUnsafeUrlError(error: string): boolean {
-	return unsafeUrlErrorPattern.test(error);
-}
-
 export function thrownFetchKind(cause: unknown): FailureKind {
 	if (isTimeoutError(cause)) return "timeout";
+	if (cause instanceof UnsafeUrlError) return "unsafe_url";
 	const error = cause instanceof Error ? cause.message : String(cause);
 	if (isTooLargeError(error)) return "too_large";
-	if (isUnsafeUrlError(error)) return "unsafe_url";
 	return "fetch";
 }
 

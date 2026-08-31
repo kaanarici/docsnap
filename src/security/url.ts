@@ -19,6 +19,8 @@ export type PublicHttpAddress = {
 	addresses: PublicAddress[];
 };
 
+export class UnsafeUrlError extends Error {}
+
 export type PublicAddress = {
 	address: string;
 	family: 4 | 6;
@@ -62,7 +64,7 @@ export async function resolvePublicHttpUrl(
 	signal?: AbortSignal,
 ): Promise<PublicHttpAddress> {
 	const syntaxError = validatePublicHttpUrl(raw);
-	if (syntaxError) throw new Error(syntaxError);
+	if (syntaxError) throw new UnsafeUrlError(syntaxError);
 
 	const url = new URL(raw);
 	const hostname = normalizedHostname(url);
@@ -75,7 +77,7 @@ export async function resolvePublicHttpUrl(
 	if (cached && cached.expires > Date.now()) {
 		const [address] = cached.addresses;
 		if (!address)
-			throw new Error("hostname did not resolve to a public address");
+			throw new UnsafeUrlError("hostname did not resolve to a public address");
 		return {
 			url,
 			hostname,
@@ -89,7 +91,8 @@ export async function resolvePublicHttpUrl(
 		await lookupWithSignal(hostname, signal),
 	);
 	const [address] = publicAddresses;
-	if (!address) throw new Error("hostname did not resolve to a public address");
+	if (!address)
+		throw new UnsafeUrlError("hostname did not resolve to a public address");
 	addressCache.set(hostname, {
 		addresses: publicAddresses,
 		expires: Date.now() + addressCacheTtlMs,
@@ -106,13 +109,16 @@ export async function resolvePublicHttpUrl(
 export function validateResolvedAddresses(
 	addresses: Array<{ address: string; family: number }>,
 ): PublicAddress[] {
-	if (addresses.length === 0) throw new Error("hostname did not resolve");
+	if (addresses.length === 0)
+		throw new UnsafeUrlError("hostname did not resolve");
 	for (const address of addresses) {
 		if (
 			(address.family === 4 || address.family === 6) &&
 			!isPublicIp(address.address, address.family)
 		) {
-			throw new Error("hostname resolves to a private or internal address");
+			throw new UnsafeUrlError(
+				"hostname resolves to a private or internal address",
+			);
 		}
 	}
 	const publicAddresses = uniqueAddresses(
@@ -123,7 +129,7 @@ export function validateResolvedAddresses(
 		),
 	);
 	if (publicAddresses.length === 0) {
-		throw new Error("hostname did not resolve to a public address");
+		throw new UnsafeUrlError("hostname did not resolve to a public address");
 	}
 	return publicAddresses;
 }

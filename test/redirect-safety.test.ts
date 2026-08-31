@@ -1,8 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, onTestFinished, test } from "bun:test";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { freshUntilFor } from "../src/cache/policy.ts";
+import { rejectFilteredFinal, runPipeline } from "../src/core/pipeline.ts";
 import {
 	type Cookie,
 	cookieHeader,
@@ -10,7 +11,7 @@ import {
 } from "../src/fetch/cookies.ts";
 import { fetchTextUncached } from "../src/fetch/fetcher.ts";
 import { requestPublicHttp } from "../src/fetch/transport.ts";
-import { setTestEnv, testConfig } from "./fixtures.ts";
+import { okFetch, setTestEnv, tempDir, testConfig } from "./fixtures.ts";
 
 const allowHostEnv = "DOCSNAP_ALLOW_TEST_HOST";
 
@@ -44,6 +45,92 @@ test("keeps response cookies on the exact host", () => {
 });
 
 describe("redirect target safety", () => {
+	test("uses the same path filter after browser navigation", () => {
+		const config = testConfig("unused", {
+			include: ["/docs/**"],
+			exclude: ["/private/**"],
+		});
+		const page = {
+			source: "crawl" as const,
+			result: okFetch(
+				"https://docs.example.com/docs/app",
+				"<main>Private</main>",
+				{
+					finalUrl: "https://docs.example.com/private/secret",
+					redirects: [
+						{
+							from: "https://docs.example.com/docs/app",
+							to: "https://docs.example.com/private/secret",
+							type: "client",
+						},
+					],
+				},
+			),
+		};
+
+		expect(rejectFilteredFinal(page, config).result).toMatchObject({
+			ok: false,
+			failureKind: "blocked",
+			finalUrl: "https://docs.example.com/private/secret",
+		});
+		expect(
+			rejectFilteredFinal({ ...page, wasSeed: true }, config).result.ok,
+		).toBe(true);
+	});
+
+	test("rejects discovered redirects into excluded paths", async () => {
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			fetch(request) {
+				const path = new URL(request.url).pathname;
+				if (path === "/robots.txt")
+					return new Response("User-agent: *\nAllow: /");
+				if (path === "/docs/")
+					return new Response(
+						`<main><h1>Docs</h1><p>${"Useful public documentation. ".repeat(20)}</p><a href="/docs/allowed">Guide</a></main>`,
+						{ headers: { "content-type": "text/html" } },
+					);
+				if (path === "/docs/allowed")
+					return new Response(null, {
+						status: 302,
+						headers: { location: "/private/secret" },
+					});
+				if (path === "/private/secret")
+					return new Response(
+						`<main><h1>Secret</h1><p>${"Excluded documentation. ".repeat(20)}</p></main>`,
+						{ headers: { "content-type": "text/html" } },
+					);
+				return new Response("not found", { status: 404 });
+			},
+		});
+		onTestFinished(() => server.stop(true));
+		const origin = server.url.origin;
+		setTestEnv(allowHostEnv, origin);
+		const result = await runPipeline(
+			testConfig(await tempDir("redirect-filter"), {
+				seedUrl: `${origin}/docs/`,
+				pageOnly: false,
+				max: 2,
+				concurrency: 2,
+				perOrigin: 2,
+				include: ["/docs/**"],
+				exclude: ["/private/**"],
+			}),
+		);
+
+		expect(result.summary).toMatchObject({ written: 1, failed: 1 });
+		expect(result.records).toContainEqual(
+			expect.objectContaining({
+				ok: false,
+				url: `${origin}/docs/allowed`,
+				finalUrl: `${origin}/private/secret`,
+				failureKind: "blocked",
+				error: "redirected to a path excluded by capture filters",
+			}),
+		);
+	});
+
 	test("does not cache a final response personalized by a redirect cookie", async () => {
 		const server = Bun.serve({
 			port: 0,

@@ -99,7 +99,7 @@ async function fillCold(
 		return uncached(url, config, accept, undefined, allowUrl);
 	}
 	try {
-		const latest = await readCache(config, request, { count: false });
+		const latest = await readCache(config, request);
 		if (latest.state === "fresh") {
 			const hit = await freshHit(url, latest, allowUrl);
 			if (hit) return hit;

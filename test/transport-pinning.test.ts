@@ -33,4 +33,9 @@ describe("DNS pinning", () => {
 		const encoded = brotliCompressSync(gzipSync(body));
 		expect(Buffer.from(decodeContent(encoded, "gzip, br", 1024))).toEqual(body);
 	});
+
+	test("rejects a compressed body whose decoded bytes exceed the limit", () => {
+		const encoded = gzipSync(Buffer.alloc(4096, "a"));
+		expect(() => decodeContent(encoded, "gzip", 64)).toThrow(/64 bytes/);
+	});
 });

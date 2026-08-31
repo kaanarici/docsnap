@@ -16,7 +16,7 @@ const pruneTargetRatio = 0.8;
 
 export async function pruneCache(config: PipelineConfig): Promise<void> {
 	const context = cacheContext(config);
-	if (!(await cacheReady(context)) || !cacheWasUsed(context)) return;
+	if (!(await cacheReady(context)) || !context.used) return;
 	try {
 		const entries = await cacheEntries(context);
 		const total = entries.reduce((sum, item) => sum + item.entry.bytes, 0);
@@ -31,7 +31,6 @@ export async function pruneCache(config: PipelineConfig): Promise<void> {
 			await rm(victim.path, { force: true });
 			kept.delete(victim);
 			remaining -= victim.entry.bytes;
-			context.stats.evictedBytes += victim.entry.bytes;
 			deletedHashes.add(victim.entry.bodyHash);
 		}
 		const keptHashes = new Set([...kept].map((item) => item.entry.bodyHash));
@@ -43,11 +42,6 @@ export async function pruneCache(config: PipelineConfig): Promise<void> {
 	} catch (error) {
 		if (!isNotFound(error)) disableOnAccessError(context, error);
 	}
-}
-
-function cacheWasUsed(context: CacheContext) {
-	const { hits, misses, stale, written } = context.stats;
-	return hits + misses + stale + written > 0;
 }
 
 async function cacheEntries(context: CacheContext) {

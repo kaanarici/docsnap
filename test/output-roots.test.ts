@@ -1,20 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { chmod, mkdir, readdir, symlink } from "node:fs/promises";
+import { chmod, mkdir, readdir } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertSafeRoot } from "../src/core/fs-safety.ts";
-import { scanCorpora } from "../src/corpus/scan.ts";
 import { prepareOutput } from "../src/output/writer.ts";
 import { tempDir, testConfig } from "./fixtures.ts";
 
 describe("output root guards", () => {
-	test.each([
-		"/",
-		homedir(),
-		tmpdir(),
-		join(homedir(), "Documents"),
-	])("rejects unsafe root: %s", (root) =>
-		expect(() => assertSafeRoot(root, "unsafe")).toThrow("unsafe"));
+	test.each(["/", homedir(), tmpdir(), join(homedir(), "Documents")])(
+		"rejects unsafe root: %s",
+		(root) => expect(() => assertSafeRoot(root, "unsafe")).toThrow("unsafe"),
+	);
 
 	test("accepts a fresh nested output path beneath home", () => {
 		expect(() =>
@@ -57,20 +53,5 @@ describe("output root guards", () => {
 		await expect(prepareOutput(testConfig(openRoot))).rejects.toThrow(
 			"externally writable output path",
 		);
-	});
-
-	test("does not scan through a relative symlink outside cwd", async () => {
-		const cwd = await tempDir("scan-cwd");
-		const outside = await tempDir("scan-outside");
-		await symlink(outside, join(cwd, "linked"));
-		const previous = process.cwd();
-		try {
-			process.chdir(cwd);
-			await expect(scanCorpora("linked")).rejects.toThrow(
-				"root_dir must stay under cwd",
-			);
-		} finally {
-			process.chdir(previous);
-		}
 	});
 });

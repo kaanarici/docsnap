@@ -111,7 +111,7 @@ async function assertTrustedAncestors(
 		(ownsRoot && (root.uid !== uid || (root.mode & 0o022) !== 0)) ||
 		(!ownsRoot && (root.mode & 0o022) !== 0 && (root.mode & 0o1000) === 0)
 	) {
-		throw new Error(message);
+		throw new Error(`${message} (untrusted directory: ${path})`);
 	}
 	let child = resolve(path);
 	for (
@@ -121,12 +121,14 @@ async function assertTrustedAncestors(
 	) {
 		const info = await stat(parent);
 		if (!info.isDirectory() || (info.uid !== uid && info.uid !== 0)) {
-			throw new Error(message);
+			throw new Error(`${message} (untrusted directory: ${parent})`);
 		}
 		if ((info.mode & 0o022) !== 0) {
 			const entry = await lstat(child);
 			if ((info.mode & 0o1000) === 0 || entry.uid !== uid) {
-				throw new Error(message);
+				throw new Error(
+					`${message} (group- or world-writable directory: ${parent})`,
+				);
 			}
 		}
 		if (parent === dirname(parent)) return;
@@ -145,7 +147,7 @@ async function nearestExistingPath(path: string): Promise<string> {
 	}
 }
 
-export function isWindowsAbsolute(path: string): boolean {
+function isWindowsAbsolute(path: string): boolean {
 	return /^[a-zA-Z]:[\\/]/.test(path) || path.startsWith("\\\\");
 }
 

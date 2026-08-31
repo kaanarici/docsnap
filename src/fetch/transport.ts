@@ -10,7 +10,7 @@ import {
 	resolvePublicHttpUrl,
 } from "../security/url.ts";
 
-export type { HeaderMap, HttpResponse };
+export type { HttpResponse };
 
 const httpAgent = new HttpAgent({ keepAlive: true, maxSockets: 64 });
 const httpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 64 });

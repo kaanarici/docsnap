@@ -57,7 +57,10 @@ export async function withWritersideTopic(
 }
 
 function writersideTopicUrl(html: string, base: string): string | undefined {
-	if (!/\bdata-topic=|resources\.jetbrains\.com\/writerside/i.test(html))
+	if (
+		!html.includes("data-topic") &&
+		!html.includes("resources.jetbrains.com/writerside")
+	)
 		return undefined;
 	const topic = html.match(
 		/\bdata-topic\s*=\s*["']([^"']{1,300}\.json(?:\?[^"']*)?)["']/i,

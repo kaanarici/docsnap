@@ -3,7 +3,10 @@ import type { FetchResult } from "../core/types.ts";
 
 export function refreshUrl(result: FetchResult): string | undefined {
 	if (!result.ok || !/html/i.test(result.contentType)) return undefined;
-	const html = stripCompleteHtmlElement(result.body, "noscript");
+	const html = stripCompleteHtmlElement(
+		result.body.slice(0, 131_072),
+		"noscript",
+	);
 	const match = html.match(
 		/<meta\b[^>]*http-equiv\s*=\s*["']?\s*refresh\s*["']?[^>]*>/i,
 	);

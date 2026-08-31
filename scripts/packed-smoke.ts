@@ -21,7 +21,7 @@ const outputDir = await mkdtemp(join(tmpdir(), "docsnap-packed-smoke-"));
 
 try {
 	const child = Bun.spawn(
-		[cli, origin, "--page", "--out", outputDir, "--clean", "--json"],
+		[cli, origin, "--page", "--out", outputDir, "--clean"],
 		{
 			env: { ...process.env, DOCSNAP_ALLOW_TEST_HOST: origin },
 			stdout: "pipe",
@@ -35,7 +35,7 @@ try {
 	]);
 	if (exitCode !== 0) throw new Error(stderr || stdout || "packed CLI failed");
 	const result = JSON.parse(stdout);
-	if (!result.ok || result.status !== "ok" || result.written !== 1) {
+	if (!result.ok || result.data?.written !== 1) {
 		throw new Error(`unexpected packed CLI result: ${stdout}`);
 	}
 	const [summary, manifest, page] = await Promise.all([
@@ -43,7 +43,7 @@ try {
 		readFile(join(outputDir, "manifest.jsonl"), "utf8"),
 		readFile(join(outputDir, "index.md"), "utf8"),
 	]);
-	if (!summary.includes('"status": "ok"')) throw new Error("invalid summary");
+	if (!JSON.parse(summary).ok) throw new Error("invalid summary");
 	if (!manifest.includes('"ok":true')) throw new Error("invalid manifest");
 	if (!page.includes("installed command can fetch")) {
 		throw new Error("captured page is missing expected content");

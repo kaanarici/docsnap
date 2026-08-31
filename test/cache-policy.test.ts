@@ -15,7 +15,6 @@ describe("cache key composition", () => {
 				await readCache(
 					{ ...config, userAgent },
 					cacheRequest(url, { ...config, userAgent }, accept),
-					{ count: false },
 				)
 			).key;
 		const base = await key(url, "text/html", "agent-a");
@@ -29,18 +28,21 @@ describe("cache key composition", () => {
 
 describe("shared-cache exclusions", () => {
 	test.each([
-		{ reason: "no-store", cacheControl: "no-store" },
-		{ reason: "private", cacheControl: "private, max-age=60" },
-		{ reason: "no-cache", cacheControl: "no-cache" },
-		{ reason: "Set-Cookie", setCookie: true },
-		{ reason: "Vary wildcard", vary: "*" },
-		{ reason: "Vary Cookie", vary: "Accept, Cookie" },
-		{ reason: "Vary Authorization", vary: "Authorization" },
+		{ reason: "no-store", headers: { cacheControl: "no-store" } },
+		{
+			reason: "private",
+			headers: { cacheControl: "private, max-age=60" },
+		},
+		{ reason: "no-cache", headers: { cacheControl: "no-cache" } },
+		{ reason: "Set-Cookie", headers: { setCookie: true } },
+		{ reason: "Vary wildcard", headers: { vary: "*" } },
+		{ reason: "Vary Cookie", headers: { vary: "Accept, Cookie" } },
+		{ reason: "Vary Authorization", headers: { vary: "Authorization" } },
 		{
 			reason: "binary document",
-			document: new Uint8Array([0x25, 0x50, 0x44, 0x46]),
+			headers: { document: new Uint8Array([0x25, 0x50, 0x44, 0x46]) },
 		},
-	])("does not cache $reason responses", ({ reason: _, ...headers }) => {
+	])("does not cache $reason responses", ({ headers }) => {
 		expect(
 			freshUntilFor(okFetch("https://docs.example.com/page", "body", headers)),
 		).toBeUndefined();

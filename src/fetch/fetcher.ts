@@ -19,6 +19,7 @@ import { refreshUrl } from "./refresh.ts";
 import { failed, failureKind } from "./result.ts";
 import {
 	isRetryableFetchError,
+	retryAtFromHeader,
 	retryDelayMs,
 	shouldRetry,
 	thrownFetchKind,
@@ -74,7 +75,10 @@ export async function fetchText(
 	allowUrl?: FetchUrlGate,
 	options?: FetchTextOptions,
 ): Promise<FetchResult> {
-	const signal = deadlineSignal(options?.signal, config.timeoutMs);
+	const signal = deadlineSignal(
+		[options?.signal, config.signal],
+		config.timeoutMs,
+	);
 	const fetchOptions = { ...options, signal };
 	const uncached: UncachedFetch = (...args) =>
 		fetchTextUncached(...args, fetchOptions);
@@ -84,6 +88,7 @@ export async function fetchText(
 			signal,
 		);
 	} catch (error) {
+		if (config.signal?.aborted) throw config.signal.reason;
 		if (signal.aborted) {
 			return fail(url, url, 0, "request timed out", "timeout", []);
 		}
@@ -99,7 +104,10 @@ export async function fetchTextUncached(
 	allowUrl?: FetchUrlGate,
 	options: FetchTextOptions = {},
 ): Promise<FetchResult> {
-	const signal = deadlineSignal(options.signal, config.timeoutMs);
+	const signal = deadlineSignal(
+		[options.signal, config.signal],
+		config.timeoutMs,
+	);
 	const maxBytes = Math.min(
 		config.maxBytes,
 		options.maxBytes ?? config.maxBytes,
@@ -156,9 +164,13 @@ export async function fetchTextUncached(
 	);
 }
 
-function deadlineSignal(signal: AbortSignal | undefined, timeoutMs: number) {
+function deadlineSignal(
+	signals: (AbortSignal | undefined)[],
+	timeoutMs: number,
+) {
 	const timeout = AbortSignal.timeout(timeoutMs);
-	return signal ? AbortSignal.any([signal, timeout]) : timeout;
+	const active = signals.filter((signal): signal is AbortSignal => !!signal);
+	return active.length ? AbortSignal.any([...active, timeout]) : timeout;
 }
 
 async function fetchOnce(
@@ -183,6 +195,7 @@ async function fetchOnce(
 	const seenRedirects = new Set<string>();
 	const cookies: Cookie[] = [];
 	let cookieTainted = false;
+	let retryAt: string | undefined;
 	for (let attempt = 0; attempt < 3; attempt++) {
 		try {
 			signal?.throwIfAborted();
@@ -245,6 +258,17 @@ async function fetchOnce(
 					"too_large",
 				);
 			}
+			if (response.status === 429) {
+				const candidate = retryAtFromHeader(
+					response.headers.get("retry-after"),
+				);
+				if (
+					candidate &&
+					(!retryAt || Date.parse(candidate) > Date.parse(retryAt))
+				) {
+					retryAt = candidate;
+				}
+			}
 			if (shouldRetry(response.status, attempt)) {
 				await awaitWithSignal(
 					Bun.sleep(retryDelayMs(attempt, response.headers.get("retry-after"))),
@@ -302,6 +326,7 @@ async function fetchOnce(
 					ok: false,
 					error: `HTTP ${response.status}`,
 					failureKind: failureKind(response.status),
+					...(response.status === 429 && retryAt ? { retryAt } : {}),
 				};
 			}
 			responseHeaders.set(result, response.headers);
@@ -611,14 +636,12 @@ async function fetchDiscovered(
 		return { ...discovery, result: item.fetched };
 	}
 	const conditional = conditionalFor?.(item);
-	const accept =
-		config.pageOnly && item.wasSeed ? preferredMarkdownAccept : undefined;
 	const result =
 		item.fetched ??
 		(await fetchText(
 			item.url,
 			config,
-			accept,
+			preferredMarkdownAccept,
 			conditional,
 			allowUrl,
 			signal ? { signal } : undefined,

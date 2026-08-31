@@ -25,7 +25,6 @@ import {
 	parseJsonValue,
 } from "../core/json.ts";
 import type {
-	CacheSummary,
 	ConditionalRequest,
 	FetchResult,
 	PipelineConfig,
@@ -56,7 +55,7 @@ export type CacheContext = {
 	enabled: boolean;
 	dir: string | null;
 	maxBytes: number;
-	stats: CacheSummary;
+	used: boolean;
 	ready?: Promise<boolean>;
 };
 
@@ -102,7 +101,7 @@ export function cacheRequest(
 	return { url, accept, userAgent: config.userAgent };
 }
 
-export function cacheKey(request: CacheRequest): string {
+function cacheKey(request: CacheRequest): string {
 	const hash = new Bun.CryptoHasher("sha256");
 	for (const part of [
 		schemaVersion,
@@ -120,17 +119,15 @@ export function cacheKey(request: CacheRequest): string {
 export async function readCache(
 	config: PipelineConfig,
 	request: CacheRequest,
-	options: { count?: boolean } = {},
 ): Promise<CacheLookup> {
 	const context = cacheContext(config);
 	const key = cacheKey(request);
 	if (!(await cacheReady(context))) return { state: "disabled", key };
-	const count = options.count !== false;
+	context.used = true;
 	try {
 		const path = entryPath(context, key);
 		const entry = await readCacheEntry(path, key);
 		if (!entry || !entrySafe(entry) || entry.bytes > config.maxBytes) {
-			if (count) context.stats.misses++;
 			await removeEntry(context, key);
 			return { state: "miss", key };
 		}
@@ -140,20 +137,15 @@ export async function readCache(
 			entry.bytes,
 		);
 		if (sha256(body) !== entry.bodyHash) {
-			if (count) context.stats.misses++;
 			await removeEntry(context, key, entry.bodyHash);
 			return { state: "miss", key };
 		}
-		context.stats.bytesRead += byteLength(body);
 		void touch(path);
 		if (Date.parse(entry.freshUntil) > Date.now()) {
-			if (count) context.stats.hits++;
 			return { state: "fresh", key, entry, body };
 		}
-		if (count) context.stats.stale++;
 		return { state: "stale", key, entry, body };
 	} catch (error) {
-		if (count) context.stats.misses++;
 		if (!isNotFound(error)) disableOnAccessError(context, error);
 		return { state: "miss", key };
 	}
@@ -167,9 +159,10 @@ export async function writeCacheResult(
 	const context = cacheContext(config);
 	const { key, request } = lock;
 	if (!(await cacheReady(context))) return;
-	if (!result.ok || isNotModifiedResult(result)) return notStored(context);
+	context.used = true;
+	if (!result.ok || isNotModifiedResult(result)) return;
 	const freshUntil = freshUntilFor(result);
-	if (!freshUntil) return notStored(context);
+	if (!freshUntil) return;
 	const bodyHash = sha256(result.body);
 	const bytes = byteLength(result.body);
 	const now = new Date().toISOString();
@@ -190,16 +183,14 @@ export async function writeCacheResult(
 	if (result.etag) entry.etag = result.etag;
 	if (result.lastModified) entry.lastModified = result.lastModified;
 	if (result.cacheControl) entry.cacheControl = result.cacheControl;
-	if (!entrySafe(entry)) return notStored(context);
+	if (!entrySafe(entry)) return;
 	try {
 		const priorHash = await priorBodyHash(context, key);
 		const blob = blobPath(context, bodyHash);
 		if (!(await exists(blob))) {
 			await atomicWrite(blob, result.body);
-			context.stats.bytesWritten += bytes;
 		}
 		await atomicWrite(entryPath(context, key), serializeEntry(entry));
-		context.stats.written++;
 		if (priorHash && priorHash !== bodyHash) {
 			await removeOrphanBlob(context, priorHash);
 		}
@@ -207,8 +198,6 @@ export async function writeCacheResult(
 		disableOnAccessError(context, error);
 	}
 }
-
-const notStored = (context: CacheContext) => void context.stats.notStored++;
 
 async function priorBodyHash(
 	context: CacheContext,
@@ -285,7 +274,6 @@ export async function refreshCacheEntry(
 			return next;
 		}
 		await atomicWrite(entryPath(context, key), serializeEntry(next));
-		context.stats.revalidated++;
 	} catch (error) {
 		disableOnAccessError(context, error);
 	}
@@ -330,11 +318,6 @@ export function cachedFetchResult(
 	return result;
 }
 
-export function cacheSummary(config: PipelineConfig): CacheSummary {
-	const summary = cacheContext(config).stats;
-	return { ...summary };
-}
-
 export function cacheConditional(entry: CacheEntry) {
 	const conditional: ConditionalRequest = {
 		urls: [entry.requestUrl, entry.finalUrl],
@@ -353,19 +336,7 @@ export function cacheContext(config: PipelineConfig): CacheContext {
 		enabled,
 		dir,
 		maxBytes: cacheMaxBytes(),
-		stats: {
-			enabled,
-			dir,
-			hits: 0,
-			misses: 0,
-			stale: 0,
-			revalidated: 0,
-			written: 0,
-			notStored: 0,
-			bytesRead: 0,
-			bytesWritten: 0,
-			evictedBytes: 0,
-		},
+		used: false,
 	};
 	contexts.set(config, context);
 	context.ready = enabled
@@ -590,7 +561,6 @@ function byteLength(body: string) {
 export function disableOnAccessError(context: CacheContext, cause: unknown) {
 	if (isNotFound(cause) || isAlreadyExists(cause)) return;
 	context.enabled = false;
-	context.stats.enabled = false;
 }
 
 export function isNotFound(cause: unknown) {

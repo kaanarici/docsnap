@@ -6,7 +6,6 @@ import {
 	type UncachedFetch,
 } from "../src/cache/cached-fetch.ts";
 import { pruneCache } from "../src/cache/eviction.ts";
-import { cacheSummary } from "../src/cache/store.ts";
 import { isJsonObject, parseJsonValue } from "../src/core/json.ts";
 import type { FetchResult } from "../src/core/types.ts";
 import { okFetch, setTestEnv, tempDir, testConfig } from "./fixtures.ts";
@@ -131,7 +130,6 @@ describe("304 cache reuse", () => {
 			async () => okFetch(url, "trusted body", { cacheControl: "no-store" }),
 		);
 		expect(result.ok && result.body).toBe("trusted body");
-		expect(cacheSummary(config).enabled).toBe(false);
 	});
 
 	test("creates private cache directories and files", async () => {

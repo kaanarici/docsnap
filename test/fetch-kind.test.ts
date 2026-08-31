@@ -9,7 +9,8 @@ import type { AddressInfo } from "node:net";
 import type { FailureKind } from "../src/core/types.ts";
 import { fetchTextUncached } from "../src/fetch/fetcher.ts";
 import { failed, failureKind } from "../src/fetch/result.ts";
-import { thrownFetchKind } from "../src/fetch/retry.ts";
+import { retryAtFromHeader, thrownFetchKind } from "../src/fetch/retry.ts";
+import { UnsafeUrlError } from "../src/security/url.ts";
 import { setTestEnv, testConfig } from "./fixtures.ts";
 
 const allowHostEnv = "DOCSNAP_ALLOW_TEST_HOST";
@@ -20,6 +21,7 @@ describe("FailureKind assignment", () => {
 		[410, "not_found"],
 		[401, "blocked"],
 		[403, "blocked"],
+		[429, "http"],
 		[400, "http"],
 	] as const)("maps HTTP %i to %s", async (status, kind) => {
 		const origin = serve(() => new Response("nope", { status }));
@@ -102,7 +104,7 @@ describe("chromium status helper", () => {
 		[410, "HTTP 410", "not_found"],
 		[401, "HTTP 401", "blocked"],
 		[403, "HTTP 403", "blocked"],
-		[429, "HTTP 429", "blocked"],
+		[429, "HTTP 429", "http"],
 		[500, "HTTP 500", "http"],
 		[0, "HTTP 0", "fetch"],
 	] as const)("maps %i without sniffing %s", (status, _error, kind) => {
@@ -130,11 +132,27 @@ describe("thrown fetch kind", () => {
 		);
 		expect(
 			thrownFetchKind(
-				new Error("private or internal IP addresses are not allowed"),
+				new UnsafeUrlError("private or internal IP addresses are not allowed"),
 			),
 		).toBe("unsafe_url");
+		expect(
+			thrownFetchKind(
+				new Error("private or internal IP addresses are not allowed"),
+			),
+		).toBe("fetch");
 		expect(thrownFetchKind(new Error("ECONNREFUSED"))).toBe("fetch");
 	});
+});
+
+test("normalizes valid Retry-After values to one absolute time", () => {
+	const now = Date.parse("2026-08-26T12:00:00.000Z");
+	expect(retryAtFromHeader("120", now)).toBe("2026-08-26T12:02:00.000Z");
+	expect(retryAtFromHeader("Wed, 21 Oct 2015 07:28:00 GMT", now)).toBe(
+		"2015-10-21T07:28:00.000Z",
+	);
+	for (const invalid of ["-1", "later", "Infinity", "1e30"]) {
+		expect(retryAtFromHeader(invalid, now)).toBeUndefined();
+	}
 });
 
 test("failed records the caller kind instead of sniffing the error", () => {
