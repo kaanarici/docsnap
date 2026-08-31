@@ -27,9 +27,8 @@ test("keeps distinct inline documentation prose", () => {
 		"The capture command follows public links, records failures, and writes clean Markdown files with source metadata.",
 		"Review the generated summary and manifest to verify page counts, redirects, content hashes, and quality warnings.",
 	]);
-	expect(extracted?.source).toBe("rsc");
-	expect(extracted?.markdown).toContain("Install the command line package");
-	expect(extracted?.markdown).toContain("Review the generated summary");
+	expect(extracted).toContain("Install the command line package");
+	expect(extracted).toContain("Review the generated summary");
 });
 
 function extractRsc(paragraphs: string[]) {

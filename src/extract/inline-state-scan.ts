@@ -1,5 +1,4 @@
 import { isJsonString, type JsonValue, parseJsonValue } from "../core/json.ts";
-import { escapeRegExp } from "../core/text.ts";
 
 export type ScriptBlock = {
 	id: string;
@@ -47,24 +46,6 @@ export function nextFlightChunks(html: string): string[] {
 		for (const literal of stringLiterals(argument.value)) chunks.push(literal);
 	}
 	return chunks;
-}
-
-export function assignedExpression(body: string, name: string) {
-	const match = new RegExp(`(?:window\\.)?${escapeRegExp(name)}\\s*=\\s*`).exec(
-		body,
-	);
-	if (!match) return undefined;
-	return balancedExpression(body, match.index + match[0].length).value;
-}
-
-export function parseJsonExpression(expression: string) {
-	const parsed = parseJson(expression);
-	if (parsed !== undefined) return parsed;
-	const jsonParse = /^JSON\.parse\(\s*("(?:\\.|[^"\\])*")\s*\)$/s.exec(
-		expression.trim(),
-	);
-	if (!jsonParse) return undefined;
-	return parseJson(decodeStringLiteral(jsonParse[1]!));
 }
 
 export function parseJson(value: string): JsonValue | undefined {
@@ -124,7 +105,7 @@ type BalancedExpression = {
 	end: number;
 };
 
-export function balancedExpression(
+function balancedExpression(
 	input: string,
 	start: number,
 	maxEnd = input.length,

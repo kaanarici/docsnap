@@ -9,22 +9,21 @@ import type {
 	PageRecord,
 } from "../core/types.ts";
 import { urlWithoutFragment } from "../core/url.ts";
-import { isFeedResponse } from "../discover/feed.ts";
 import {
 	discoverFetchedResources,
 	type PageResources,
 } from "../discover/nav.ts";
-import { scanRawHtmlForInjectionSignals } from "../security/injection.ts";
 import {
 	blockedAccessError,
-	chromeHeading,
 	isLanguageSelector,
 	isRecoverableAppShell,
 	isShellPlaceholder,
 } from "./app-shell.ts";
 import {
+	isCodeTextAsset,
 	isMarkdownLike,
 	isStructuredTextAsset,
+	languageFromContentType,
 	languageFromUrl,
 } from "./content.ts";
 import { parseWithDefuddle } from "./defuddle.ts";
@@ -38,13 +37,11 @@ import {
 } from "./page-record.ts";
 import { structuredFallback } from "./structured-fallback.ts";
 import {
-	countTextChars,
-	isElement,
+	isHiddenElement,
 	maxBacktickRun,
 	maxOutputChars,
 	maxSerializeVisits,
-	shouldSkipElement,
-	tagName,
+	walkText,
 } from "./structured-fallback-shared.ts";
 import { titleFromMarkdown } from "./title.ts";
 
@@ -71,14 +68,7 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 	];
 	if (!result.ok)
 		return page(
-			failedRecord(
-				result,
-				source,
-				result.error,
-				result.failureKind,
-				[],
-				wasSeed,
-			),
+			failedRecord(result, source, result.error, result.failureKind, wasSeed),
 		);
 	if (result.document) {
 		kind = "binary";
@@ -92,31 +82,25 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 			failedRecord(
 				result,
 				source,
-				"feed resource used for discovery, not a content page",
+				"feed resource, not a content page",
 				"empty",
-				[],
 				wasSeed,
 			),
 		);
 	}
-	let signals: PageRecord["injectionSignals"] = [];
 
 	try {
-		const textAsset = isStructuredTextAsset(result);
+		const textAsset = isStructuredTextAsset(result) || isCodeTextAsset(result);
 		const markdownLike = isMarkdownLike(result);
 		const document =
 			textAsset || markdownLike ? undefined : parseHTML(result.body).document;
 		resources = discoverFetchedResources(result, document);
-		signals = markdownLike
-			? []
-			: scanRawHtmlForInjectionSignals(result.body, document);
 		if (textAsset || markdownLike) {
 			kind = "markdown";
 			return page(
 				recordFromExtracted(
 					input,
 					textAsset ? textAssetBody(result) : markdownAssetBody(result),
-					signals,
 					kind,
 				),
 			);
@@ -124,14 +108,7 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 		if (!document) {
 			kind = "empty";
 			return page(
-				failedRecord(
-					result,
-					source,
-					"empty content",
-					"empty",
-					signals,
-					wasSeed,
-				),
+				failedRecord(result, source, "empty content", "empty", wasSeed),
 			);
 		}
 
@@ -139,37 +116,18 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 		kind = classified.kind;
 		if (classified.kind === "blocked") {
 			return page(
-				failedRecord(
-					result,
-					source,
-					classified.error,
-					"blocked",
-					signals,
-					wasSeed,
-				),
+				failedRecord(result, source, classified.error, "blocked", wasSeed),
 			);
 		}
 		if (classified.kind === "empty") {
 			return page(
-				failedRecord(
-					result,
-					source,
-					classified.error,
-					"empty",
-					signals,
-					wasSeed,
-				),
+				failedRecord(result, source, classified.error, "empty", wasSeed),
 			);
 		}
 
 		const scripts = scriptBlocks(document);
 		const extracted = await extractBody(result, document, classified.kind);
-		const staticRecord = recordFromExtracted(
-			input,
-			extracted,
-			signals,
-			classified.kind,
-		);
+		const staticRecord = recordFromExtracted(input, extracted, classified.kind);
 		if (classified.kind !== "app-shell" || scripts.length === 0) {
 			return page(staticRecord);
 		}
@@ -182,14 +140,10 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 			const inlineRecord = recordFromExtracted(
 				input,
 				{
-					markdown: inline.markdown,
+					markdown: inline,
 					extractor: "inline-state",
-					title: titleFromMarkdown(
-						inline.markdown,
-						new URL(result.finalUrl).pathname,
-					),
+					title: titleFromMarkdown(inline, new URL(result.finalUrl).pathname),
 				},
-				signals,
 				classified.kind,
 			);
 			return page(
@@ -209,7 +163,6 @@ export async function extractPage(input: FetchedUrl): Promise<ExtractedPage> {
 				source,
 				error instanceof Error ? error.message : String(error),
 				"extract",
-				signals,
 				wasSeed,
 			),
 		);
@@ -242,7 +195,7 @@ function classifyHtml(result: FetchResult, document: Document): HtmlClass {
 
 function isDocsHtml(document: Document, result: FetchResult) {
 	if (document.querySelector("[data-docsnap-root]")) return true;
-	if (docsHtmlMarker.test(result.body)) return true;
+	if (docsHtmlMarker.test(result.body.slice(0, 131_072))) return true;
 	const generator = meta(document, "generator") ?? "";
 	if (docsGenerator.test(generator)) return true;
 	const main =
@@ -272,6 +225,15 @@ const docsHtmlMarker =
 const docsGenerator =
 	/docusaurus|sphinx|mkdocs|vitepress|starlight|gitbook|antora|jsdoc|typedoc|docfx|writerside/i;
 
+function isFeedResponse(result: FetchResult): boolean {
+	const type = result.contentType.toLowerCase().split(";")[0]?.trim() ?? "";
+	if (type === "application/rss+xml" || type === "application/atom+xml")
+		return true;
+	return /<(?:[a-z][\w.-]*:)?(?:feed|rss|rdf)\b/i.test(
+		result.body.slice(0, 4096),
+	);
+}
+
 function shouldCheckFeedResponse(result: FetchResult): boolean {
 	if (/(?:rss|atom)\+xml|\bxml\b/i.test(result.contentType)) return true;
 	const prefix = result.body
@@ -292,6 +254,7 @@ async function extractBody(
 	kind: HtmlExtractKind,
 ): Promise<ExtractedBody> {
 	removeScriptsAndStyles(document);
+	removeHiddenElements(document);
 	const canonical = resolveCanonical(
 		document.querySelector('link[rel="canonical"]')?.getAttribute("href"),
 		result.finalUrl,
@@ -299,7 +262,7 @@ async function extractBody(
 	const title = documentTitle(document);
 	switch (kind) {
 		case "app-shell":
-			return extractAppShell(document, title, canonical);
+			return extractedBody("", "fallback", title, canonical);
 		case "docs-html":
 			return extractDocsHtml(document, result, title, canonical);
 		case "article-html":
@@ -311,33 +274,12 @@ async function extractBody(
 	}
 }
 
-function extractAppShell(
-	document: Document,
-	title: string | undefined,
-	canonical: string | undefined,
-) {
-	const declared = declaredMarkdown(document);
-	if (declared && wordCount(declared.markdown) >= 20) {
-		return extractedBody(
-			declared.markdown,
-			"markdown",
-			title,
-			canonical,
-			declared.truncated,
-			declared.injectionSource,
-		);
-	}
-	return extractedBody("", "fallback", title, canonical);
-}
-
 function extractDocsHtml(
 	document: Document,
 	result: FetchResult,
 	title: string | undefined,
 	canonical: string | undefined,
 ) {
-	const outline = largePageOutline(document, result.body, title);
-	if (outline) return extractedBody(outline, "fallback", title, canonical);
 	return htmlFallback(document, result, title, canonical);
 }
 
@@ -347,14 +289,12 @@ async function extractArticleHtml(
 	title: string | undefined,
 	canonical: string | undefined,
 ) {
-	const outline = largePageOutline(document, result.body, title);
-	if (outline) return extractedBody(outline, "fallback", title, canonical);
 	if (document.querySelectorAll("*").length > maxDefuddleElements) {
 		return htmlFallback(document, result, title, canonical);
 	}
 	const parsed = await parseWithDefuddle(document, result.finalUrl);
 	if (parsed?.content.trim()) {
-		const parsedTitle = parsed.title || title;
+		const parsedTitle = title || parsed.title;
 		const markdown = parsed.content.trim();
 		if (isShellPlaceholder(markdown, parsedTitle, result.body)) {
 			return extractedBody("", "fallback", parsedTitle, canonical);
@@ -409,7 +349,7 @@ function htmlFallback(
 function textAssetBody(result: FetchResult): ExtractedBody {
 	const title = titleFromMarkdown("", new URL(result.finalUrl).pathname);
 	return extractedBody(
-		renderTextAsset(title, result.body, result.finalUrl),
+		renderTextAsset(title, result.body, result.finalUrl, result.contentType),
 		"text",
 		title,
 	);
@@ -420,14 +360,7 @@ function markdownAssetBody(result: FetchResult): ExtractedBody {
 	const truncated = body.length > maxOutputChars;
 	const markdown = truncated ? body.slice(0, maxOutputChars) : body;
 	const title = titleFromMarkdown(markdown, new URL(result.finalUrl).pathname);
-	return extractedBody(
-		markdown,
-		"markdown",
-		title,
-		undefined,
-		truncated,
-		truncated ? body : undefined,
-	);
+	return extractedBody(markdown, "markdown", title, undefined, truncated);
 }
 
 function extractedBody(
@@ -436,42 +369,12 @@ function extractedBody(
 	title?: string,
 	canonicalUrl?: string,
 	truncated = false,
-	injectionSource?: string,
 ): ExtractedBody {
 	const extracted: ExtractedBody = { markdown, extractor };
 	if (title) extracted.title = title;
 	if (canonicalUrl) extracted.canonicalUrl = canonicalUrl;
 	if (truncated) extracted.truncated = true;
-	if (injectionSource) extracted.injectionSource = injectionSource;
 	return extracted;
-}
-
-function declaredMarkdown(document: Document) {
-	let markdown = "";
-	for (const node of document.querySelectorAll("pre[data-content-type]")) {
-		const type = node
-			.getAttribute("data-content-type")
-			?.split(";", 1)[0]
-			?.trim()
-			.toLowerCase();
-		const text = node.textContent?.trim() ?? "";
-		if (
-			type === "text/markdown" &&
-			node.closest('[aria-hidden="true"],[hidden]') &&
-			wordCount(text) >= 20 &&
-			text.length > markdown.length
-		) {
-			markdown = text;
-		}
-	}
-	if (!markdown) return undefined;
-	const truncated = markdown.length > maxOutputChars;
-	const declared: DeclaredMarkdown = {
-		markdown: truncated ? markdown.slice(0, maxOutputChars) : markdown,
-		truncated,
-	};
-	if (truncated) declared.injectionSource = markdown;
-	return declared;
 }
 
 function freshDocument(html: string) {
@@ -486,13 +389,13 @@ function removeScriptsAndStyles(document: Document) {
 	});
 }
 
-const maxDefuddleElements = 10_000;
+function removeHiddenElements(document: Document) {
+	document.querySelectorAll("*").forEach((element) => {
+		if (isHiddenElement(element)) element.remove();
+	});
+}
 
-type DeclaredMarkdown = {
-	markdown: string;
-	truncated: boolean;
-	injectionSource?: string;
-};
+const maxDefuddleElements = 10_000;
 
 function structuredOrFlat(document: Document, baseUrl: string) {
 	const result = structuredFallback(document, baseUrl);
@@ -522,28 +425,6 @@ function pageText(document: Document) {
 	return { markdown: "", truncated: false };
 }
 
-function largePageOutline(
-	document: Document,
-	html: string,
-	title: string | undefined,
-) {
-	if (html.length < 2_000_000 || document.querySelectorAll("a").length < 500)
-		return undefined;
-	const headings = uniqueByWhitespace(
-		Array.from(document.querySelectorAll("h1,h2,h3"))
-			.map((element) => element.textContent?.replace(/\s+/g, " ").trim())
-			.filter((text): text is string => Boolean(text) && !chromeHeading(text)),
-	).slice(0, 120);
-	if (headings.length < 3) return undefined;
-	const parts = [
-		title ? `# ${title}` : undefined,
-		meta(document, "description"),
-		`## Page Outline\n\n${headings.map((heading) => `- ${heading}`).join("\n")}`,
-	].filter((value): value is string => Boolean(value?.trim()));
-	const markdown = uniqueByWhitespace(parts).join("\n\n");
-	return wordCount(markdown) >= 8 ? markdown : undefined;
-}
-
 function chromeOnlyExtractedMarkdown(markdown: string) {
 	const words = wordCount(markdown);
 	const linkCount = markdownLinkHrefs(markdown).length;
@@ -567,50 +448,11 @@ function chromeOnlyExtractedMarkdown(markdown: string) {
 }
 
 function readableText(node: Node) {
-	const parts: string[] = [];
-	const stack: Array<{ node: Node; inAnchor: boolean }> = [
-		{ node, inAnchor: false },
-	];
-	let visits = 0;
-	let chars = 0;
-	let outputChars = 0;
-	let anchorChars = 0;
-	let clipped = false;
-	while (
-		stack.length > 0 &&
-		visits++ < maxSerializeVisits &&
-		outputChars < maxOutputChars
-	) {
-		const frame = stack.pop()!;
-		if (frame.node.nodeType === 3) {
-			const raw = frame.node.textContent ?? "";
-			const value = raw.slice(0, maxOutputChars - outputChars);
-			clipped ||= value.length < raw.length;
-			parts.push(value);
-			outputChars += value.length;
-			const textChars = countTextChars(value);
-			chars += textChars;
-			if (frame.inAnchor) anchorChars += textChars;
-			continue;
-		}
-		if (!isElement(frame.node) || shouldSkipElement(frame.node)) continue;
-		const inAnchor = frame.inAnchor || tagName(frame.node) === "a";
-		const children = frame.node.childNodes;
-		const remaining = Math.max(0, maxSerializeVisits - visits);
-		let pushed = 0;
-		for (
-			let index = children.length - 1;
-			index >= 0 && pushed < remaining;
-			index--
-		) {
-			const child = children[index];
-			if (!child) continue;
-			stack.push({ node: child, inAnchor });
-			pushed++;
-		}
-	}
-	const truncated = clipped || visits >= maxSerializeVisits || stack.length > 0;
-	if (chars > 0 && anchorChars / chars >= 0.5)
+	const { parts, textChars, anchorChars, truncated } = walkText(node, {
+		maxVisits: maxSerializeVisits,
+		collectChars: maxOutputChars,
+	});
+	if (textChars > 0 && anchorChars / textChars >= 0.5)
 		return { markdown: "", truncated };
 	return {
 		markdown: parts
@@ -622,8 +464,13 @@ function readableText(node: Node) {
 	};
 }
 
-function renderTextAsset(title: string, body: string, url: string) {
-	const language = languageFromUrl(url);
+function renderTextAsset(
+	title: string,
+	body: string,
+	url: string,
+	contentType: string,
+) {
+	const language = languageFromUrl(url) || languageFromContentType(contentType);
 	const fence = "`".repeat(Math.max(3, maxBacktickRun(body) + 1));
 	return `# ${title}\n\n${fence}${language}\n${body.trim()}\n${fence}`;
 }

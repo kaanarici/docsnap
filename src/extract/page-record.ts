@@ -1,6 +1,6 @@
 import { maxGeneratedCapturePages } from "../core/config.ts";
+import { hashContent } from "../core/hash.ts";
 import { markdownLinkHrefs } from "../core/markdown.ts";
-import { hashContent } from "../core/snapshot.ts";
 import { wordCount } from "../core/text.ts";
 import type {
 	DiscoverySource,
@@ -11,7 +11,6 @@ import type {
 	PageKind,
 	PageRecord,
 } from "../core/types.ts";
-import { scanMarkdownForInjectionSignals } from "../security/injection.ts";
 import { validatePublicHttpUrl } from "../security/url.ts";
 import {
 	blockedAccessError,
@@ -29,13 +28,11 @@ export type ExtractedBody = {
 	title?: string;
 	canonicalUrl?: string;
 	truncated?: boolean;
-	injectionSource?: string;
 };
 
 export function recordFromExtracted(
 	input: FetchedUrl,
 	extracted: ExtractedBody,
-	rawSignals: PageRecord["injectionSignals"],
 	kind: PageKind,
 ): PageRecord {
 	const { result, source, wasSeed } = input;
@@ -43,12 +40,8 @@ export function recordFromExtracted(
 	const title = titleFromContent(markdown, extracted.title);
 	const shell = kind === "app-shell";
 	const emptyError = shell ? shellError : "empty content";
-	const fail = (
-		error: string,
-		failureKind: FailureKind,
-		injectionSignals = rawSignals,
-	) =>
-		failedRecord(result, source, error, failureKind, injectionSignals, wasSeed);
+	const fail = (error: string, failureKind: FailureKind) =>
+		failedRecord(result, source, error, failureKind, wasSeed);
 	if (!markdown) return fail(emptyError, "empty");
 	if (isLoadingShellPlaceholder(markdown, shell)) {
 		return fail(shellError, "empty");
@@ -64,12 +57,6 @@ export function recordFromExtracted(
 	if (isLanguageSelector(result.finalUrl, result.body)) {
 		return fail("language selector without article content", "empty");
 	}
-	const injectionSignals = uniqueSignals([
-		...rawSignals,
-		...[...new Set([title, extracted.injectionSource ?? markdown])].flatMap(
-			(input) => (input ? scanMarkdownForInjectionSignals(input) : []),
-		),
-	]);
 	const quality = qualityReasons(markdown, title);
 	if (extracted.extractor === "inline-state") {
 		quality.push("inline state may omit content");
@@ -91,11 +78,7 @@ export function recordFromExtracted(
 			links.length,
 		)
 	) {
-		return fail(
-			"page chrome without article content",
-			"empty",
-			injectionSignals,
-		);
+		return fail("page chrome without article content", "empty");
 	}
 	const page: Extract<PageRecord, { ok: true }> = {
 		ok: true,
@@ -103,7 +86,6 @@ export function recordFromExtracted(
 		finalUrl: result.finalUrl,
 		redirects: result.redirects ?? [],
 		fetchedAt: result.fetchedAt ?? new Date().toISOString(),
-		injectionSignals,
 		markdown,
 		links,
 		status: result.status,
@@ -132,7 +114,11 @@ function isChromeOnlyContent(
 	quality: { reasons: string[] },
 	links: number,
 ) {
-	if (title && markdown.replace(/^#{1,6}\s*/, "").trim() === title.trim()) {
+	if (
+		extractor === "html" &&
+		title &&
+		markdown.replace(/^#{1,6}\s*/, "").trim() === title.trim()
+	) {
 		return true;
 	}
 	if (extractor !== "html") return false;
@@ -144,7 +130,7 @@ function isChromeOnlyContent(
 	) {
 		return true;
 	}
-	if (!quality.reasons.includes("high link density")) return false;
+	if (links <= Math.max(20, wordCount(markdown) / 8)) return false;
 	if (links < 20 || /^#{1,6}\s+/m.test(markdown)) return false;
 	const terms = (title ?? "")
 		.toLowerCase()
@@ -160,7 +146,6 @@ export function failedRecord(
 	source: DiscoverySource,
 	error: string,
 	failureKind: FailureKind = "extract",
-	injectionSignals: PageRecord["injectionSignals"] = [],
 	wasSeed?: true,
 ): PageRecord {
 	const page: Extract<PageRecord, { ok: false }> = {
@@ -169,7 +154,6 @@ export function failedRecord(
 		finalUrl: result.finalUrl,
 		redirects: result.redirects ?? [],
 		fetchedAt: result.fetchedAt ?? new Date().toISOString(),
-		injectionSignals,
 		markdown: "",
 		links: [],
 		status: result.status,
@@ -184,10 +168,6 @@ export function failedRecord(
 	if (result.lastModified) page.lastModified = result.lastModified;
 	if (wasSeed) page.wasSeed = true;
 	return page;
-}
-
-function uniqueSignals(signals: PageRecord["injectionSignals"]) {
-	return [...new Set(signals)];
 }
 
 function publicHrefs(hrefs: string[], base: string, limit: number) {

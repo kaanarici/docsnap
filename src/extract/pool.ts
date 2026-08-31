@@ -25,6 +25,9 @@ export function createExtractionPool(): ExtractionPool {
 	async function extractMany(inputs: FetchedUrl[]): Promise<ExtractedPage[]> {
 		if (!("Worker" in globalThis))
 			return Promise.all(inputs.map(safeExtractPage));
+		if (activeReject) {
+			throw new Error("extractMany calls must not overlap on one pool");
+		}
 
 		const results: ExtractedPage[] = [];
 		results.length = inputs.length;
@@ -86,7 +89,13 @@ export function createExtractionPool(): ExtractionPool {
 
 			function send(worker: Worker) {
 				const job = heavy[next++];
-				if (job) worker.postMessage({ id: job.id, input: job.input });
+				if (!job) return;
+				const body = Buffer.from(job.input.result.body, "utf8");
+				const input = {
+					...job.input,
+					result: { ...job.input.result, body: "" },
+				};
+				worker.postMessage({ id: job.id, input, body }, [body.buffer]);
 			}
 		});
 		return results;
@@ -120,14 +129,7 @@ async function safeExtractPage(input: FetchedUrl): Promise<ExtractedPage> {
 function failedExtraction(input: FetchedUrl, cause: unknown): ExtractedPage {
 	const message = cause instanceof Error ? cause.message : String(cause);
 	return [
-		failedRecord(
-			input.result,
-			input.source,
-			message,
-			"extract",
-			[],
-			input.wasSeed,
-		),
+		failedRecord(input.result, input.source, message, "extract", input.wasSeed),
 		{ links: [] },
 		false,
 	];

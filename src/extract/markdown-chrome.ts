@@ -3,10 +3,10 @@ import { whitespaceKey } from "../core/text.ts";
 export const pipeSet = (value: string) => new Set(value.split("|"));
 
 const boilerplateLines = pipeSet(
-	"advertisement|advertisements|accept all cookies|accept cookies|ask about this page|back to top|cookie policy|copy markdown|copy page|follow us|got it|install tools|manage cookies|menu|most popular|most read|newsletter|next example|open in chatgpt|open in claude|open in cursor|previous example|print this page|read more|related articles|related stories|share|share this|show less|show more|sign up|skip to content|skip to main content|sponsored|sponsored content|sponsored links|subscribe|tweet|view as markdown|we use cookies",
+	"advertisement|advertisements|accept all cookies|accept cookies|ask about this page|back to top|cookie policy|copy markdown|copy page|edit code|follow us|got it|install tools|manage cookies|menu|most popular|most read|newsletter|next example|open in chatgpt|open in claude|open in cursor|press enter to start editing|previous example|print this page|read more|related articles|related stories|share|share this|show less|show more|sign up|skip to content|skip to main content|sponsored|sponsored content|sponsored links|subscribe|tweet|view as markdown|we use cookies",
 );
 const articleFooterHeadings = pipeSet(
-	"related articles|related posts|related stories|written by",
+	"help improve mdn|related articles|related posts|related stories|written by",
 );
 const articleFooterLines = pipeSet(
 	"is this helpful|is this helpful?|is this page helpful|is this page helpful?|related posts from|was this helpful|was this helpful?|was this page helpful|was this page helpful?",
@@ -18,9 +18,6 @@ const standaloneEditLinkPattern =
 	/^\[\[edit\]\([^)]*\baction=edit\b[^)]*\)\]$/i;
 const docActionLinkLinePattern =
 	/^(?:or )?(?:open in (?:chatgpt|claude|cursor)|report an issue|edit this page(?: on github)?)(?: or (?:open in (?:chatgpt|claude|cursor)|report an issue|edit this page(?: on github)?))*$/;
-const demoControlPattern =
-	/fetch data|upload files|custom css|contained|disabled|loading|outlined|primary|secondary|bootstrap|submit|success|delete|error|large|link|save|send|text/g;
-
 export function chromeKey(value: string): string {
 	return whitespaceKey(value.replace(/[*_`]+/g, "")).toLowerCase();
 }
@@ -33,7 +30,6 @@ export function isMarkdownChromeLine(line: string): boolean {
 	if (isShareListChromeLine(trimmed)) return true;
 	if (isChromeLinkListLine(trimmed)) return true;
 	if (isDocControlChromeLine(trimmed)) return true;
-	if (isDemoControlChromeLine(trimmed)) return true;
 	if (isMarkdownStructuralLine(trimmed)) return false;
 	return boilerplateLines.has(chromeKey(trimmed));
 }
@@ -78,15 +74,6 @@ function isDocControlChromeLine(trimmed: string) {
 	if (key.includes("features available in") && key.includes("latest version"))
 		return true;
 	return ["reloadclear", "reloadclearfork"].includes(key.replace(/\s+/g, ""));
-}
-
-function isDemoControlChromeLine(trimmed: string) {
-	if (trimmed.length > 80 || /[.:;!?]/.test(trimmed)) return false;
-	const key = chromeKey(trimmed.replace(/\[([^\]]+)]\([^)]+\)/g, " $1 "));
-	if (key === "loading") return true;
-	if (key === "custom css bootstrap" || key === "custom cssbootstrap")
-		return true;
-	return (key.match(demoControlPattern)?.length ?? 0) >= 3;
 }
 
 function isMarkdownStructuralLine(trimmed: string): boolean {

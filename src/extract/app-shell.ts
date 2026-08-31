@@ -143,12 +143,6 @@ function shellText(root: Node | undefined | null) {
 	return whitespaceKey(chunks.join(""));
 }
 
-export function chromeHeading(text: string) {
-	return /^(our api|hello world|support|sign in|search(?: developer site)?)$/i.test(
-		text,
-	);
-}
-
 export function blockedAccessError(
 	markdown: string,
 	title: string | undefined,
@@ -174,8 +168,10 @@ function clientChallengeError(
 	title: string | undefined,
 	html: string,
 ) {
-	return /client challenge/i.test(title ?? "") ||
-		/required part of this site couldn.t load/i.test(markdown) ||
+	if (/client challenge/i.test(title ?? ""))
+		return "blocked by client challenge";
+	if (wordCount(markdown) > 160) return undefined;
+	return /required part of this site couldn.t load/i.test(markdown) ||
 		(/(?:\/|\b)anubis(?:\/|\b)/i.test(`${markdown}\n${html}`) &&
 			/ensure the security of your connection/i.test(markdown)) ||
 		isCloudflareChallenge(markdown, title, html)
@@ -201,8 +197,9 @@ function isCloudflareChallenge(
 }
 
 function accessGate(markdown: string, title: string | undefined, html: string) {
-	const compact = whitespaceKey([title ?? "", markdown].join(" "));
 	const words = wordCount(markdown);
+	if (words > 160 && !gateTitle(title)) return false;
+	const compact = whitespaceKey([title ?? "", markdown].join(" "));
 	const ambiguous = ambiguousGatePattern.test(compact);
 	if (ambiguous && gateTitle(title)) return true;
 	if (words > 160) return false;

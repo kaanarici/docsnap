@@ -21,10 +21,12 @@ export function titleFromContent(
 	fallback?: string,
 ): string | undefined {
 	const title = cleanTitle(fallback);
-	return firstMarkdownHeading(markdown) ?? title;
+	return (
+		firstMarkdownHeading(markdown, 1) ?? title ?? firstMarkdownHeading(markdown)
+	);
 }
 
-export function cleanTitle(value: string | undefined): string | undefined {
+function cleanTitle(value: string | undefined): string | undefined {
 	return (
 		value
 			?.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")

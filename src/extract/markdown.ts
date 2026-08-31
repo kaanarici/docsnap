@@ -61,6 +61,7 @@ export function cleanMarkdown(markdown: string): string {
 			cleanMarkdownLine(line),
 		).replace(/^(#{1,6})[ \t]{2,}/, "$1 ");
 		const trimmedLine = rawCleanedLine.trim();
+		if (/^#{1,6}$/.test(trimmedLine)) continue;
 		if (sphinxPermalinkLinePattern.test(trimmedLine)) {
 			skippedSphinxPermalink = true;
 			continue;
@@ -86,8 +87,14 @@ export function cleanMarkdown(markdown: string): string {
 			}
 			continue;
 		}
-		lines.push(finalLine);
-		bodyWords += wordCount(finalLine);
+		const linkBlocks = standaloneLinkBlocks(finalLine);
+		if (linkBlocks) {
+			lines.push(...linkBlocks);
+			bodyWords += linkBlocks.reduce((sum, block) => sum + wordCount(block), 0);
+		} else {
+			lines.push(finalLine);
+			bodyWords += wordCount(finalLine);
+		}
 	}
 
 	const cleaned = dropTrailingSchemaJsonFence(
@@ -99,6 +106,18 @@ export function cleanMarkdown(markdown: string): string {
 	return normalizeImageAlt(
 		repairBrokenLinkBlocks(repairSphinxSignatureEmphasis(cleaned)),
 	);
+}
+
+function standaloneLinkBlocks(line: string) {
+	if (
+		!/^\s*\[[^\]]+]\([^)\n]+\)(?:\s+\[[^\]]+]\([^)\n]+\)){1,}\s*$/.test(line)
+	) {
+		return undefined;
+	}
+	return line
+		.trim()
+		.split(/\s+(?=\[[^\]]+]\()/)
+		.map((link) => `- ${link}`);
 }
 
 const sphinxPermalinkLinePattern = /^\[¶]\([^)]+\)$/;

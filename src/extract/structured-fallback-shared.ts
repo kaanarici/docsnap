@@ -1,5 +1,4 @@
 import { safeMarkdownDestination } from "../core/markdown.ts";
-import { srcsetCandidates } from "../discover/nav.ts";
 
 const elementNode = 1;
 export const textNode = 3;
@@ -43,9 +42,7 @@ export function isHeading(tag: string) {
 
 export function actsLikeBlock(element: Element) {
 	return (
-		blockTags.has(tagName(element)) ||
-		element.getAttribute("data-as") === "p" ||
-		element.getAttribute("data-component-part") === "card-cta"
+		blockTags.has(tagName(element)) || element.getAttribute("data-as") === "p"
 	);
 }
 
@@ -208,7 +205,7 @@ function attrIncludes(element: Element, name: string, value: string) {
 	return element.getAttribute(name)?.toLowerCase().includes(value) ?? false;
 }
 
-function isHiddenElement(element: Element) {
+export function isHiddenElement(element: Element) {
 	return (
 		element.hasAttribute("hidden") ||
 		element.getAttribute("aria-hidden")?.toLowerCase() === "true" ||
@@ -229,10 +226,10 @@ export function isLinkDominatedContainer(element: Element) {
 	if (
 		previous &&
 		tagName(previous) === "p" &&
-		countTextChars(boundedElementText(previous, 160, 80)) >= 80
+		countTextChars(boundedElementText(previous, 160, 80)) >= 40
 	)
 		return false;
-	const [textChars, anchorChars] = quickTextStats(element);
+	const { textChars, anchorChars } = walkText(element, { maxVisits: 2_000 });
 	if (textChars < 20 || anchorChars / textChars <= 0.7) return false;
 	return !(
 		textChars >= 120 && /[.!?]/.test(boundedElementText(element, 512, 400))
@@ -258,38 +255,74 @@ function containsHeading(
 	return false;
 }
 
-function quickTextStats(root: Element): readonly [number, number] {
+export function walkText(
+	root: Node,
+	options: { maxVisits: number; collectChars?: number },
+): {
+	parts: string[];
+	textChars: number;
+	anchorChars: number;
+	truncated: boolean;
+} {
+	const collect = options.collectChars ?? 0;
+	const parts: string[] = [];
 	let textChars = 0;
 	let anchorChars = 0;
+	let outputChars = 0;
+	let clipped = false;
+	let visits = 0;
 	const stack: Array<{ node: Node; inAnchor: boolean }> = [
 		{ node: root, inAnchor: false },
 	];
-	let visits = 0;
-	while (stack.length > 0 && visits++ < 2_000) {
+	while (
+		stack.length > 0 &&
+		visits++ < options.maxVisits &&
+		(collect === 0 || outputChars < collect)
+	) {
 		const frame = stack.pop()!;
 		if (frame.node.nodeType === textNode) {
-			const chars = countTextChars(frame.node.textContent ?? "");
+			const raw = frame.node.textContent ?? "";
+			const value = collect ? raw.slice(0, collect - outputChars) : raw;
+			if (collect) {
+				clipped ||= value.length < raw.length;
+				parts.push(value);
+				outputChars += value.length;
+			}
+			const chars = countTextChars(value);
 			textChars += chars;
 			if (frame.inAnchor) anchorChars += chars;
 			continue;
 		}
 		if (!isElement(frame.node) || shouldSkipElement(frame.node)) continue;
 		const inAnchor = frame.inAnchor || tagName(frame.node) === "a";
-		const children = frame.node.childNodes;
-		const remaining = Math.max(0, 2_000 - visits);
-		let pushed = 0;
-		for (
-			let index = children.length - 1;
-			index >= 0 && pushed < remaining;
-			index--
-		) {
-			const child = children[index];
-			if (!child) continue;
-			stack.push({ node: child, inAnchor });
-			pushed++;
-		}
+		pushAnchorFrames(stack, frame.node, options.maxVisits - visits, inAnchor);
 	}
-	return [textChars, anchorChars];
+	return {
+		parts,
+		textChars,
+		anchorChars,
+		truncated: clipped || visits >= options.maxVisits || stack.length > 0,
+	};
+}
+
+function pushAnchorFrames(
+	stack: Array<{ node: Node; inAnchor: boolean }>,
+	element: Element,
+	limit: number,
+	inAnchor: boolean,
+) {
+	const children = element.childNodes;
+	let pushed = 0;
+	for (
+		let index = children.length - 1;
+		index >= 0 && pushed < Math.max(0, limit);
+		index--
+	) {
+		const child = children[index];
+		if (!child) continue;
+		stack.push({ node: child, inAnchor });
+		pushed++;
+	}
 }
 
 const allowedSchemes = wordSet("http: https: mailto:");
@@ -349,15 +382,6 @@ export function tidyInline(value: string) {
 		.replace(/[ \r\t\f]+/g, " ")
 		.replace(/ *\n+ */g, "\n")
 		.replace(/ +([,.;:!?)](?:\s|$))/g, "$1")
-		.replace(/([.)]["”]?)(?=(?:Default|Can be|Properties of)\b)/g, "$1 ")
-		.replace(/\b(Default: (?:`[^`\n]+`|[^.\n]{1,80})) Can be\b/g, "$1. Can be")
-		.replace(/\bProperties of (`[^`\n]+`)(?= `)/g, "\nProperties of $1\n")
-		.replace(
-			/\nProperties of (`[^`\n]+`)\n([\s\S]*?)(?=\nProperties of `|$)/g,
-			(_match, label, body) =>
-				`\nProperties of ${label}\n${body.replace(/ (?=(`[^`\n]+`) (?:object|array|string|boolean|integer|number|null)\b)/g, "\n")}`,
-		)
-		.replace(/@@F(\d+)@@\n? ?\. (?=[A-Z])/g, "@@F$1@@\n")
 		.replace(/@@F(\d+)@@/g, (_match, index) => blocks[Number(index)] ?? "")
 		.trim();
 }
@@ -466,4 +490,46 @@ export function maxBacktickRun(value: string) {
 	for (const match of value.matchAll(/`+/g))
 		longest = Math.max(longest, match[0].length);
 	return longest;
+}
+
+export function srcsetCandidates(input: string, limit = 100) {
+	const out: Array<{ url: string; descriptor: string }> = [];
+	const whitespace = (char: string) => /[\t\n\f\r ]/.test(char);
+	let index = 0;
+	while (index < input.length && out.length < limit) {
+		while (
+			index < input.length &&
+			(whitespace(input[index]!) || input[index] === ",")
+		)
+			index++;
+		const start = index;
+		while (index < input.length && !whitespace(input[index]!)) index++;
+		let url = input.slice(start, index);
+		let ended = false;
+		while (url.endsWith(",")) {
+			url = url.slice(0, -1);
+			ended = true;
+		}
+		if (!url) continue;
+		if (ended) {
+			out.push({ url, descriptor: "" });
+			continue;
+		}
+		while (index < input.length && whitespace(input[index]!)) index++;
+		const descriptorStart = index;
+		let parentheses = 0;
+		while (index < input.length) {
+			const char = input[index++]!;
+			if (char === "(") parentheses++;
+			else if (char === ")") parentheses = Math.max(0, parentheses - 1);
+			else if (char === "," && parentheses === 0) break;
+		}
+		out.push({
+			url,
+			descriptor: input
+				.slice(descriptorStart, input[index - 1] === "," ? index - 1 : index)
+				.trim(),
+		});
+	}
+	return out;
 }

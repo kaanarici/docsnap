@@ -281,11 +281,6 @@ function collectText(
 		if (!isElement(node) || (node !== root && shouldSkipElement(node))) {
 			continue;
 		}
-		const codeKey = inlineCodeKeyText(node);
-		if (codeKey) {
-			chars = pushCollectedText(chunks, codeKey, chars, maxChars);
-			continue;
-		}
 		const tag = tagName(node);
 		if (options.codeLines && tag === "br") {
 			if (!chunks.at(-1)?.endsWith("\n"))
@@ -331,14 +326,6 @@ function isCodeMarkupWhitespace(node: Node, value: string) {
 			/^(?:div|p)$/.test(tagName(child)),
 		)
 	);
-}
-
-function inlineCodeKeyText(element: Element) {
-	if (element.getAttribute("data-testid") !== "docs-inline-code-key") return "";
-	return Array.from(element.children).reduce((best, child) => {
-		const text = child.textContent?.trim() ?? "";
-		return text.length > best.length ? text : best;
-	}, "");
 }
 
 function languageToken(element: Element) {

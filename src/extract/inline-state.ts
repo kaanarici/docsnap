@@ -1,16 +1,15 @@
 import { isJsonObject, isJsonString, type JsonValue } from "../core/json.ts";
 import { uniqueByWhitespace, whitespaceKey, wordCount } from "../core/text.ts";
-import type { InlineStateSource } from "../core/types.ts";
 import {
-	assignedExpression,
 	decodeLooseEscapes,
 	nextFlightChunks,
 	parseJson,
-	parseJsonExpression,
 	type ScriptBlock,
 	stringLiterals,
 } from "./inline-state-scan.ts";
 import { cleanInlineText, looksLikeTailwind } from "./inline-state-text.ts";
+
+type InlineStateSource = "next-data" | "rsc" | "ld-json" | "json";
 
 type TextCandidate = {
 	text: string;
@@ -20,7 +19,6 @@ type TextCandidate = {
 
 type ExtractionCandidate = {
 	markdown: string;
-	source: InlineStateSource;
 	words: number;
 	weight: number;
 };
@@ -50,19 +48,12 @@ export function extractInlineState(
 	html: string,
 	url: string,
 	prepared: { scripts: ScriptBlock[]; title: string | undefined },
-): { markdown: string; source: InlineStateSource } | undefined {
+): string | undefined {
 	const scripts = prepared.scripts;
 	const title = prepared.title ?? titleFromUrl(url);
 	const candidates = [
-		jsonScriptCandidate(scripts, title, "__NEXT_DATA__", "next-data"),
+		jsonScriptCandidate(scripts, title, "__NEXT_DATA__"),
 		rscCandidate(html, title),
-		assignmentCandidate(scripts, title, "nuxt", ["__NUXT__"]),
-		jsonScriptCandidate(scripts, title, "__NUXT_DATA__", "nuxt"),
-		assignmentCandidate(scripts, title, "remix", ["__remixContext"]),
-		assignmentCandidate(scripts, title, "redux", [
-			"__PRELOADED_STATE__",
-			"__APOLLO_STATE__",
-		]),
 		ldJsonCandidate(scripts, title),
 		genericJsonCandidate(scripts, title),
 	].filter((candidate): candidate is ExtractionCandidate => Boolean(candidate));
@@ -70,7 +61,7 @@ export function extractInlineState(
 	const best = candidates.sort(
 		(a, b) => b.words - a.words || b.weight - a.weight,
 	)[0]!;
-	return { markdown: best.markdown, source: best.source };
+	return best.markdown;
 }
 
 function rscCandidate(html: string, title: string | undefined) {
@@ -80,30 +71,7 @@ function rscCandidate(html: string, title: string | undefined) {
 	for (const value of stringLiterals(decodeLooseEscapes(payload))) {
 		addReadable(texts, value, "", "rsc");
 	}
-	return assembleCandidate("rsc", title, texts);
-}
-
-function assignmentCandidate(
-	scripts: ScriptBlock[],
-	title: string | undefined,
-	source: InlineStateSource,
-	names: string[],
-) {
-	for (const script of scripts) {
-		for (const name of names) {
-			const expression = assignedExpression(script.body, name);
-			if (!expression) continue;
-			const parsed = parseJsonExpression(expression);
-			if (parsed !== undefined) return objectCandidate(source, title, parsed);
-			const texts: TextCandidate[] = [];
-			for (const value of stringLiterals(expression)) {
-				addReadable(texts, value, "", source);
-			}
-			const candidate = assembleCandidate(source, title, texts);
-			if (candidate) return candidate;
-		}
-	}
-	return undefined;
+	return assembleCandidate(title, texts);
 }
 
 function ldJsonCandidate(scripts: ScriptBlock[], title: string | undefined) {
@@ -114,7 +82,7 @@ function ldJsonCandidate(scripts: ScriptBlock[], title: string | undefined) {
 		if (parsed === undefined) continue;
 		collectStructuredData(parsed, texts);
 	}
-	return assembleCandidate("ld-json", title, texts);
+	return assembleCandidate(title, texts);
 }
 
 function genericJsonCandidate(
@@ -125,7 +93,6 @@ function genericJsonCandidate(
 	for (const script of scripts) {
 		if (
 			script.id === "__NEXT_DATA__" ||
-			script.id === "__NUXT_DATA__" ||
 			/\bapplication\/ld\+json\b/i.test(script.type) ||
 			!/\bapplication\/json\b/i.test(script.type)
 		) {
@@ -134,31 +101,21 @@ function genericJsonCandidate(
 		const parsed = parseJson(script.body);
 		if (parsed !== undefined) collectValue(parsed, texts);
 	}
-	return assembleCandidate("json", title, texts);
+	return assembleCandidate(title, texts);
 }
 
 function jsonScriptCandidate(
 	scripts: ScriptBlock[],
 	title: string | undefined,
 	id: string,
-	source: InlineStateSource,
 ) {
 	const script = scripts.find((item) => item.id === id);
 	if (!script) return undefined;
 	const parsed = parseJson(script.body);
-	return parsed === undefined
-		? undefined
-		: objectCandidate(source, title, parsed);
-}
-
-function objectCandidate(
-	source: InlineStateSource,
-	title: string | undefined,
-	value: JsonValue,
-) {
+	if (parsed === undefined) return undefined;
 	const texts: TextCandidate[] = [];
-	collectValue(value, texts);
-	return assembleCandidate(source, title, texts);
+	collectValue(parsed, texts);
+	return assembleCandidate(title, texts);
 }
 
 function collectStructuredData(value: JsonValue, out: TextCandidate[]): void {
@@ -248,7 +205,6 @@ function addReadable(
 }
 
 function assembleCandidate(
-	source: InlineStateSource,
 	title: string | undefined,
 	texts: TextCandidate[],
 ): ExtractionCandidate | undefined {
@@ -291,12 +247,7 @@ function assembleCandidate(
 	].filter((item): item is string => Boolean(item?.trim()));
 	const markdown = uniqueByWhitespace(parts).join("\n\n").trim();
 	if (wordCount(markdown) < 40) return undefined;
-	return {
-		markdown,
-		source,
-		words: proseWords,
-		weight,
-	};
+	return { markdown, words: proseWords, weight };
 }
 
 type ComparableText = {

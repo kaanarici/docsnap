@@ -3,16 +3,13 @@ import { wordCount } from "../core/text.ts";
 
 export function qualityReasons(markdown: string, title?: string) {
 	const words = wordCount(markdown);
-	const codeBlocks = (markdown.match(/```/g) ?? []).length / 2;
+	const codeBlocks = fencedBlockCount(markdown);
 	const links = markdownLinkCount(markdown);
 	const reasons: string[] = [];
 
 	if (!title) reasons.push("missing title");
 	if (words < 40) {
 		reasons.push("thin content");
-	}
-	if (links > Math.max(20, words / 8)) {
-		reasons.push("high link density");
 	}
 	if (codeBlocks % 1 !== 0) {
 		reasons.push("unbalanced code fences");
@@ -22,6 +19,31 @@ export function qualityReasons(markdown: string, title?: string) {
 		if (thin >= 0) reasons.splice(thin, 1);
 	}
 	return reasons;
+}
+
+function fencedBlockCount(markdown: string) {
+	let open: { marker: string; length: number } | undefined;
+	let blocks = 0;
+	for (const line of markdown.split("\n")) {
+		const match = line.match(/^ {0,3}(`{3,}|~{3,})/);
+		if (!match) continue;
+		const fence = match[1]!;
+		if (!open) {
+			open = { marker: fence[0]!, length: fence.length };
+			continue;
+		}
+		const trimmed = line.trim();
+		const marker = open.marker;
+		if (
+			fence[0] === marker &&
+			fence.length >= open.length &&
+			[...trimmed].every((char) => char === marker)
+		) {
+			blocks++;
+			open = undefined;
+		}
+	}
+	return open ? blocks + 0.5 : blocks;
 }
 
 export function isLowQuality(reasons: readonly string[]) {

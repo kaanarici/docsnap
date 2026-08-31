@@ -1,8 +1,6 @@
 import { wordCount } from "../core/text.ts";
-import { decodeEntities } from "./inline-state-scan.ts";
 import {
 	codeBlock,
-	codeBlockFromText,
 	inlineMarkdown,
 	renderTable,
 } from "./structured-fallback-render.ts";
@@ -39,13 +37,28 @@ export function structuredFallback(document: Document, baseUrl: string) {
 	const candidates = Array.from(
 		document.querySelectorAll("main,[role=main],article"),
 	).filter((candidate) => !shouldSkipElement(candidate));
+	const semanticArticles = candidates.filter(isSemanticArticle);
+	const selectedCandidates =
+		semanticArticles.length > 0 ? semanticArticles : candidates;
 	let best: { markdown: string; score: number; truncated: boolean } | undefined;
-	for (const candidate of candidates.length > 0 ? candidates : [root]) {
+	for (const candidate of selectedCandidates.length > 0
+		? selectedCandidates
+		: [root]) {
 		const serialized = serializeRoot(candidate, baseUrl);
 		const markdown = serialized.markdown.trim();
 		const stats = markdownStats(markdown);
+		const contentIndex =
+			candidate !== root &&
+			Boolean(candidate.querySelector("h1")) &&
+			candidate.querySelectorAll("a").length >= 5;
 		const limit =
-			candidate === root ? 0.5 : markdown.length >= 2_000 ? 0.99 : 0.8;
+			candidate === root
+				? 0.5
+				: contentIndex
+					? 1
+					: markdown.length >= 2_000
+						? 0.99
+						: 0.8;
 		const minText = /^```/m.test(markdown) ? 20 : 40;
 		const score = stats.text - stats.linked;
 		if (
@@ -61,6 +74,15 @@ export function structuredFallback(document: Document, baseUrl: string) {
 		markdown: best?.markdown ?? "",
 		truncated: best?.truncated ?? false,
 	};
+}
+
+function isSemanticArticle(candidate: Element) {
+	if (tagName(candidate) !== "article") return false;
+	if (!candidate.querySelector("h1")) return false;
+	const prose = Array.from(candidate.querySelectorAll("p"))
+		.map((paragraph) => paragraph.textContent ?? "")
+		.join(" ");
+	return wordCount(prose) >= 20;
 }
 
 function markdownStats(markdown: string) {
@@ -92,7 +114,6 @@ function serializeRoot(root: Element, baseUrl: string) {
 			continue;
 		}
 		if (!isElement(node)) continue;
-		if (isCodeEditorChrome(node) || isCtaOnlyChrome(node)) continue;
 		if (
 			node !== root &&
 			(shouldSkipElement(node) || isLinkDominatedContainer(node))
@@ -135,8 +156,6 @@ function renderElement(
 	}
 	const common = commonBlock(element, tag, baseUrl, budget);
 	if (common !== undefined) return common;
-	const editorCode = codeEditorBlock(element);
-	if (editorCode) return editorCode;
 	if (tag === "ul" || tag === "ol")
 		return renderList(element, tag === "ol", baseUrl, budget);
 	if (tag === "li")
@@ -162,42 +181,6 @@ function commonBlock(
 	if (tag === "dl") return renderDefinitionList(element, baseUrl, budget);
 	return undefined;
 }
-
-function isCodeEditorChrome(element: Element) {
-	if (!element.closest(codeEditorSelector)) return false;
-	const text = collapseWhitespace(element.textContent ?? "");
-	return (
-		(tagName(element) === "label" && text === "Edit code") ||
-		(element.getAttribute("aria-live")?.toLowerCase() === "polite" &&
-			/^Press Enter to start editing$/i.test(text))
-	);
-}
-
-function isCtaOnlyChrome(element: Element) {
-	if (element.getAttribute("data-component-part") !== "card-cta") return false;
-	const text = collapseWhitespace(element.textContent ?? "").toLowerCase();
-	return /^(?:learn more|read more|view docs|view documentation)$/.test(text);
-}
-
-function codeEditorBlock(element: Element) {
-	if (tagName(element) !== "textarea" || !element.closest(codeEditorSelector))
-		return "";
-	const source = decodeEntities(element.textContent ?? "");
-	if (!/<[A-Z][\w.:-]*(?:\s|>|\/)/.test(source)) return "";
-	const language =
-		element.parentElement
-			?.querySelector("pre code[class*='language-']")
-			?.getAttribute("class")
-			?.match(/(?:^|\s)language-([A-Za-z0-9_#+.-]{1,32})(?=$|\s)/)?.[1] ??
-		"jsx";
-	return codeBlockFromText(
-		source.replace(/\r\n?/g, "\n").replace(/>\s+</g, ">\n<").trim(),
-		language,
-	);
-}
-
-const codeEditorSelector =
-	".MuiCode-root,.scrollContainer,.npm__react-simple-code-editor__textarea";
 
 function renderDefinitionList(
 	list: Element,
@@ -372,20 +355,12 @@ function dropStandaloneChromeBlocks(blocks: string[]) {
 	const out: string[] = [];
 	for (let index = 0; index < blocks.length; index++) {
 		const block = blocks[index]!;
-		if (feedbackFooterStartPattern.test(block)) break;
 		if (standaloneChromeBlockPattern.test(block)) continue;
-		if (/^Select [A-Za-z][A-Za-z ]{0,40} Version:?$/i.test(block)) {
-			if (versionSelectorChoicePattern.test(blocks[index + 1] ?? "")) index++;
-			continue;
-		}
 		out.push(block);
 	}
 	return out;
 }
 
-const versionSelectorChoicePattern = /^Version [A-Za-z0-9_.-]+(?: \([^)]+\))?$/;
-const feedbackFooterStartPattern =
-	/^(?:#{2,3} Help improve MDN|\[Edit this page on GitHub]\(|\d+ contributors?$|Last edited by \[)/i;
 const standaloneChromeBlockPattern =
 	/^(?:#{1,6}\s*)?(?:copy as markdown|copy page as markdown(?: \[open in (?:chatgpt|claude|cursor)]\([^)]+\))*|copy to clipboard|copied!|on this page|tool navigation|in this article|table of contents|wrap text)$/i;
 
