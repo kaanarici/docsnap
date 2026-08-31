@@ -76,13 +76,13 @@ export async function discoverLlms(
 				if (!seen.has(link)) queue.push(link);
 				continue;
 			}
-			if (!pathAllowed(link, config)) continue;
 			if (shouldExpandIndex(link, corpusBase, seen, urls, scanLimit)) {
-				urls.add(link);
 				queue.push(link);
+				if (pathAllowed(link, config)) urls.add(link);
 				if (urls.size >= scanLimit) break;
 				continue;
 			}
+			if (!pathAllowed(link, config)) continue;
 			urls.add(link);
 			if (urls.size >= scanLimit) break;
 		}

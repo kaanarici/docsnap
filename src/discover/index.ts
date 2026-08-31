@@ -133,7 +133,23 @@ async function discoverRawRun(
 
 	const seedResponse = await fetchText(inputSeed, config);
 	if (!seedResponse.ok) {
-		return { urls: [seedEntry(inputSeed, "seed", seedResponse)] };
+		const failedSeed = seedEntry(inputSeed, "seed", seedResponse);
+		if (deferInitialLlms(config, inputSeed)) return { urls: [failedSeed] };
+		const listed = await discoverLlmsCorpus(
+			inputSeed,
+			inputSeed,
+			scopeFromSeed(inputSeed),
+			config,
+			llmsOptions,
+			attemptLimit,
+		);
+		if (llmsIsCorpus(listed, config)) {
+			return {
+				urls: seedFirstCorpus(failedSeed, listed, config, attemptLimit),
+				truncated: Boolean(llmsOptions.truncated),
+			};
+		}
+		return { urls: [failedSeed] };
 	}
 
 	const resolved = await resolveHtmlSeed(

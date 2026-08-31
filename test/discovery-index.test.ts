@@ -115,6 +115,48 @@ describe("discovery index policy", () => {
 		]);
 	});
 
+	test("expands a filtered-out section index to reach matching pages", async () => {
+		const origin = serve({
+			"/": { body: "<main>Home</main>" },
+			"/llms.txt": {
+				type: "text/markdown",
+				body: "# Docs\n\n- [Index](/index.md)",
+			},
+			"/index.md": {
+				type: "text/markdown",
+				body: "- [A](/docs/api/a)\n- [B](/docs/api/b)\n- [C](/docs/api/c)",
+			},
+		});
+		const config = siteConfig(origin);
+		config.include = ["/docs/api/**"];
+
+		expect(await listed(await startDiscovery(config))).toEqual([
+			{ path: "/", source: "seed", wasSeed: true },
+			{ path: "/docs/api/a", source: "llms", wasSeed: false },
+			{ path: "/docs/api/b", source: "llms", wasSeed: false },
+			{ path: "/docs/api/c", source: "llms", wasSeed: false },
+		]);
+	});
+
+	test("falls back to llms.txt when the seed page itself fails", async () => {
+		const origin = serve({
+			"/llms.txt": {
+				type: "text/markdown",
+				body: "# Docs\n\n- [One](/one)\n- [Two](/two)\n- [Three](/three)",
+			},
+			"/one": { body: "<main>One</main>" },
+			"/two": { body: "<main>Two</main>" },
+			"/three": { body: "<main>Three</main>" },
+		});
+
+		expect(await listed(await startDiscovery(siteConfig(origin)))).toEqual([
+			{ path: "/", source: "seed", wasSeed: true },
+			{ path: "/one", source: "llms", wasSeed: false },
+			{ path: "/two", source: "llms", wasSeed: false },
+			{ path: "/three", source: "llms", wasSeed: false },
+		]);
+	});
+
 	test("keeps the explicit seed and returns an llms.txt corpus without crawling", async () => {
 		const origin = serve({
 			"/": {

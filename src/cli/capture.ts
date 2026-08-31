@@ -165,6 +165,7 @@ function captureData(summary: RunSummary) {
 		written: summary.written,
 		failed: summary.failed,
 		lowQuality: summary.lowQuality,
+		qualityWarnings: summary.qualityWarnings || undefined,
 		maxReached: summary.maxReached,
 		discoveryTruncated: summary.discoveryTruncated || undefined,
 		stopReason: summary.stopReason,

@@ -101,11 +101,12 @@ export async function renderChromePage(
 	}
 	if (!(await ensureChrome(session, config)) || !session.browser) return;
 	session.attempted++;
+	const timeout = AbortSignal.timeout(
+		Math.max(1, Math.min(config.timeoutMs, Math.ceil(remainingMs))),
+	);
 	const rendered = await session.browser.renderPage(input.result, {
 		explicitSeed: input.wasSeed === true,
-		signal: AbortSignal.timeout(
-			Math.max(1, Math.min(config.timeoutMs, Math.ceil(remainingMs))),
-		),
+		signal: config.signal ? AbortSignal.any([timeout, config.signal]) : timeout,
 	});
 	session.renderMs += rendered.metrics.renderMs;
 	session.truncated ||= rendered.metrics.truncated;

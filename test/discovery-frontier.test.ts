@@ -162,7 +162,7 @@ describe("discovery frontier", () => {
 		expect(result.summary).toMatchObject({
 			ok: false,
 			written: 1,
-			failed: 2,
+			failed: 4,
 			discoveryTruncated: true,
 			stopReason: "rate_limited",
 		});

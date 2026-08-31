@@ -136,11 +136,12 @@ async function runPipelineLocked(
 	let captured = 0;
 	let stopReason: PipelineResult["summary"]["stopReason"];
 	let retryAt: string | undefined;
-	capture: while (captured < config.max) {
+	while (captured < config.max) {
 		signal?.throwIfAborted();
 		const deficit = config.max - captured;
 		const discovered = await takeBatch(deficit);
 		if (!discovered) break;
+		const batchResults: FetchedUrl[] = [];
 		for await (const fetched of fetchBatches(
 			discovered,
 			config,
@@ -148,9 +149,7 @@ async function runPipelineLocked(
 			(url) => resourceAllowed(url, config),
 		)) {
 			signal?.throwIfAborted();
-			const allRateLimited =
-				fetched.length > 0 &&
-				fetched.every((page) => !page.result.ok && page.result.status === 429);
+			batchResults.push(...fetched);
 			const extracted = await extractFetched(
 				fetched,
 				config,
@@ -164,11 +163,16 @@ async function runPipelineLocked(
 				(record) =>
 					record.ok && (config.maxExplicit || record.source !== "llms"),
 			).length;
-			if (allRateLimited) {
-				stopReason = "rate_limited";
-				retryAt = latestRetryAt(fetched);
-				break capture;
-			}
+		}
+		const allRateLimited =
+			batchResults.length > 0 &&
+			batchResults.every(
+				(page) => !page.result.ok && page.result.status === 429,
+			);
+		if (allRateLimited) {
+			stopReason = "rate_limited";
+			retryAt = latestRetryAt(batchResults);
+			break;
 		}
 	}
 	pageRecords.sort(
