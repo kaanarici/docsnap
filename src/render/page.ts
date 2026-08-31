@@ -1,5 +1,5 @@
-import { srcsetCandidates } from "../discover/nav.ts";
 import { appShellDom } from "../extract/app-shell.ts";
+import { srcsetCandidates } from "../extract/structured-fallback-shared.ts";
 
 const maxRenderedDomNodes = 100_000;
 

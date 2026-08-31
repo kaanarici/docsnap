@@ -24,19 +24,19 @@ import {
 	realPathIsInside,
 	resolveSafeRelativePath,
 } from "../core/fs-safety.ts";
+import { InputError } from "../core/input-error.ts";
 import { runBounded } from "../core/parallel.ts";
 import type {
-	InjectionSignal,
 	PageOutput,
 	PipelineConfig,
 	RedirectHop,
 	RunRecord,
 	RunSummary,
 } from "../core/types.ts";
-import { corpusLimits } from "../corpus/access.ts";
 import { validatePublicHttpUrl } from "../security/url.ts";
-import { retiredRunFiles, runFiles } from "./files.ts";
+import { runFiles } from "./files.ts";
 import { type PriorState, readPriorOutput } from "./prior.ts";
+import { corpusLimits } from "./read.ts";
 
 export type StagedPages = {
 	outputs: PageOutput[];
@@ -50,15 +50,38 @@ type StagedWrite = { target: string; temp?: string };
 
 export async function prepareOutput(config: PipelineConfig): Promise<void> {
 	assertOutputRootSafe(config);
-	if (config.dryRun) return;
 	const outDir = resolve(config.outDir);
+	try {
+		if (!(await lstat(outDir)).isDirectory()) {
+			throw new InputError(
+				`Output path is not a directory: ${config.outDir}`,
+				"Choose a directory path with --out.",
+			);
+		}
+	} catch (error) {
+		if (!isNotFound(error)) throw error;
+	}
 	await assertSafeOutputRoot(outDir, config.outDir);
 	if (config.clean) assertSafeCleanDir(outDir, config.outDir);
 	const mutationError = `Refusing externally writable output path: ${config.outDir}`;
-	await assertTrustedMutationPath(outDir, mutationError);
-	await mkdir(outDir, { recursive: true, mode: 0o700 });
-	await assertSafeOutputRoot(outDir, config.outDir);
-	await assertTrustedMutationPath(outDir, mutationError);
+	try {
+		await assertTrustedMutationPath(outDir, mutationError);
+		await mkdir(outDir, { recursive: true, mode: 0o700 });
+		await assertSafeOutputRoot(outDir, config.outDir);
+		await assertTrustedMutationPath(outDir, mutationError);
+	} catch (error) {
+		throw asOutputTrustError(error, mutationError);
+	}
+}
+
+function asOutputTrustError(error: unknown, mutationError: string) {
+	if (!(error instanceof Error) || !error.message.startsWith(mutationError)) {
+		return error;
+	}
+	return new InputError(
+		error.message,
+		"Remove group and world write access from the directory the error names, or pass --out with a directory you own, such as one under your home directory.",
+	);
 }
 
 export async function outputDirHasContent(outputDir: string): Promise<boolean> {
@@ -83,7 +106,6 @@ export function assertOutputRootSafe(config: PipelineConfig): void {
 export async function acquireOutputLock(
 	config: PipelineConfig,
 ): Promise<DirLock | undefined> {
-	if (config.dryRun) return undefined;
 	const outDir = resolve(config.outDir);
 	return acquireDirLock({
 		path: join(dirname(outDir), `.${basename(outDir)}.docsnap-lock`),
@@ -101,9 +123,6 @@ export async function stagePages(
 	config: PipelineConfig,
 ): Promise<StagedPages> {
 	assertPageOutputs(outputs, config);
-	if (config.dryRun) {
-		return { outputs, skippedWrites: 0, writes: [], outDir: config.outDir };
-	}
 	const cleanStage = config.clean ? await createCleanStage(config) : undefined;
 	const writes: StagedWrite[] = [];
 	const stagedOutputs: PageOutput[] = [];
@@ -153,7 +172,6 @@ export async function commitStagedOutput(
 	summary: RunSummary,
 	config: PipelineConfig,
 ): Promise<void> {
-	if (config.dryRun) return;
 	if (resolve(staged.outDir) !== resolve(config.outDir)) {
 		throw new Error("Staged output directory changed before commit");
 	}
@@ -182,11 +200,6 @@ export async function commitStagedOutput(
 	}
 	await commitWrites(staged.writes, config.outDir);
 	staged.writes.length = 0;
-	await Promise.all(
-		retiredRunFiles.map((file) =>
-			rm(join(config.outDir, file), { force: true }).catch(() => {}),
-		),
-	);
 }
 
 export async function discardStagedOutput(staged: StagedPages): Promise<void> {
@@ -200,7 +213,7 @@ export async function stageStalePages(
 	prior: PriorState,
 	config: PipelineConfig,
 ): Promise<void> {
-	if (config.dryRun || config.clean || !prior.enabled) return;
+	if (config.clean || !prior.enabled) return;
 	const currentPaths = new Set(
 		staged.outputs.map((record) => record.outputPath),
 	);
@@ -238,19 +251,11 @@ type ManifestCollections = {
 	links: string[];
 	aliases?: string[];
 	redirects: RedirectHop[];
-	injectionSignals: InjectionSignal[];
 	qualityReasons: string[];
 };
 
 function compactManifestFields<T extends ManifestCollections>(record: T) {
-	const {
-		links,
-		aliases = [],
-		redirects,
-		injectionSignals,
-		qualityReasons,
-		...fields
-	} = record;
+	const { links, aliases = [], redirects, qualityReasons, ...fields } = record;
 	const validLinks = publicManifestUrls(links);
 	const boundedLinks = boundedManifestUrls(validLinks);
 	return {
@@ -258,7 +263,6 @@ function compactManifestFields<T extends ManifestCollections>(record: T) {
 		links: boundedLinks,
 		aliases: aliases.length ? aliases : undefined,
 		redirects: redirects.length ? redirects : undefined,
-		injectionSignals: injectionSignals.length ? injectionSignals : undefined,
 		qualityReasons: qualityReasons.length ? qualityReasons : undefined,
 		linksCount:
 			boundedLinks.length < validLinks.length ? validLinks.length : undefined,
@@ -309,7 +313,11 @@ async function stagedRemoval(
 	return { target };
 }
 
-async function atomicWrite(path: string, body: string, root: string) {
+async function atomicWrite(
+	path: string,
+	body: string | Uint8Array,
+	root: string,
+) {
 	const staged = await stageAtomicWrite(path, body, root);
 	try {
 		await assertSafeParent(dirname(staged.target), resolve(root), path);
@@ -321,7 +329,7 @@ async function atomicWrite(path: string, body: string, root: string) {
 
 async function stageAtomicWrite(
 	path: string,
-	body: string,
+	body: string | Uint8Array,
 	root: string,
 ): Promise<StagedWrite & { temp: string }> {
 	const target = resolve(path);

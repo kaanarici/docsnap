@@ -1,6 +1,6 @@
 import { posix } from "node:path";
+import { hashContent } from "../core/hash.ts";
 import { replaceMarkdownLinks } from "../core/markdown.ts";
-import { hashContent } from "../core/snapshot.ts";
 import type { PathedPage } from "../core/types.ts";
 import { urlWithoutFragment } from "../core/url.ts";
 import { relativeMarkdownLink } from "./paths.ts";

@@ -27,21 +27,6 @@ export function markdownLinkHrefs(markdown: string, limit?: number): string[] {
 	return hrefs;
 }
 
-export function markdownImageHrefs(markdown: string, limit?: number): string[] {
-	const hrefs: string[] = [];
-	if (limit !== undefined && limit <= 0) return hrefs;
-	for (const link of markdownLinkSpans(markdown)) {
-		if (!isImage(markdown, link.start)) continue;
-		hrefs.push(link.href);
-		if (limit !== undefined && hrefs.length >= limit) break;
-	}
-	return hrefs;
-}
-
-export function* markdownHrefs(markdown: string): Generator<string> {
-	for (const link of markdownLinkSpans(markdown)) yield link.href;
-}
-
 export function markdownLinkCount(markdown: string): number {
 	let count = 0;
 	for (const link of markdownLinkSpans(markdown)) {

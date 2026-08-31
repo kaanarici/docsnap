@@ -1,11 +1,12 @@
 import { pruneCache } from "../cache/eviction.ts";
-import { buildPipelineConfig } from "../core/config.ts";
+import { buildPipelineConfig, type ConfigInput } from "../core/config.ts";
+import { failureCanRetry } from "../core/types.ts";
 import { discoverMap } from "../discover/map-run.ts";
-import type { MapInput } from "./args.ts";
 import { failureResult, successResult, writeResult } from "./result.ts";
 
-export async function runMap(input: MapInput) {
-	const config = buildPipelineConfig(input.config);
+export async function runMap(input: ConfigInput, signal?: AbortSignal) {
+	const built = buildPipelineConfig(input);
+	const config = signal ? { ...built, signal } : built;
 	let discovery: Awaited<ReturnType<typeof discoverMap>>;
 	try {
 		discovery = await discoverMap(config);
@@ -64,8 +65,8 @@ export async function runMap(input: MapInput) {
 		failureResult({
 			code: errors[0]?.failureKind?.toUpperCase() ?? "MAP_FAILED",
 			message: errors[0]?.error ?? "DocSnap found no usable URLs.",
-			retryable: errors[0]?.failureKind === "timeout",
-			suggestion: "Check that the URL is public and reachable, then retry.",
+			next: "Check that the URL is public and reachable, then retry.",
+			retryable: failureCanRetry(errors[0]?.failureKind),
 			details: result,
 		}),
 	);

@@ -8,9 +8,6 @@ function frontmatter(record: PageSuccess) {
 	const fields = {
 		title: record.title ?? "",
 		url: record.finalUrl,
-		injectionSignals: record.injectionSignals.length
-			? record.injectionSignals
-			: undefined,
 	};
 	return `---\n${Object.entries(fields)
 		.filter(([, value]) => value !== undefined)

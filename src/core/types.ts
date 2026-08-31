@@ -2,7 +2,6 @@ export const discoverySources = [
 	"seed",
 	"llms",
 	"sitemap",
-	"feed",
 	"nav",
 	"crawl",
 ] as const;
@@ -14,8 +13,6 @@ export function discoverySourceScore(source: DiscoverySource): number {
 			return 7;
 		case "sitemap":
 			return 5;
-		case "feed":
-			return 4;
 		case "nav":
 			return 3;
 		case "crawl":
@@ -51,21 +48,9 @@ export type PageKind = (typeof pageKinds)[number];
 
 export const byteSources = ["http", "chrome"] as const;
 
-export type ByteSource = (typeof byteSources)[number];
+type ByteSource = (typeof byteSources)[number];
 
-export const inlineStateSources = [
-	"next-data",
-	"rsc",
-	"nuxt",
-	"remix",
-	"redux",
-	"ld-json",
-	"json",
-] as const;
-
-export type InlineStateSource = (typeof inlineStateSources)[number];
-
-export const failureKinds = [
+const failureKinds = [
 	"blocked",
 	"empty",
 	"extract",
@@ -79,34 +64,10 @@ export const failureKinds = [
 
 export type FailureKind = (typeof failureKinds)[number];
 
-export const injectionSignals = [
-	"zero-width-text",
-	"unicode-tag-text",
-	"bidi-control",
-	"mixed-script-confusable",
-	"hidden-html-text",
-	"html-comment-instruction",
-	"instruction-override",
-	"fake-system-turn",
-	"ai-directed-instruction",
-	"tool-exfiltration-language",
-	"unsafe-link-scheme",
-	"encoded-injection-blob",
-	"opaque-encoded-blob",
-] as const;
-
-export type InjectionSignal = (typeof injectionSignals)[number];
-
-export function filterInjectionSignals(
-	value: import("./json.ts").JsonValue | undefined,
-): InjectionSignal[] {
-	return Array.isArray(value)
-		? value.filter(
-				(item): item is InjectionSignal =>
-					typeof item === "string" &&
-					injectionSignals.some((signal) => signal === item),
-			)
-		: [];
+export function failureCanRetry(
+	cause: FailureKind | "rate_limited" | undefined,
+): boolean {
+	return cause === "timeout" || cause === "fetch" || cause === "rate_limited";
 }
 
 export type HeaderMap = {
@@ -130,17 +91,14 @@ export type PipelineConfig = {
 	concurrency: number;
 	perOrigin: number;
 	clean: boolean;
-	dryRun: boolean;
 	pageOnly: boolean;
 	cache: boolean;
+	include: string[];
+	exclude: string[];
 	userAgent: string;
 	timeoutMs: number;
 	maxBytes: number;
-};
-
-export type CliOptions = {
-	quiet: boolean;
-	failOnInjectionSignal: boolean;
+	signal?: AbortSignal;
 };
 
 type FetchBase = {
@@ -178,7 +136,12 @@ export type FetchResult = FetchBase &
 				error?: never;
 				failureKind?: never;
 		  }
-		| { ok: false; error: string; failureKind: FailureKind }
+		| {
+				ok: false;
+				error: string;
+				failureKind: FailureKind;
+				retryAt?: string;
+		  }
 	);
 
 export type ConditionalRequest = {
@@ -187,7 +150,7 @@ export type ConditionalRequest = {
 	urls: string[];
 };
 
-export type DiscoveryMetadata = {
+type DiscoveryMetadata = {
 	publishedAt?: string;
 	updatedAt?: string;
 };
@@ -195,7 +158,7 @@ export type DiscoveryMetadata = {
 export type DiscoveryResourceSeed = {
 	url: string;
 	finalUrl: string;
-	source: Extract<DiscoverySource, "feed" | "llms">;
+	source: Extract<DiscoverySource, "llms">;
 };
 
 export type DiscoveredUrl = {
@@ -223,7 +186,6 @@ type PageBase = {
 	etag?: string;
 	lastModified?: string;
 	fetchedAt: string;
-	injectionSignals: InjectionSignal[];
 };
 
 export type PageSuccess = PageBase & {
@@ -261,29 +223,25 @@ export type RunRecord = PageOutput | PageFailure;
 
 export type RunSummary = {
 	ok: boolean;
-	message: string;
-	next: string;
+	generator: string;
 	seedUrl: string;
 	seed: SeedSummary;
 	outDir: string;
-	dryRun: boolean;
 	captureMode: "page" | "site";
 	userAgent: string;
+	include?: string[];
+	exclude?: string[];
 	generatedAt: string;
-	snapshotVersion: number;
-	rootHash: string;
-	corpusFiles: number;
-	corpusBytes: number;
 	max: number;
 	maxAppliesTo: "all" | "non-llms";
 	maxReached: boolean;
 	discoveryTruncated?: boolean;
 	stopReason?: "rate_limited";
+	retryAt?: string;
 	written: number;
 	failed: number;
 	lowQuality: number;
 	qualityWarnings: number;
-	injectionSignalPages: number;
 	byFailureKind: Partial<Record<FailureKind, number>>;
 	errors: Array<{ url: string; error: string; failureKind: FailureKind }>;
 	errorsOmitted?: number;
@@ -331,20 +289,6 @@ export type SeedSummary = {
 	error?: string;
 };
 
-export type CacheSummary = {
-	enabled: boolean;
-	dir: string | null;
-	hits: number;
-	misses: number;
-	stale: number;
-	revalidated: number;
-	written: number;
-	notStored: number;
-	bytesRead: number;
-	bytesWritten: number;
-	evictedBytes: number;
-};
-
 export type RefreshChangedPage = {
 	change: "new" | "changed" | "removed";
 	url: string;
@@ -355,7 +299,7 @@ export type RefreshChangedPage = {
 
 export type RefreshSummary = {
 	enabled: boolean;
-	reason?: "clean" | "missing_manifest" | "invalid_manifest";
+	reason?: "clean" | "missing_manifest" | "invalid_manifest" | "seed_mismatch";
 	new: number;
 	changed: number;
 	unchanged: number;

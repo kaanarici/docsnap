@@ -3,10 +3,8 @@ import { mkdir, readdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { resolveSafeRelativePath } from "../src/core/fs-safety.ts";
 import { partitionPageOutputs } from "../src/core/pipeline.ts";
-import { snapshotStats } from "../src/core/snapshot.ts";
-import { corpusLimits } from "../src/corpus/access.ts";
-import { readCorpus } from "../src/corpus/index.ts";
 import { runFiles } from "../src/output/files.ts";
+import { corpusLimits } from "../src/output/read.ts";
 import { discardStagedOutput, stagePages } from "../src/output/writer.ts";
 import { buildSummary } from "../src/report/summary.ts";
 import {
@@ -101,22 +99,17 @@ describe("output containment", () => {
 			ok: false,
 			failureKind: "too_large",
 		});
-		const snapshot = snapshotStats([
-			{ path: good.outputPath, body: good.rendered },
-		]);
-		const summary = buildSummary(
-			limited.records,
-			limited.outputs,
-			config,
-			snapshot,
-		);
+		const summary = buildSummary(limited.records, limited.outputs, config);
 		const failure = limited.records.find((record) => !record.ok);
 		if (!failure || failure.ok) throw new Error("expected oversized failure");
 		const runRecords = [good, failure];
 		await commitRun(limited.outputs, runRecords, summary, config);
-		const corpus = await readCorpus(root);
-		expect(corpus.records.filter((record) => record.ok)).toHaveLength(1);
-		expect(corpus.records.find((record) => !record.ok)).toMatchObject({
+		const records = (await readFile(join(root, runFiles.manifest), "utf8"))
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line));
+		expect(records.filter((record) => record.ok)).toHaveLength(1);
+		expect(records.find((record) => !record.ok)).toMatchObject({
 			failureKind: "too_large",
 		});
 	});
@@ -124,63 +117,59 @@ describe("output containment", () => {
 	test.each([
 		{ mode: "incremental", clean: false },
 		{ mode: "clean", clean: true },
-	])("leaves a valid prior corpus unchanged when $mode metadata preflight fails", async ({
-		clean,
-	}) => {
-		const root = await tempDir("staged-preflight");
-		const { page, summary } = await writeValidCorpus(root);
-		const original = await Promise.all([
-			readFile(join(root, page.outputPath), "utf8"),
-			readFile(join(root, runFiles.manifest), "utf8"),
-			readFile(join(root, runFiles.summary), "utf8"),
-		]);
-		const config = testConfig(root, { clean });
-		const next = testPage("# Updated\n\nNew content.");
-		await expect(
-			commitRun(
-				[next],
-				[next],
-				{
-					...summary,
-					userAgent: "x".repeat(corpusLimits.summaryBytes),
-				},
-				config,
-			),
-		).rejects.toThrow("summary.json exceeds the supported size");
-		expect(
-			await Promise.all([
+	])(
+		"leaves a valid prior corpus unchanged when $mode metadata preflight fails",
+		async ({ clean }) => {
+			const root = await tempDir("staged-preflight");
+			const { page, summary } = await writeValidCorpus(root);
+			const original = await Promise.all([
 				readFile(join(root, page.outputPath), "utf8"),
 				readFile(join(root, runFiles.manifest), "utf8"),
 				readFile(join(root, runFiles.summary), "utf8"),
-			]),
-		).toEqual(original);
-		expect(await transactionFiles(root)).toEqual([]);
-	});
+			]);
+			const config = testConfig(root, { clean });
+			const next = testPage("# Updated\n\nNew content.");
+			await expect(
+				commitRun(
+					[next],
+					[next],
+					{
+						...summary,
+						userAgent: "x".repeat(corpusLimits.summaryBytes),
+					},
+					config,
+				),
+			).rejects.toThrow("summary.json exceeds the supported size");
+			expect(
+				await Promise.all([
+					readFile(join(root, page.outputPath), "utf8"),
+					readFile(join(root, runFiles.manifest), "utf8"),
+					readFile(join(root, runFiles.summary), "utf8"),
+				]),
+			).toEqual(original);
+			expect(await transactionFiles(root)).toEqual([]);
+		},
+	);
 
 	test.each([
 		{ mode: "incremental", clean: false },
 		{ mode: "clean", clean: true },
 	])("commits a staged corpus in $mode mode", async ({ clean }) => {
 		const root = await tempDir("staged-commit");
-		const { summary } = await writeValidCorpus(root);
+		await writeValidCorpus(root);
 		await writeFile(join(root, "extra.txt"), "extra");
 		const config = testConfig(root, { clean });
 		const next = testPage("# Updated\n\nCommitted content.");
-		const snapshot = snapshotStats([
-			{ path: next.outputPath, body: next.rendered },
-		]);
 		await commitRun(
 			[next],
 			[next],
-			{
-				...summary,
-				rootHash: snapshot.rootHash,
-				corpusFiles: snapshot.files,
-				corpusBytes: snapshot.bytes,
-			},
+			buildSummary([next], [next], config),
 			config,
 		);
-		await expect(readCorpus(root)).resolves.toHaveProperty("records.length", 1);
+		const records = (await readFile(join(root, runFiles.manifest), "utf8"))
+			.trim()
+			.split("\n");
+		expect(records).toHaveLength(1);
 		expect(await transactionFiles(root)).toEqual([]);
 		if (clean) {
 			await expect(readFile(join(root, "extra.txt"), "utf8")).rejects.toThrow();

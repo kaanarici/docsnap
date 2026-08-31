@@ -6,8 +6,6 @@ export const corpusLimits = {
 	summaryBytes: 2 * 1024 * 1024,
 	manifestBytes: 16 * 1024 * 1024,
 	pageBytes: 2 * 1024 * 1024,
-	searchPages: 2_000,
-	searchBytes: 32 * 1024 * 1024,
 };
 
 export async function readBoundedCorpusFile(
@@ -15,27 +13,11 @@ export async function readBoundedCorpusFile(
 	outputPath: string,
 	maxBytes: number,
 ): Promise<string> {
-	const base = await realpathOrMessage(outputDir, "output_dir does not exist");
-	return readBoundedCorpusFileFromRealRoot(
+	const realOutputDir = await realpathOrMessage(
 		outputDir,
-		base,
-		outputPath,
-		maxBytes,
+		"output_dir does not exist",
 	);
-}
-
-export async function readBoundedCorpusFileFromRealRoot(
-	outputDir: string,
-	realOutputDir: string,
-	outputPath: string,
-	maxBytes: number,
-): Promise<string> {
-	const file = await corpusFileFromRealRoot(
-		outputDir,
-		realOutputDir,
-		outputPath,
-		maxBytes,
-	);
+	const file = await corpusFile(outputDir, realOutputDir, outputPath, maxBytes);
 	let handle: Awaited<ReturnType<typeof open>>;
 	try {
 		handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -115,7 +97,7 @@ async function readBoundedHandle(
 	return buffer.subarray(0, bytesRead).toString("utf8");
 }
 
-async function corpusFileFromRealRoot(
+async function corpusFile(
 	outputDir: string,
 	realOutputDir: string,
 	outputPath: string,
@@ -139,9 +121,8 @@ async function corpusFileFromRealRoot(
 	}
 	if (!info.isFile())
 		throw new Error(`Corpus path is not a file: ${outputPath}`);
-	if (info.size > maxBytes) {
+	if (info.size > maxBytes)
 		throw new Error(readLimitMessage(maxBytes, outputPath));
-	}
 	return file;
 }
 

@@ -74,7 +74,7 @@ export async function refreshSummary(
 	return summary;
 }
 
-export function emptyRefreshSummary(
+function emptyRefreshSummary(
 	reason: RefreshSummary["reason"] = "missing_manifest",
 ): RefreshSummary {
 	return {

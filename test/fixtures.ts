@@ -2,7 +2,7 @@ import { onTestFinished } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hashContent, snapshotStats } from "../src/core/snapshot.ts";
+import { hashContent } from "../src/core/hash.ts";
 import type {
 	FetchResult,
 	PageFailure,
@@ -49,9 +49,10 @@ export function testConfig(
 		concurrency: 1,
 		perOrigin: 1,
 		clean: false,
-		dryRun: false,
 		pageOnly: true,
 		cache: false,
+		include: [],
+		exclude: [],
 		userAgent: "docsnap-test/0.2",
 		timeoutMs: 1_000,
 		maxBytes: 1024 * 1024,
@@ -89,7 +90,6 @@ export function testPage(
 		wasSeed: true as const,
 		redirects: [],
 		fetchedAt: "2026-01-01T00:00:00.000Z",
-		injectionSignals: [],
 		title: "Guide",
 		markdown,
 		links: [],
@@ -111,7 +111,6 @@ export function testFailure(overrides: Partial<PageFailure> = {}): PageFailure {
 		source: "crawl",
 		redirects: [],
 		fetchedAt: "2026-01-01T00:00:00.000Z",
-		injectionSignals: [],
 		markdown: "",
 		links: [],
 		contentHash: "",
@@ -133,11 +132,8 @@ export async function writeRunMetadata(
 
 export async function writeValidCorpus(outputDir: string) {
 	const page = testPage();
-	const snapshot = snapshotStats([
-		{ path: page.outputPath, body: page.rendered },
-	]);
 	const config = testConfig(outputDir);
-	const summary = buildSummary([page], [page], config, snapshot);
+	const summary = buildSummary([page], [page], config);
 	await commitRun([page], [page], summary, config);
 	return { config, page, summary };
 }

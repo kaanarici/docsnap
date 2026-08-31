@@ -1,8 +1,8 @@
 export type ResultError = {
 	code: string;
 	message: string;
+	next: string;
 	retryable: boolean;
-	suggestion: string;
 	details?: unknown;
 };
 
@@ -15,12 +15,8 @@ export function successResult<T>(
 	return { ok: true, message, next, data, error: null, warnings };
 }
 
-export function failureResult(
-	error: ResultError,
-	next = error.suggestion,
-	warnings: string[] = [],
-) {
-	const { message, suggestion: _suggestion, ...details } = error;
+export function failureResult(error: ResultError, warnings: string[] = []) {
+	const { message, next, ...details } = error;
 	return {
 		ok: false,
 		message,

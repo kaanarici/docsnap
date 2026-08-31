@@ -1,10 +1,14 @@
 import { validatePublicHttpUrl } from "../security/url.ts";
+import { InputError } from "./input-error.ts";
 import type { PipelineConfig, RunSummary } from "./types.ts";
 import { canonicalUrlSearch, looksLikeSpecificContentUrl } from "./url.ts";
 
-const defaultConcurrency = 64;
+const defaultConcurrency = 16;
+const defaultPerOrigin = 8;
 const maxUserAgentChars = 1024;
-export const defaultUserAgent =
+const maxPathPatterns = 32;
+const maxPathPatternChars = 512;
+const defaultUserAgent =
 	"Mozilla/5.0 (compatible; docsnap; +https://npmjs.com/package/docsnap)";
 export const maxGeneratedCapturePages = 2_000;
 const maxPathSlugLength = 96;
@@ -16,10 +20,11 @@ export type ConfigInput = {
 	maxExplicit?: boolean;
 	concurrency?: number;
 	clean?: boolean;
-	dryRun?: boolean;
 	pageOnly?: boolean;
 	site?: boolean;
 	cache?: boolean;
+	include?: string[];
+	exclude?: string[];
 	userAgent?: string;
 	timeoutMs?: number;
 	maxBytes?: number;
@@ -30,10 +35,10 @@ export function buildPipelineConfig(input: ConfigInput): PipelineConfig {
 	try {
 		seedUrl = parseUrl(input.seedUrl).href;
 	} catch {
-		throw new Error(`Invalid URL: ${input.seedUrl}`);
+		throw new InputError(`Invalid URL: ${input.seedUrl}`);
 	}
 	const unsafe = validatePublicHttpUrl(seedUrl);
-	if (unsafe) throw new Error(`Unsafe URL: ${unsafe}`);
+	if (unsafe) throw new InputError(`Unsafe URL: ${unsafe}`);
 
 	const max = positiveInteger(
 		input.max ?? 50,
@@ -49,6 +54,8 @@ export function buildPipelineConfig(input: ConfigInput): PipelineConfig {
 		input.maxBytes ?? 12 * 1024 * 1024,
 		"maxBytes",
 	);
+	const include = pathPatterns(input.include ?? [], "--include");
+	const exclude = pathPatterns(input.exclude ?? [], "--exclude");
 
 	const userAgent = input.userAgent ?? defaultUserAgent;
 	if (
@@ -56,7 +63,7 @@ export function buildPipelineConfig(input: ConfigInput): PipelineConfig {
 		userAgent.length > maxUserAgentChars ||
 		/[^\x20-\x7e\x80-\xff]/.test(userAgent)
 	) {
-		throw new Error(
+		throw new InputError(
 			`--user-agent must be 1 to ${maxUserAgentChars} printable characters`,
 		);
 	}
@@ -67,11 +74,12 @@ export function buildPipelineConfig(input: ConfigInput): PipelineConfig {
 		max,
 		maxExplicit: input.maxExplicit ?? input.max !== undefined,
 		concurrency,
-		perOrigin: Math.min(concurrency, defaultConcurrency),
+		perOrigin: Math.min(concurrency, defaultPerOrigin),
 		clean: input.clean ?? false,
-		dryRun: input.dryRun ?? false,
 		pageOnly: autoPageOnly(seedUrl, input),
-		cache: input.dryRun ? false : (input.cache ?? true),
+		cache: input.cache ?? true,
+		include,
+		exclude,
 		userAgent,
 		timeoutMs,
 		maxBytes,
@@ -82,7 +90,13 @@ export function buildPipelineConfig(input: ConfigInput): PipelineConfig {
 export function buildRefreshConfig(
 	prior: Pick<
 		RunSummary,
-		"seedUrl" | "max" | "maxAppliesTo" | "captureMode" | "userAgent"
+		| "seedUrl"
+		| "max"
+		| "maxAppliesTo"
+		| "captureMode"
+		| "userAgent"
+		| "include"
+		| "exclude"
 	>,
 	input: {
 		outDir: string;
@@ -98,6 +112,8 @@ export function buildRefreshConfig(
 		maxExplicit: input.max !== undefined || prior.maxAppliesTo === "all",
 		pageOnly: prior.captureMode === "page",
 		userAgent: prior.userAgent,
+		include: prior.include ?? [],
+		exclude: prior.exclude ?? [],
 		cache: input.cache,
 	};
 	if (input.concurrency !== undefined) config.concurrency = input.concurrency;
@@ -110,9 +126,38 @@ function positiveInteger(
 	max = Number.MAX_SAFE_INTEGER,
 ) {
 	if (!Number.isSafeInteger(value) || value < 1)
-		throw new Error(`${name} must be a positive integer`);
-	if (value > max) throw new Error(`${name} must be ${max} or fewer`);
+		throw new InputError(`${name} must be a positive integer`);
+	if (value > max) throw new InputError(`${name} must be ${max} or fewer`);
 	return value;
+}
+
+function pathPatterns(values: string[], flag: string) {
+	if (values.length > maxPathPatterns)
+		throw new InputError(
+			`${flag} may be repeated ${maxPathPatterns} times or fewer`,
+		);
+	const patterns = new Set<string>();
+	for (const value of values) {
+		if (
+			!value.startsWith("/") ||
+			value.length > maxPathPatternChars ||
+			value.includes("?") ||
+			value.includes("#") ||
+			[...value].some((character) => {
+				const code = character.charCodeAt(0);
+				return code < 32 || code === 127;
+			})
+		) {
+			throw new InputError(`${flag} requires a URL path glob such as /docs/**`);
+		}
+		try {
+			new Bun.Glob(value);
+		} catch {
+			throw new InputError(`Invalid ${flag} glob: ${value}`);
+		}
+		patterns.add(value);
+	}
+	return [...patterns];
 }
 
 export function discoveryAttemptLimit(config: PipelineConfig) {
@@ -140,7 +185,13 @@ function pathSlug(pathname: string) {
 
 function autoPageOnly(seedUrl: string, input: ConfigInput) {
 	if (input.pageOnly === true) return true;
-	if (input.site === true || input.max !== undefined || input.maxExplicit) {
+	if (
+		input.site === true ||
+		input.max !== undefined ||
+		input.maxExplicit ||
+		input.include?.length ||
+		input.exclude?.length
+	) {
 		return false;
 	}
 	return looksLikeSpecificContentUrl(seedUrl);

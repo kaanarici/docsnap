@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { mkdir, readdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { snapshotStats } from "../src/core/snapshot.ts";
 import type { PriorPage, PriorState } from "../src/output/prior.ts";
 import {
 	commitStagedOutput,
@@ -19,6 +18,7 @@ function priorFor(outputPath: string): PriorState {
 	const prior: PriorPage = { ...record, outputPath };
 	return {
 		enabled: true,
+		reuseGenerated: true,
 		records: [prior],
 		find: () => prior,
 	};
@@ -29,7 +29,7 @@ async function commitRemoval(prior: PriorState, root: string) {
 	const staged = await stagePages([], config);
 	try {
 		await stageStalePages(staged, prior, config);
-		const summary = buildSummary([], [], config, snapshotStats([]));
+		const summary = buildSummary([], [], config);
 		await commitStagedOutput(staged, [], summary, config);
 	} finally {
 		await discardStagedOutput(staged);

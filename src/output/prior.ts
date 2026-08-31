@@ -1,4 +1,5 @@
 import { resolveSafeRelativePath } from "../core/fs-safety.ts";
+import { hashContent } from "../core/hash.ts";
 import {
 	identityKeyGroups,
 	type identityKeys,
@@ -12,7 +13,6 @@ import {
 	jsonEnum,
 	parseJsonValue,
 } from "../core/json.ts";
-import { hashContent } from "../core/snapshot.ts";
 import type {
 	ConditionalRequest,
 	PageSuccess,
@@ -22,13 +22,11 @@ import type {
 import {
 	byteSources,
 	discoverySources,
-	filterInjectionSignals,
 	pageExtractors,
 	pageKinds,
 } from "../core/types.ts";
-import { corpusLimits, readBoundedCorpusFile } from "../corpus/access.ts";
-import { scanMarkdownForInjectionSignals } from "../security/injection.ts";
-import { runFiles } from "./files.ts";
+import { corpusGenerator, runFiles } from "./files.ts";
+import { corpusLimits, readBoundedCorpusFile } from "./read.ts";
 
 export type PriorPage = Omit<
 	PageSuccess,
@@ -44,7 +42,9 @@ export type PriorPage = Omit<
 
 export type PriorState = {
 	enabled: boolean;
-	reason?: "clean" | "missing_manifest" | "invalid_manifest";
+	reuseGenerated: boolean;
+	reason?: "clean" | "missing_manifest" | "invalid_manifest" | "seed_mismatch";
+	seedUrl?: string;
 	records: PriorPage[];
 	find(input: Parameters<typeof identityKeys>[0]): PriorPage | undefined;
 };
@@ -73,11 +73,22 @@ export async function loadPrior(config: PipelineConfig): Promise<PriorState> {
 				corpusLimits.summaryBytes,
 			),
 		]);
-		const records = parsePriorManifest(text, config);
-		if (!priorMatchesSummary(summaryText, records, config.seedUrl)) {
+		const manifest = parsePriorManifest(text, config);
+		const summary = parseJsonValue(summaryText);
+		const summarySeed =
+			isJsonObject(summary) && isJsonString(summary["seedUrl"])
+				? summary["seedUrl"]
+				: undefined;
+		if (summarySeed && summarySeed !== config.seedUrl) {
+			return disabled("seed_mismatch", summarySeed);
+		}
+		if (!priorMatchesSummary(summary, manifest.records, config.seedUrl)) {
 			throw new Error("manifest and summary disagree");
 		}
-		return enabled(records);
+		return enabled(
+			manifest.records,
+			isJsonObject(summary) && summary["generator"] === corpusGenerator,
+		);
 	} catch (error) {
 		if (
 			error instanceof Error &&
@@ -94,7 +105,7 @@ export function conditionalRequestForPrior(
 	prior: PriorState,
 	input: Parameters<typeof identityKeys>[0],
 ): ConditionalRequest | undefined {
-	if (!prior.enabled) return undefined;
+	if (!prior.enabled || !prior.reuseGenerated) return undefined;
 	const record = prior.find(input);
 	if (
 		!record ||
@@ -133,14 +144,9 @@ export async function recoverPriorPage(
 	void linksCount;
 	void linksTruncated;
 	void outputHash;
-	const recoveredSignals = filterInjectionSignals([
-		...record.injectionSignals,
-		...scanMarkdownForInjectionSignals(markdown),
-	]);
 	const recovered: PageSuccess = {
 		...record,
 		links: record.links ?? [],
-		injectionSignals: recoveredSignals,
 		markdown,
 		fetchedAt:
 			record.fetchedAt ?? updates.fetchedAt ?? new Date().toISOString(),
@@ -165,30 +171,38 @@ export async function readPriorOutput(
 	}
 }
 
-function enabled(records: PriorPage[]): PriorState {
+function enabled(records: PriorPage[], reuseGenerated: boolean): PriorState {
 	const index = buildIndex(records);
 	return {
 		enabled: true,
+		reuseGenerated,
 		records,
 		find: (input) => findPrior(index, input),
 	};
 }
 
-function disabled(reason: NonNullable<PriorState["reason"]>): PriorState {
-	return {
+function disabled(
+	reason: NonNullable<PriorState["reason"]>,
+	seedUrl?: string,
+): PriorState {
+	const prior: PriorState = {
 		enabled: false,
+		reuseGenerated: false,
 		reason,
 		records: [],
 		find: () => undefined,
 	};
+	if (seedUrl) prior.seedUrl = seedUrl;
+	return prior;
 }
 
-function parsePriorManifest(text: string, config: PipelineConfig): PriorPage[] {
+function parsePriorManifest(text: string, config: PipelineConfig) {
 	const lines = text.split(/\n/).filter((line) => line.trim());
 	const pages: PriorPage[] = [];
 	const outputPaths = new Set<string>();
 	for (const line of lines) {
-		const record = parseReusablePrior(parseJsonValue(line), config);
+		const value = parseJsonValue(line);
+		const record = parseReusablePrior(value, config);
 		if (!record) continue;
 		if (outputPaths.has(record.outputPath)) {
 			throw new Error("duplicate manifest output path");
@@ -196,15 +210,14 @@ function parsePriorManifest(text: string, config: PipelineConfig): PriorPage[] {
 		outputPaths.add(record.outputPath);
 		pages.push(record);
 	}
-	return pages;
+	return { records: pages };
 }
 
 function priorMatchesSummary(
-	summaryText: string,
+	summary: JsonValue,
 	records: PriorPage[],
 	seedUrl: string,
 ): boolean {
-	const summary = parseJsonValue(summaryText);
 	if (
 		!isJsonObject(summary) ||
 		!isJsonNumber(summary["written"]) ||
@@ -220,7 +233,7 @@ function priorMatchesSummary(
 	);
 }
 
-export function parseReusablePrior(
+function parseReusablePrior(
 	value: JsonValue,
 	config: OutputRoot,
 ): PriorPage | undefined {
@@ -252,7 +265,6 @@ export function parseReusablePrior(
 		source,
 		extractor,
 		redirects,
-		injectionSignals: filterInjectionSignals(value["injectionSignals"]),
 		qualityReasons: stringArray(value["qualityReasons"]) ?? [],
 	};
 	if (isJsonString(value["fetchedAt"])) record.fetchedAt = value["fetchedAt"];
@@ -361,7 +373,7 @@ function findPrior(
 	return undefined;
 }
 
-export function markdownFromRendered(rendered: string): string {
+function markdownFromRendered(rendered: string): string {
 	let markdown = rendered;
 	if (!rendered.startsWith("---\n")) {
 		return rendered.endsWith("\n") ? rendered.slice(0, -1) : rendered;

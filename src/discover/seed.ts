@@ -93,17 +93,19 @@ async function fetchPageSeed(
 	pageSeed: string,
 	conditional?: ConditionalRequest,
 	signal?: AbortSignal,
+	preferMarkdown = true,
 ): Promise<DiscoveredUrl> {
 	const options = signal ? { signal } : undefined;
 	let fetched = await fetchText(
 		pageSeed,
 		config,
-		preferredMarkdownAccept,
+		preferMarkdown ? preferredMarkdownAccept : undefined,
 		conditional,
 		undefined,
 		options,
 	);
 	if (
+		preferMarkdown &&
 		fetched.ok &&
 		!fetched.notModified &&
 		!fetched.document &&

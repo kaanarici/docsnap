@@ -20,6 +20,7 @@ class FakeView implements BrowserView {
 	}
 
 	async evaluate(expression: string) {
+		this.calls.push({ method: "evaluate", params: { expression } });
 		if (!this.renderedUrl) throw new Error("render unavailable");
 		if (expression.includes("pendingFrames"))
 			return [true, 120, 1, false, 1, 0];
@@ -43,40 +44,11 @@ class FakeView implements BrowserView {
 	}
 }
 
-test("cleans up before restoring default signal termination", async () => {
+test("does not install process signal handlers", async () => {
 	const before = new Set(process.listeners("SIGTERM"));
-	const view = new FakeView();
-	const renderer = new ChromiumRenderer(view, testConfig("unused"));
+	const renderer = new ChromiumRenderer(new FakeView(), testConfig("unused"));
 	try {
-		const handler = process
-			.listeners("SIGTERM")
-			.find((listener) => !before.has(listener));
-		expect(handler).toBeDefined();
-
-		const killDescriptor = Object.getOwnPropertyDescriptor(process, "kill");
-		if (!killDescriptor) throw new Error("process.kill descriptor unavailable");
-		let raised: NodeJS.Signals | undefined;
-		let cleanedBeforeRaise = false;
-		const { promise: reraised, resolve: resolveRaised } =
-			Promise.withResolvers<void>();
-		Object.defineProperty(process, "kill", {
-			configurable: true,
-			writable: true,
-			value: (_pid: number, signal?: NodeJS.Signals | number) => {
-				raised = signal === "SIGTERM" ? signal : undefined;
-				cleanedBeforeRaise = view.closed;
-				resolveRaised();
-				return true;
-			},
-		});
-		try {
-			handler?.("SIGTERM");
-			await reraised;
-			expect(raised).toBe("SIGTERM");
-			expect(cleanedBeforeRaise).toBe(true);
-		} finally {
-			Object.defineProperty(process, "kill", killDescriptor);
-		}
+		expect(process.listeners("SIGTERM")).toEqual([...before]);
 	} finally {
 		await renderer.close();
 	}
@@ -143,13 +115,6 @@ test("clears browser state before reusing the view", async () => {
 			origin: "https://docs.example.com",
 			storageTypes: "all",
 		});
-		expect(
-			view.calls.filter(
-				(call) =>
-					call.method === "Emulation.setVirtualTimePolicy" &&
-					call.params["policy"] === "advance",
-			),
-		).toHaveLength(2);
 	} finally {
 		await renderer.close();
 	}

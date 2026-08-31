@@ -64,7 +64,11 @@ export type ChromiumRenderMetrics = {
 };
 
 export type ChromiumRenderResult =
-	| { ok: true; result: FetchResult; metrics: ChromiumRenderMetrics }
+	| {
+			ok: true;
+			result: FetchResult;
+			metrics: ChromiumRenderMetrics;
+	  }
 	| {
 			ok: false;
 			kind: "timeout" | "render";
@@ -115,8 +119,9 @@ export async function openChromiumRenderer(
 			evaluate: (script) => current.evaluate<JsonValue | undefined>(script),
 			addEventListener: (type, listener) =>
 				current.addEventListener(String(type), (event) => {
-					if (event instanceof MessageEvent && isJsonObject(event.data))
-						listener({ data: event.data });
+					const data = "data" in event ? event.data : undefined;
+					if (data && typeof data === "object" && !Array.isArray(data))
+						listener({ data: data as JsonObject });
 				}),
 			close: () => current.close(),
 		};
@@ -136,11 +141,11 @@ export class ChromiumRenderer {
 	private run: Run | undefined;
 	private closed = false;
 	private ready: Promise<void> | undefined;
-	private queue: Promise<void> = Promise.resolve();
 	private readonly dirtyOrigins = new Set<string>();
 	private active = 0;
 	private readonly waiters: Array<() => void> = [];
-	private readonly signalHandlers = new Map<"SIGINT" | "SIGTERM", () => void>();
+	private cdpQueue: Promise<void> = Promise.resolve();
+	private evaluationQueue: Promise<void> = Promise.resolve();
 	constructor(
 		private readonly view: BrowserView,
 		private readonly config: PipelineConfig,
@@ -151,13 +156,6 @@ export class ChromiumRenderer {
 		view.addEventListener("Fetch.requestPaused", (event) => {
 			void this.onPaused(event.data);
 		});
-		for (const signal of ["SIGINT", "SIGTERM"] as const) {
-			const handler = () => {
-				void this.close().finally(() => process.kill(process.pid, signal));
-			};
-			this.signalHandlers.set(signal, handler);
-			process.once(signal, handler);
-		}
 	}
 
 	start() {
@@ -167,7 +165,10 @@ export class ChromiumRenderer {
 
 	async renderPage(
 		shell: FetchResult,
-		options: { signal?: AbortSignal; explicitSeed?: boolean } = {},
+		options: {
+			signal?: AbortSignal;
+			explicitSeed?: boolean;
+		} = {},
 	): Promise<ChromiumRenderResult> {
 		const started = performance.now();
 		if (this.closed)
@@ -207,7 +208,7 @@ export class ChromiumRenderer {
 		try {
 			await this.prepare(run.signal);
 			await awaitWithSignal(this.view.navigate(startUrl), run.signal);
-			await this.settle(run);
+			await this.settle(run, true);
 			const page = renderedPageValue(
 				await this.evaluate(
 					renderedPageExpression(this.config.maxBytes),
@@ -283,9 +284,6 @@ export class ChromiumRenderer {
 	async close() {
 		if (this.closed) return;
 		this.closed = true;
-		for (const [signal, handler] of this.signalHandlers)
-			process.off(signal, handler);
-		this.signalHandlers.clear();
 		this.view.close();
 	}
 
@@ -556,11 +554,6 @@ export class ChromiumRenderer {
 
 	private async prepare(signal: AbortSignal) {
 		await awaitWithSignal(this.start(), signal);
-		await this.send(
-			"Emulation.setVirtualTimePolicy",
-			{ policy: "advance" },
-			signal,
-		);
 		await this.send("Network.clearBrowserCookies", {}, signal);
 		await this.send("Network.clearBrowserCache", {}, signal);
 		for (const origin of this.dirtyOrigins) {
@@ -586,13 +579,12 @@ export class ChromiumRenderer {
 		}
 	}
 
-	private async settle(run: Run) {
+	private async settle(run: Run, requireContent = true) {
 		const started = performance.now();
 		const budget = Math.min(4_000, this.config.timeoutMs);
 		let stableSince = started;
 		let fingerprint = -1;
-		let advanced = false;
-		let substantiveSince = 0;
+		let readySince = 0;
 		while (!run.signal.aborted) {
 			const state = shellStateValue(
 				await this.evaluate(shellStateExpression, run.signal),
@@ -615,27 +607,14 @@ export class ChromiumRenderer {
 			const captureReady =
 				ready &&
 				!loading &&
-				substantive &&
+				(!requireContent || substantive) &&
 				(pendingFrames === 0 || now - started >= 1_000);
-			if (captureReady) substantiveSince ||= now;
-			else substantiveSince = 0;
-			if (ready && !advanced && run.inflight === 0) {
-				advanced = true;
-				await this.send(
-					"Emulation.setVirtualTimePolicy",
-					{
-						policy: "pauseIfNetworkFetchesPending",
-						budget: 3_000,
-						maxVirtualTimeTaskStarvationCount: 100,
-					},
-					run.signal,
-				);
-				continue;
-			}
+			if (captureReady) readySince ||= now;
+			else readySince = 0;
 			if (
 				captureReady &&
 				now - stableSince >= 750 &&
-				((advanced && run.inflight === 0) || now - substantiveSince >= 3_000)
+				(run.inflight === 0 || now - readySince >= 3_000)
 			) {
 				if (run.inflight > 0 || pendingFrames > 0) run.truncated = true;
 				return;
@@ -653,7 +632,14 @@ export class ChromiumRenderer {
 		expression: string,
 		signal: AbortSignal,
 	): Promise<JsonValue | undefined> {
-		return this.enqueue(() => this.view.evaluate(expression), signal);
+		const pending = this.evaluationQueue.then(() =>
+			this.view.evaluate(expression),
+		);
+		this.evaluationQueue = pending.then(
+			() => undefined,
+			() => undefined,
+		);
+		return await awaitWithSignal(pending, signal);
 	}
 
 	private async send(
@@ -661,24 +647,17 @@ export class ChromiumRenderer {
 		params: JsonObject = {},
 		signal?: AbortSignal,
 	): Promise<JsonObject> {
-		const value = await this.enqueue(
-			() => this.view.cdp(method, params),
-			signal,
-		);
-		if (!isJsonObject(value)) throw new Error(`CDP ${method}: invalid result`);
-		return value;
-	}
-
-	private async enqueue<T>(task: () => Promise<T>, signal?: AbortSignal) {
-		const pending = this.queue.then(task);
-		this.queue = pending.then(
+		const pending = this.cdpQueue.then(() => this.view.cdp(method, params));
+		this.cdpQueue = pending.then(
 			() => undefined,
 			() => undefined,
 		);
-		return await awaitWithSignal(
+		const value = await awaitWithSignal(
 			pending,
 			signal ?? AbortSignal.timeout(15_000),
 		);
+		if (!isJsonObject(value)) throw new Error(`CDP ${method}: invalid result`);
+		return value;
 	}
 
 	private failure(

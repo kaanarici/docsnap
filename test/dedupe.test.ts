@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 import { dedupeRecords } from "../src/core/dedupe.ts";
-import { snapshotStats } from "../src/core/snapshot.ts";
 import { buildSummary } from "../src/report/summary.ts";
 import { testConfig, testPage } from "./fixtures.ts";
 
@@ -36,7 +35,6 @@ test("keeps the requested seed record on an identity collision", () => {
 		[output],
 		[output],
 		testConfig("unused", { seedUrl }),
-		snapshotStats([{ path: output.outputPath, body: output.rendered }]),
 	);
 	expect(summary.seed.redirected).toBeUndefined();
 });

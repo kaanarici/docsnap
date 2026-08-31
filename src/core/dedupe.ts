@@ -55,9 +55,6 @@ function mergeRecord(target: PageSuccess, duplicate: PageSuccess) {
 	target.links = [...new Set([...target.links, ...duplicate.links])]
 		.slice(0, maxGeneratedCapturePages)
 		.sort();
-	target.injectionSignals = [
-		...new Set([...target.injectionSignals, ...duplicate.injectionSignals]),
-	];
 }
 
 function betterRecord(a: PageSuccess, b: PageSuccess) {
