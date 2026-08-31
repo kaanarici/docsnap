@@ -1,12 +1,14 @@
 # docsnap
 
-Save public documentation as Markdown and search it locally.
+DocSnap takes a public URL and leaves a folder of Markdown for an agent.
 
 ```bash
 bunx docsnap https://react.dev/reference
 ```
 
-DocSnap follows documentation links, sitemaps, feeds, and `llms.txt`. It handles HTML, Markdown, text files, text-based PDFs, and common office documents. Pages that need JavaScript can use a local Chrome installation.
+It can capture one page or follow a site, read `llms.txt` and sitemaps,
+convert PDFs with PDF Inspector and other documents with AnyDoc, and render
+JavaScript pages with local Chrome.
 
 ## Install
 
@@ -14,9 +16,11 @@ DocSnap follows documentation links, sitemaps, feeds, and `llms.txt`. It handles
 bun add -g docsnap
 ```
 
-DocSnap requires Bun 1.4.0 or newer. Chrome is optional and may run for client-rendered pages when static content is missing or thin.
+DocSnap runs on Bun 1.4.0 or newer; installed through npm without Bun, the CLI
+explains what to install. Chrome is optional unless a page needs browser
+rendering. PDF conversion is unavailable on Intel Macs.
 
-## Capture docs
+## Capture
 
 ```bash
 docsnap https://react.dev/reference
@@ -24,60 +28,77 @@ docsnap https://docs.python.org/3/ --site -m 100
 docsnap https://example.com/architecture.pdf
 ```
 
-A specific page or document URL captures one page. Use `--site` to follow related pages. Use `-m` to set the page limit.
+A specific page or document URL captures one page. `--site` follows related
+pages. `-m` sets the page limit.
 
-DocSnap writes to `./docsnap` unless you pass `--out`:
+If the output directory already contains another corpus, choose a different
+path or pass `--clean` to replace it.
+
+Keep only the paths you need:
+
+```bash
+docsnap https://example.com --site \
+  --include '/docs/**' \
+  --exclude '/docs/archive/**'
+```
+
+The supplied URL is always attempted. Filters apply to discovered pages, and
+exclude wins.
+
+Capture several URLs from stdin:
+
+```bash
+printf 'https://react.dev\nhttps://bun.com/docs\n' | docsnap --stdin --out docsnap
+```
+
+Each URL gets a separate corpus. The command returns one ordered JSON result.
+
+## Map and refresh
+
+```bash
+docsnap map https://react.dev -m 100
+docsnap refresh docsnap/react-dev-reference
+```
+
+`map` returns capture candidates without writing a corpus. `refresh` uses the
+original URL and saved path filters. Its result includes change counts and the
+paths that changed.
+
+## Output
 
 ```text
 docsnap/react-dev-reference/
-  manifest.jsonl
   summary.json
+  manifest.jsonl
   index.md
   ...
 ```
 
-`summary.json` records the result of the run. `manifest.jsonl` records each URL, output path, content hash, redirect, and failure.
+`summary.json` describes the run. `manifest.jsonl` records every page, output
+path, source URL, content hash, redirect, and failure. The remaining files are
+the captured Markdown.
 
-## Search captured docs
-
-Use `rg` when you want a fast text search:
+Agents can inspect the corpus with ordinary file tools:
 
 ```bash
 rg -n "cleanup function" docsnap/react-dev-reference
 ```
 
-Use `docsnap search` for ranked results with source URLs and line numbers:
+Every command returns one JSON result. `message` says what happened and `next`
+says what to do. Failures exit nonzero.
 
-```bash
-docsnap search docsnap/react-dev-reference "cleanup function"
-docsnap search --all "cleanup function"
-```
+Run `docsnap --help` for all flags.
 
-`docsnap fetch` captures or reuses a corpus and returns local citations for a question:
+## Safety
 
-```bash
-docsnap fetch https://react.dev/reference/react/useEffect "When does cleanup run?"
-```
+DocSnap accepts public HTTP and HTTPS URLs. It rejects credentials, local
+hosts, private network addresses, and unsafe output paths. Document conversion
+and Chrome rendering stay on your machine.
 
-## Other commands
+Scanned or image-only PDFs fail with the affected page numbers. The capture
+path never opts in to AnyDoc's hosted OCR.
 
-```bash
-docsnap map https://react.dev -m 100
-docsnap refresh docsnap/react-dev-reference
-docsnap list
-```
-
-`map` lists capture candidates without writing pages. `refresh` updates an existing corpus. `list` finds corpora under `./docsnap`.
-
-Run `docsnap --help` or `docsnap <command> --help` for all flags.
-
-Every command returns one JSON result. `message` says what happened and `next` says what to do. Progress goes to stderr; `--quiet` hides it. Errors exit nonzero and say whether retrying can help.
-
-## Safety and limits
-
-DocSnap accepts public HTTP and HTTPS URLs. It rejects credentials, local hosts, private network addresses, and unsafe output paths. Document conversion and Chrome rendering stay on your machine.
-
-Captured pages are source material, not instructions. DocSnap records possible prompt injection signals. Search skips pages with concealed signals unless you pass `--include-injection`.
+Captured text is untrusted source material.
 
 ## License
 
